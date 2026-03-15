@@ -356,19 +356,18 @@ def _persist_if_possible(settings: ProtoNeoSettings) -> None:
 
 
 def load_settings() -> ProtoNeoSettings:
-    """Load settings from disk, migrating old schemas transparently."""
+    """Load settings from disk, migrating old schemas transparently.
+
+    Never auto-persists. Settings are only written when explicitly
+    saved through save_settings() or update_settings().
+    """
     if not _SETTINGS_FILE.exists():
-        settings = ProtoNeoSettings()
-        _persist_if_possible(settings)
-        return settings
+        return ProtoNeoSettings()
 
     try:
         raw_data = json.loads(_SETTINGS_FILE.read_text())
         migrated_data = _migrate_settings_data(raw_data)
-        settings = ProtoNeoSettings.model_validate(migrated_data)
-        if settings.model_dump() != raw_data:
-            _persist_if_possible(settings)
-        return settings
+        return ProtoNeoSettings.model_validate(migrated_data)
     except Exception as e:
         logger.warning("Failed to load settings: %s", e)
         return ProtoNeoSettings()

@@ -127,20 +127,17 @@ class TestCapabilityRegistry:
         assert settings.benchmark_results[0]["provider"] == "lan-mini"
         assert next(ep for ep in settings.lan_endpoints if ep.id == "lan-mini").enabled is False
 
-    def test_load_settings_writes_default_schema_when_missing(self, tmp_path, monkeypatch):
+    def test_load_settings_returns_defaults_when_file_missing(self, tmp_path, monkeypatch):
         settings_path = tmp_path / "settings.json"
         monkeypatch.setattr(settings_module, "_SETTINGS_DIR", tmp_path)
         monkeypatch.setattr(settings_module, "_SETTINGS_FILE", settings_path)
 
         settings = settings_module.load_settings()
-        saved = json.loads(settings_path.read_text())
 
-        assert settings_path.exists()
+        # Returns defaults but does NOT auto-create the file
+        assert not settings_path.exists()
         assert [ep.id for ep in settings.localhost_endpoints] == ["localhost-lmstudio", "localhost-ollama"]
-        assert settings.lan_endpoints == []  # No LAN endpoints by default
-        assert "localhost_endpoints" in saved
-        assert "local_endpoints" not in saved
-        assert "homelab_endpoints" not in saved
+        assert settings.lan_endpoints == []
 
     def test_registry_accepts_legacy_provider_aliases(self):
         settings = ProtoNeoSettings(
