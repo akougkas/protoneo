@@ -361,22 +361,33 @@ async def _run_graph_pipeline(
         })
 
         conference_context = f"{profile.name}: {profile.scope_text()}"
-        ontology_model = model_map.get("ontology") or model_map.get("graph")
-        if not ontology_model:
-            # Use first active model from settings, then fall back to agent config models
+
+        # Resolve per-step graph models from the model_map.
+        # Falls back to first active model from settings, then agent configs.
+        def _resolve_graph_model(step_key: str) -> str:
+            m = model_map.get(step_key)
+            if m:
+                return m
+            # Fall back to a shared graph model or first available
+            m = model_map.get("ontology") or model_map.get("graph")
+            if m:
+                return m
             try:
                 from protoneo.llm.settings import load_settings as _ls
                 _active = (_ls().active_models or {})
                 for _prov, _mid in _active.items():
                     if _mid:
-                        ontology_model = f"{_prov}/{_mid}"
-                        break
+                        return f"{_prov}/{_mid}"
             except Exception:
                 pass
-        if not ontology_model:
-            ontology_model = next(
+            return next(
                 (c.model for c in agent_configs.values() if c.model), ""
             )
+
+        ontology_model = _resolve_graph_model("ontology")
+        extraction_model = _resolve_graph_model("extraction")
+        coref_model = _resolve_graph_model("coref")
+        verification_model = _resolve_graph_model("verification")
 
         ontology = await generate_paper_ontology(
             doc.text, _llm_client, model=ontology_model,
@@ -422,7 +433,7 @@ async def _run_graph_pipeline(
         })
 
         graph_data = await extract_paper_graph(
-            doc.text, _llm_client, model=ontology_model,
+            doc.text, _llm_client, model=extraction_model,
             session_id=sid,
             on_progress=lambda evt, data: bus.emit(evt, data),
             ontology=ontology,
@@ -441,7 +452,7 @@ async def _run_graph_pipeline(
             session.pipeline_steps["extract"] = StepState(
                 status="complete", started_at=step_start,
                 completed_at=_time.monotonic(),
-                model_used=ontology_model,
+                model_used=extraction_model,
                 nodes_added=len(paper_graph.nodes) - nodes_before,
                 edges_added=len(paper_graph.edges),
             ).model_dump()
@@ -458,7 +469,7 @@ async def _run_graph_pipeline(
 
         coref_stats = await resolve_coreferences(
             paper_graph, _llm_client,
-            model=ontology_model, session_id=sid,
+            model=coref_model, session_id=sid,
         )
 
         bus.emit("coref_complete", {
@@ -482,7 +493,7 @@ async def _run_graph_pipeline(
             session.pipeline_steps["coref"] = StepState(
                 status="complete", started_at=step_start,
                 completed_at=_time.monotonic(),
-                model_used=ontology_model,
+                model_used=coref_model,
             ).model_dump()
             session.graph_after_step["coref"] = paper_graph.snapshot()
             await _session_manager.update(session)
@@ -497,7 +508,7 @@ async def _run_graph_pipeline(
 
         verification = await verify_graph(
             paper_graph, doc.text, _llm_client,
-            model=ontology_model, session_id=sid,
+            model=verification_model, session_id=sid,
         )
 
         bus.emit("verify_complete", {
@@ -523,7 +534,7 @@ async def _run_graph_pipeline(
             session.pipeline_steps["verify"] = StepState(
                 status="complete", started_at=step_start,
                 completed_at=_time.monotonic(),
-                model_used=ontology_model,
+                model_used=verification_model,
                 entities_flagged=verification.entities_flagged,
             ).model_dump()
             session.graph_after_step["verify"] = paper_graph.snapshot()

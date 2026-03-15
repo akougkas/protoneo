@@ -755,10 +755,13 @@ async function doLaunchReview() {
   launching.value = true
   launchError.value = ''
   try {
-    // Build model map from only enabled agents
+    // Build model map from enabled agents + graph processing steps
     const enabledMap = {}
     for (const pa of panelAgents.value) {
       if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
+    }
+    for (const step of graphSteps) {
+      if (modelMap[step.id]) enabledMap[step.id] = normalizeModelId(modelMap[step.id])
     }
     const res = await startPanelReview(
       selectedFile.value,
