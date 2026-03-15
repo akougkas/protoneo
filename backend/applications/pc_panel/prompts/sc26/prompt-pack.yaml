@@ -1,0 +1,64 @@
+conference: sc26
+mode: author_pre_submission
+version: 0.1.0
+
+composition:
+  shared: "prompts/sc26/shared.md"
+  roles:
+    technical:
+      path: "prompts/sc26/technical.md"
+      phase: independent_review
+      default_model_hint: "claude-opus-4-6"
+    systems:
+      path: "prompts/sc26/systems.md"
+      phase: independent_review
+      default_model_hint: "gemini/gemini-3.1-pro-preview"
+    novelty:
+      path: "prompts/sc26/novelty.md"
+      phase: independent_review
+      default_model_hint: "openai/gpt-4o"
+    skeptic:
+      path: "prompts/sc26/skeptic.md"
+      phase: independent_review
+      default_model_hint: "ollama/qwen3:32b"
+    meta:
+      path: "prompts/sc26/meta.md"
+      phase: meta_review
+      default_model_hint: "claude-opus-4-6"
+
+inputs:
+  required:
+    - conference_profile
+    - manuscript_text
+    - manuscript_sections
+  optional:
+    - preflight_report
+    - appendix_text
+    - prior_reviews
+    - deliberation_history
+    - figure_table_index
+
+review_scales:
+  overall_merit:
+    range: [1, 5]
+    labels:
+      1: Strong reject
+      2: Reject
+      3: Borderline
+      4: Accept
+      5: Strong accept
+  expertise:
+    range: [1, 4]
+    labels:
+      1: No familiarity
+      2: Some familiarity
+      3: Knowledgeable
+      4: Expert
+
+guardrails:
+  dual_anonymous: true
+  no_identity_speculation: true
+  no_chain_of_thought: true
+  require_grounding: true
+  position_as_simulated_panel: true
+  position_as_author_facing: true

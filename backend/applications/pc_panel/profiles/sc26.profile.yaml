@@ -1,0 +1,169 @@
+conference:
+  slug: sc26
+  name: "International Conference for High Performance Computing, Networking, Storage, and Analysis"
+  short_name: "SC '26"
+  location: "St. Louis, Missouri, United States"
+  dates: "2026-11-15 to 2026-11-20"
+  paper_types:
+    - id: technical
+      label: "Technical Paper"
+    - id: experience
+      label: "Experience Paper"
+    - id: state_of_practice
+      label: "State of the Practice"
+
+scope:
+  summary: >-
+    Premier international venue for innovations in HPC, networking, storage,
+    and analysis at the intersection of science and engineering. SC accepts
+    three paper types with distinct evaluation criteria: technical papers
+    (novel contributions), experience papers (lessons from deployment at
+    scale), and state-of-the-practice papers (practical relevance).
+  must_show_scope_connection: true
+  topics:
+    - algorithms and applications at scale
+    - architectures and accelerators
+    - cloud and distributed computing
+    - compilers and programming models
+    - data analytics, machine learning, and scientific visualization
+    - emerging technologies (quantum, neuromorphic, photonic)
+    - file and storage systems
+    - networking and communication
+    - operating and runtime systems
+    - performance measurement and modeling
+    - power and energy management
+    - system software and resource management
+    - workflows and reproducibility
+
+submission:
+  max_pages_excluding_references: 12
+  camera_ready_extra_pages: 2
+  format: "IEEE"
+  dual_anonymous: true
+  require_paper_type_in_title: false
+  optional_appendix:
+    artifact_description_or_evaluation: true
+    max_pages: 4
+
+review_form:
+  overall_merit:
+    scale: [1, 5]
+    labels:
+      1: Strong reject
+      2: Reject
+      3: Borderline
+      4: Accept
+      5: Strong accept
+  reviewer_expertise:
+    scale: [1, 4]
+    labels:
+      1: No familiarity
+      2: Some familiarity
+      3: Knowledgeable
+      4: Expert
+  sections:
+    - paper_summary
+    - strengths
+    - weaknesses
+    - questions_for_authors
+    - comments_for_authors
+    - comments_for_pc
+
+preflight_checks:
+  - scope_fit
+  - page_limit
+  - anonymization
+  - required_sections
+  - limitations_present
+  - reproducibility_statement
+  - experimental_scale_appropriate
+
+panel:
+  pattern: independent_synthesis
+  deliberation_rounds: 2
+  phases:
+    - independent_review
+    - deliberation
+    - meta_review
+  agents:
+    technical:
+      role: "Technical Depth Reviewer"
+      focus:
+        - algorithmic correctness and theoretical grounding
+        - scalability analysis across node counts and problem sizes
+        - experimental methodology and statistical rigor
+        - baseline comparisons against current state of the art
+        - whether results generalize beyond the specific testbed
+    systems:
+      role: "Systems and Architecture Reviewer"
+      focus:
+        - system design and architectural decisions
+        - implementation quality and engineering rigor
+        - hardware utilization efficiency (compute, memory, network, storage)
+        - performance engineering practices
+        - deployment feasibility at production HPC scale
+    novelty:
+      role: "Novelty and Impact Reviewer"
+      focus:
+        - originality of contribution to the HPC community
+        - significance and potential for long-term impact
+        - positioning against state of the art
+        - whether the paper advances practice, not just theory
+    skeptic:
+      role: "Adversarial Skeptic"
+      focus:
+        - overclaiming relative to experimental evidence
+        - missing ablations or sensitivity analyses
+        - unsupported generalizations from limited testbeds
+        - hidden assumptions about hardware, workloads, or scale
+        - reproducibility gaps and missing experimental details
+    meta_reviewer:
+      role: "Meta-Reviewer"
+      focus:
+        - synthesis of all reviews into coherent assessment
+        - consensus and disagreement analysis
+        - paper type evaluation (technical vs experience vs state-of-practice)
+        - final recommendation with justification
+        - prioritized revision plan for authors
+  optional_agents:
+    artifact:
+      role: "Artifact and Reproducibility Reviewer"
+      focus:
+        - artifact description completeness
+        - reproducibility of reported results
+        - code, data, and environment availability
+        - whether results can be independently verified
+    scalability:
+      role: "Scalability and Performance Reviewer"
+      focus:
+        - strong and weak scaling behavior
+        - performance at production HPC scale
+        - communication and synchronization overhead
+        - comparison with theoretical performance bounds
+
+output:
+  author_packet_sections:
+    - venue_fit
+    - paper_type_assessment
+    - preflight_warnings
+    - individual_reviews
+    - deliberation_summary
+    - meta_review
+    - decision_risk_notes
+    - revision_plan
+  export_formats:
+    - markdown
+    - pdf
+    - json
+
+responsible_ai:
+  intended_user: "manuscript_author"
+  positioning: "pre-submission author feedback tool"
+  reviewer_outsourcing_positioning: false
+  require_grounded_citations: true
+  encourage_local_or_byok_models: true
+  manuscript_retention_default: "configurable_minimal"
+  disclosure_note: >-
+    This is a simulated review for author self-improvement before submission.
+    Authors remain responsible for correctness, accuracy, and any venue-specific
+    AI disclosure requirements.
