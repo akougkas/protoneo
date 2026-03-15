@@ -69,12 +69,28 @@ class BaseAgent:
 
         System prompt comes first, then prior context messages (if the
         deliberation is "open" visibility), then the current user message.
+
+        Enforces strict user/assistant alternation required by some model
+        templates (e.g., Qwen on LM Studio). Consecutive same-role messages
+        are merged into one.
         """
         msgs: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
 
-        if include_history:
+        if include_history and context.messages:
             for m in context.messages:
-                msgs.append({"role": m.role, "content": m.content})
+                role = m.role if m.role in ("user", "assistant") else "assistant"
+                if msgs and msgs[-1]["role"] == role:
+                    msgs[-1]["content"] += "\n\n" + m.content
+                else:
+                    msgs.append({"role": role, "content": m.content})
+
+            # Ensure history ends with assistant so the next user message
+            # creates proper alternation
+            if msgs[-1]["role"] == "user":
+                last_user = msgs.pop()
+                user_message_content = last_user["content"] + "\n\n" + user_message.content
+                msgs.append({"role": "user", "content": user_message_content})
+                return msgs
 
         msgs.append({"role": "user", "content": user_message.content})
         return msgs
