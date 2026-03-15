@@ -182,16 +182,18 @@ async def _run_pc_chair_review(
         + "\n\n---\n\n".join(review_summaries)
     )
 
-    chair_model = ""
     agent_cfgs = session.config.get("agents", {})
     meta_cfg = agent_cfgs.get("meta", {})
+    chair_model = ""
     if isinstance(meta_cfg, dict):
         chair_model = meta_cfg.get("model", "")
+    # Fall back to any reviewer model (never silently pick a cloud model)
     if not chair_model:
         for cfg in agent_cfgs.values():
             if isinstance(cfg, dict) and cfg.get("model"):
                 chair_model = cfg["model"]
                 break
+    logger.info("PC Chair using model: %s", chair_model)
 
     bus.emit("agent_start", {
         "agent_id": "pc_chair", "role": "PC Chair", "model": chair_model,
@@ -265,7 +267,7 @@ async def _run_graph_pipeline(
     When graph_only=True: runs Steps 1-7, sets session.status = "completed", returns.
     When graph_only=False: runs Steps 1-7, waits at gate, then runs review stage.
     """
-    from protoneo.knowledge.metadata import extract_metadata
+    from protoneo.knowledge.metadata import extract_metadata, extract_metadata_from_markdown
     from protoneo.api.routes import get_pipeline_controls
 
     _session_manager = get_session_manager()
@@ -312,7 +314,10 @@ async def _run_graph_pipeline(
             "message": "Running NLP pre-pass: metadata, citations, equations...",
         })
 
-        metadata = extract_metadata(doc.text)
+        if doc.markdown:
+            metadata = extract_metadata_from_markdown(doc.markdown, doc.text)
+        else:
+            metadata = extract_metadata(doc.text)
         paper_graph.ingest_metadata(metadata)
 
         bus.emit("metadata_extracted", {
@@ -389,10 +394,15 @@ async def _run_graph_pipeline(
         coref_model = _resolve_graph_model("coref")
         verification_model = _resolve_graph_model("verification")
 
+        logger.info(
+            "Model map keys: %s | Resolved: ontology=%s extraction=%s coref=%s verify=%s",
+            list(model_map.keys()), ontology_model, extraction_model, coref_model, verification_model,
+        )
+
         ontology = await generate_paper_ontology(
             doc.text, _llm_client, model=ontology_model,
             session_id=sid, conference_context=conference_context,
-            metadata=metadata,
+            metadata=metadata, markdown=doc.markdown,
         )
         paper_graph.ontology = ontology
         paper_graph.add_ontology_nodes(ontology)
@@ -438,6 +448,7 @@ async def _run_graph_pipeline(
             on_progress=lambda evt, data: bus.emit(evt, data),
             ontology=ontology,
             paper_graph=paper_graph,
+            markdown=doc.markdown,
         )
 
         _session_graphs[sid] = paper_graph.to_d3_format()
@@ -509,6 +520,7 @@ async def _run_graph_pipeline(
         verification = await verify_graph(
             paper_graph, doc.text, _llm_client,
             model=verification_model, session_id=sid,
+            markdown=doc.markdown,
         )
 
         bus.emit("verify_complete", {
@@ -548,9 +560,15 @@ async def _run_graph_pipeline(
             "message": "Generating graph summary for reviewers...",
         })
 
-        pruned = paper_graph.prune_orphans()
+        # Ensure all semantic nodes have APPEARS_IN edges to their sections
+        bridged = paper_graph.ensure_structural_links()
+        if bridged:
+            logger.info("Created %d structural APPEARS_IN links", bridged)
+
+        # Remove only low-confidence (likely hallucinated) entities, not orphans
+        pruned = paper_graph.prune_ungrounded(threshold=0.3)
         if pruned:
-            logger.info("Pruned %d orphaned entities", pruned)
+            logger.info("Pruned %d ungrounded entities (confidence < 0.3)", pruned)
         paper_graph.summary = paper_graph.to_reviewer_summary()
         paper_graph.update_stats()
 

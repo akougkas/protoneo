@@ -50,7 +50,13 @@ backend/logs/
 
 # Uploads and session data
 backend/uploads/
-backend/data/sessions/
+backend/data/
+
+# Debug screenshots
+.debug/
+
+# Planning artifacts
+PLAN.md
 
 # Lock files (use npm)
 bun.lock

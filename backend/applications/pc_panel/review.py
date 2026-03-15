@@ -174,12 +174,17 @@ def build_agent_configs(
             max_tokens=16384,
         )
 
-    # Meta-reviewer is always present
+    # Meta-reviewer is always present.
+    # Frontend sends model_map with key "meta_reviewer" (profile agent ID),
+    # while internal config uses key "meta". Check both.
     meta_prompt = assemble_system_prompt(conference_slug, "meta", conference_context)
     meta_def = profile.panel_agents.get("meta_reviewer")
+    meta_model = (models.get("meta_reviewer")
+                  or models.get("meta")
+                  or models.get("technical", ""))
     configs["meta"] = AgentConfig(
         role=meta_def.role if meta_def else "Meta-Reviewer",
-        model=models.get("meta", models.get("technical", "")),
+        model=meta_model,
         system_prompt=meta_prompt,
         focus=meta_def.focus[0] if meta_def and meta_def.focus else "synthesis, consensus analysis, final recommendation",
         max_tokens=16384,

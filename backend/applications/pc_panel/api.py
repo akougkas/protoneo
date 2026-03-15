@@ -54,11 +54,36 @@ from .review import (
 logger = logging.getLogger("protoneo.pc_panel.api")
 
 
+async def _recover_stale_sessions(app: FastAPI) -> None:
+    """Mark sessions stuck in 'running' as 'stopped' on startup.
+
+    When the backend restarts mid-pipeline, in-memory state
+    (PipelineControl, SessionEventBus) is lost. These sessions can
+    never resume, so mark them stopped to unblock the UI.
+    """
+    _session_manager = get_session_manager()
+    sessions = await _session_manager.list_sessions(limit=100)
+    recovered = 0
+    for s in sessions:
+        status_val = s.status if isinstance(s.status, str) else s.status.value
+        if status_val == "running":
+            s.status = SessionStatus.STOPPED
+            await _session_manager.update(s)
+            recovered += 1
+            logger.info("Recovered stale session %s (was running, now stopped)", s.session_id)
+    if recovered:
+        logger.info("Recovered %d stale sessions on startup", recovered)
+
+
 def register_pc_panel_routes(app: FastAPI) -> None:
     """Register all PC Panel routes on the FastAPI app."""
 
     _session_graphs = get_session_graphs()
     _session_ontologies = get_session_ontologies()
+
+    @app.on_event("startup")
+    async def _startup_recovery():
+        await _recover_stale_sessions(app)
 
     # ── Conferences ────────────────────────────────────────
 
@@ -227,7 +252,11 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         conference: str = Form("hpdc26"),
         model_map_json: str = Form("{}"),
     ):
-        """Upload N PDFs, create N sessions, build all graphs in parallel."""
+        """Upload N PDFs, create N sessions, build all graphs in parallel.
+
+        Returns immediately with batch_id. Parsing and pipeline work
+        runs in the background so the frontend can redirect instantly.
+        """
         _session_manager = get_session_manager()
         _batch_manager = app.state.batch_manager
         _event_buses = get_event_buses()
@@ -251,20 +280,14 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         upload_dir = _get_upload_dir()
         batch = await _batch_manager.create(conference=conference)
 
+        # Save files to disk and create sessions immediately (no parsing yet)
+        pending: list[tuple[str, Path, str]] = []  # (session_id, file_path, filename)
         session_ids = []
         for file in files:
             safe_name = f"{uuid.uuid4().hex}_{file.filename}"
             file_path = upload_dir / safe_name
             content = await file.read()
             file_path.write_bytes(content)
-
-            try:
-                doc = parse_file(str(file_path))
-                doc = chunk_document(doc)
-            except Exception as e:
-                file_path.unlink(missing_ok=True)
-                logger.warning("Failed to parse %s: %s", file.filename, e)
-                continue
 
             session = await _session_manager.create(config={
                 "agents": {k: v.model_dump() for k, v in agent_configs.items()},
@@ -277,27 +300,77 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             })
             session.batch_id = batch.batch_id
             await _session_manager.update(session)
+            session_ids.append(session.session_id)
+            pending.append((session.session_id, file_path, file.filename))
 
-            ctx = _session_manager.get_context(session.session_id)
-            ctx.add_document(doc)
-            session.document_ids.append(doc.document_id)
-            await _session_manager.update(session)
+        batch.session_ids = session_ids
+        await _batch_manager.update(batch)
 
-            bus = SessionEventBus()
-            _event_buses[session.session_id] = bus
+        # Launch background task for each paper (parsing + pipeline).
+        # Reuses the bus already in _event_buses (created above) so
+        # WebSocket subscribers see events from the very start.
+        async def _run_one(sid: str, fpath: Path, fname: str) -> None:
+            bus = _event_buses.get(sid)
+            if not bus:
+                bus = SessionEventBus()
+                _event_buses[sid] = bus
+
+            # Mark session running and emit parse start immediately
+            session = await _session_manager.get(sid)
+            if session:
+                session.status = SessionStatus.RUNNING
+                import time as _time
+                session.pipeline_steps["parse"] = StepState(
+                    status="running", started_at=_time.monotonic(),
+                ).model_dump()
+                await _session_manager.update(session)
+
+            bus.emit("step_started", {
+                "stage": "pre_review", "step": "parse",
+                "message": f"Parsing {fname}...",
+            })
+
+            # Yield control so the event loop can process the bus event
+            # and send it to any WebSocket subscribers before blocking
+            await asyncio.sleep(0)
+
+            try:
+                # Run CPU-bound parsing in a thread so it doesn't
+                # block the event loop (Docling takes 1-2 minutes)
+                loop = asyncio.get_running_loop()
+                doc = await loop.run_in_executor(
+                    None, parse_file, str(fpath)
+                )
+                doc = chunk_document(doc)
+            except Exception as e:
+                fpath.unlink(missing_ok=True)
+                logger.warning("Failed to parse %s: %s", fname, e)
+                session = await _session_manager.get(sid)
+                if session:
+                    session.status = SessionStatus.FAILED
+                    session.error = f"Parse failed: {e}"
+                    await _session_manager.update(session)
+                bus.emit("error", {"detail": f"Parse failed: {e}"})
+                return
+
+            session = await _session_manager.get(sid)
+            if session:
+                ctx = _session_manager.get_context(sid)
+                ctx.add_document(doc)
+                session.document_ids.append(doc.document_id)
+                await _session_manager.update(session)
+
             ctl = PipelineControl()
-            _pipeline_controls[session.session_id] = ctl
+            _pipeline_controls[sid] = ctl
 
             task = asyncio.create_task(_run_graph_pipeline(
-                session.session_id, doc, profile, model_map,
+                sid, doc, profile, model_map,
                 agent_configs, bus, ctl, graph_only=True,
             ))
             ctl.set_task(task)
 
-            session_ids.append(session.session_id)
-
-        batch.session_ids = session_ids
-        await _batch_manager.update(batch)
+        for sid, fpath, fname in pending:
+            asyncio.create_task(_run_one(sid, fpath, fname))
 
         return {
             "batch_id": batch.batch_id,
@@ -330,6 +403,8 @@ def register_pc_panel_routes(app: FastAPI) -> None:
                 "status": session.status if isinstance(session.status, str) else session.status.value,
                 "filename": session.config.get("metadata", {}).get("filename", ""),
                 "paper_title": session.config.get("metadata", {}).get("paper_title", ""),
+                "pipeline_steps": session.pipeline_steps or {},
+                "current_stage": session.current_stage or "",
             }
             if session.paper_graph:
                 try:
@@ -346,11 +421,20 @@ def register_pc_panel_routes(app: FastAPI) -> None:
                 failed += 1
 
         total = len(batch.session_ids)
+        stopped = sum(
+            1 for s in session_statuses
+            if s.get("status") in ("stopped", "unknown")
+        )
+        terminal = completed + failed + stopped
         if completed == total:
             batch.status = "completed"
         elif failed == total:
             batch.status = "failed"
-        elif completed + failed == total and failed > 0:
+        elif terminal == total and failed > 0:
+            batch.status = "partial"
+        elif terminal == total and stopped > 0 and completed == 0:
+            batch.status = "stopped"
+        elif terminal == total:
             batch.status = "partial"
         else:
             batch.status = "running"
@@ -387,9 +471,19 @@ def register_pc_panel_routes(app: FastAPI) -> None:
 
     # ── Launch Review on Existing Graph ─────────────────
 
+    class LaunchReviewBody(BaseModel):
+        model_map: dict[str, str] = Field(default_factory=dict)
+        conference: str = ""
+        max_rounds: int = 0
+        user_instructions: str = ""
+
     @app.post("/api/sessions/{session_id}/launch-review")
-    async def launch_review(session_id: str):
-        """Launch reviews on a session that already has a completed graph."""
+    async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
+        """Launch reviews on a session that already has a completed graph.
+
+        Accepts optional body with new model_map, conference, max_rounds,
+        and user_instructions to override the original session config.
+        """
         _session_manager = get_session_manager()
         _event_buses = get_event_buses()
         _pipeline_controls = get_pipeline_controls()
@@ -401,14 +495,28 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         if not session.paper_graph:
             raise HTTPException(status_code=400, detail="Session has no graph. Build or import a graph first.")
 
-        conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+        # Allow overriding conference for the review
+        conference_slug = (body.conference if body and body.conference
+                          else session.config.get("metadata", {}).get("conference", "hpdc26"))
         try:
             profile = load_profile(conference_slug)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"Conference profile '{conference_slug}' not found")
 
-        agent_configs_raw = session.config.get("agents", {})
-        agent_configs = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
+        # Rebuild agent configs with new model_map if provided
+        if body and body.model_map:
+            agent_configs = build_agent_configs(
+                profile=profile, conference_slug=conference_slug,
+                model_map=body.model_map,
+            )
+            # Persist the new config
+            session.config["agents"] = {k: v.model_dump() for k, v in agent_configs.items()}
+            if body.user_instructions:
+                session.config["metadata"]["user_instructions"] = body.user_instructions
+            await _session_manager.update(session)
+        else:
+            agent_configs_raw = session.config.get("agents", {})
+            agent_configs = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
         delib_config = DeliberationConfig(**session.config.get("deliberation", {}))
         if not delib_config.max_rounds:
             reviewer_ids = [k for k in agent_configs if k != "meta"]
