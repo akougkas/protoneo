@@ -27,7 +27,7 @@ def _is_oauth_token(provider: str, api_key: str, credential_info: dict[str, Any]
     return False
 
 
-async def _get_json(url: str, headers: dict | None = None, timeout: float = 5.0) -> dict | list | None:
+async def _get_json(url: str, headers: dict | None = None, timeout: float = 3.0) -> dict | list | None:
     """GET a URL and parse JSON. Returns None on any failure."""
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
@@ -105,7 +105,7 @@ async def _discover_google_quota_models(provider_name: str, api_key: str) -> tup
             f"{endpoint}/v1internal:retrieveUserQuota",
             body={"project": project_id},
             headers=headers,
-            timeout=30.0,
+            timeout=10.0,
         )
         if not data or not isinstance(data, dict):
             continue
@@ -164,7 +164,7 @@ async def _validate_google_subscription_model(
     }
 
     saw_inconclusive = False
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(timeout=8.0) as client:
         for endpoint in endpoints:
             try:
                 resp = await client.post(
@@ -198,7 +198,10 @@ async def _validate_google_subscription_model(
 
 
 async def _filter_google_subscription_models(provider_name: str, api_key: str, model_ids: list[str]) -> list[str]:
-    """Drop quota-listed models that fail the provider's text generation path."""
+    """Drop quota-listed models that fail the provider's text generation path.
+
+    Validates all models in parallel to avoid serial 20s-per-model waits.
+    """
     if not model_ids:
         return []
 
@@ -206,19 +209,20 @@ async def _filter_google_subscription_models(provider_name: str, api_key: str, m
     if not project_id:
         return model_ids
 
-    validated: list[str] = []
-    for model_id in model_ids:
+    async def _check(model_id: str) -> tuple[str, bool | None]:
         status = await _validate_google_subscription_model(
-            provider_name,
-            api_key,
-            project_id,
-            model_id,
+            provider_name, api_key, project_id, model_id,
         )
+        return model_id, status
+
+    results = await asyncio.gather(*[_check(mid) for mid in model_ids])
+
+    validated: list[str] = []
+    for model_id, status in results:
         if status is False:
             logger.info(
                 "Filtered non-callable %s subscription model from quota discovery: %s",
-                provider_name,
-                model_id,
+                provider_name, model_id,
             )
             continue
         validated.append(model_id)
