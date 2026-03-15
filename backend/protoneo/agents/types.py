@@ -35,6 +35,7 @@ class Document(BaseModel):
     document_id: str
     filename: str
     text: str
+    markdown: str = ""
     chunks: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

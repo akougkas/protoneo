@@ -27,7 +27,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
-from .metadata import extract_section_texts
+from .metadata import extract_section_texts, extract_section_texts_md
 from .paper_graph import PaperGraph
 from .paper_ontology import PaperOntology, ontology_to_extraction_prompt
 
@@ -76,6 +76,9 @@ RULES:
 5. Use specific entity types from the ontology. Use "Concept" only as a last resort.
 6. Entity names: use the paper's own terminology, under 6 words.
 7. For quantitative results, include the value in the description (e.g., "3.76x speedup over dense baseline").
+8. If the text contains markdown tables, extract the key data points as entities with relationships.
+9. If the text contains equations or formulas, extract the named equation and what it computes.
+10. If the text contains figure/table captions, extract what the figure/table shows.
 
 Respond with ONLY this JSON, nothing else:
 {{"entities": [{{"name": "...", "type": "...", "description": "one sentence with key details"}}], "relationships": [{{"source": "entity name", "target": "entity name", "type": "EDGE_TYPE", "description": "brief context"}}]}}
@@ -333,6 +336,44 @@ def _chunk_text(text: str, chunk_size: int = 4000, overlap: int = 200) -> list[s
 
 # ── Main extraction function ──────────────────────────────
 
+def _split_subsections(section_name: str, section_text: str) -> list[tuple[str, str]]:
+    """Split a section into subsections on ### or #### headers.
+
+    When no subsection headers are found, returns the original section
+    as a single chunk. Adjacent subsections overlap by one paragraph
+    to preserve context at boundaries.
+    """
+    header_re = re.compile(r"^(#{3,4})\s+(.+)$", re.MULTILINE)
+    matches = list(header_re.finditer(section_text))
+    if not matches:
+        return [(section_name, section_text)]
+
+    chunks: list[tuple[str, str]] = []
+    # Text before first subsection header
+    preamble = section_text[:matches[0].start()].strip()
+    if preamble:
+        chunks.append((section_name, preamble))
+
+    for i, m in enumerate(matches):
+        sub_name = f"{section_name} > {m.group(2).strip()}"
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(section_text)
+        body = section_text[start:end].strip()
+        if not body:
+            continue
+
+        # Add overlap: last paragraph from previous subsection
+        if i > 0 and chunks:
+            prev_text = chunks[-1][1]
+            last_para = prev_text.rsplit("\n\n", 1)[-1] if "\n\n" in prev_text else ""
+            if last_para and len(last_para) < 500:
+                body = last_para + "\n\n" + body
+
+        chunks.append((sub_name, body))
+
+    return chunks if chunks else [(section_name, section_text)]
+
+
 async def extract_paper_graph(
     text: str,
     llm_client: LLMClient,
@@ -343,6 +384,7 @@ async def extract_paper_graph(
     paper_graph: "PaperGraph | None" = None,
     batch_size: int = 4,
     models: list[str] | None = None,
+    markdown: str = "",
 ) -> dict[str, Any]:
     """Extract a knowledge graph from an academic paper.
 
@@ -352,6 +394,10 @@ async def extract_paper_graph(
     batch share the same accumulated context snapshot from prior batches.
     Multiple model endpoints can be provided via ``models`` for round-robin
     dispatch across inference slots.
+
+    When markdown is provided, uses subsection-level chunking (### / ####
+    headers) for finer-grained extraction. Also auto-creates APPEARS_IN
+    edges linking each extracted entity to its source section node.
 
     When paper_graph is None, falls back to chunk-based extraction for
     backward compatibility (no reduce step, just accumulation).
@@ -368,12 +414,23 @@ async def extract_paper_graph(
 
     # ── Batch-parallel section path (PaperGraph provided) ──
     if paper_graph is not None:
-        section_texts = extract_section_texts(text)
+        # Prefer markdown section texts when available
+        if markdown:
+            section_texts = extract_section_texts_md(markdown)
+        else:
+            section_texts = extract_section_texts(text)
         sections = [(name, body) for name, body in section_texts.items() if body.strip()]
         total_sections = len(sections)
 
         # Skip References section from extraction (it's bibliographic, not semantic)
         sections = [(n, b) for n, b in sections if not n.lower().startswith("reference")]
+
+        # Subsection-level chunking when markdown is available
+        if markdown:
+            expanded: list[tuple[str, str]] = []
+            for sec_name, sec_body in sections:
+                expanded.extend(_split_subsections(sec_name, sec_body))
+            sections = expanded
 
         logger.info(
             "Batch-parallel extraction: %d sections, batch_size=%d [%s]",
@@ -397,7 +454,7 @@ async def extract_paper_graph(
             section_name: str, section_text: str,
             accumulated_context: str, use_model: str,
         ) -> tuple[str, ExtractedGraph]:
-            """Extract entities from a single section."""
+            """Extract entities from a single section (full text, no truncation)."""
             acc_block = ""
             if accumulated_context:
                 acc_block = f"## Previously extracted entities (from earlier sections):\n{accumulated_context}\n"
@@ -406,7 +463,7 @@ async def extract_paper_graph(
                 section_name=section_name,
                 accumulated_context_block=acc_block,
                 ontology_guide=ont_guide,
-                section_text=section_text[:8000],
+                section_text=section_text,
             )
 
             try:
@@ -418,7 +475,7 @@ async def extract_paper_graph(
                     ],
                     session_id=session_id,
                     temperature=0.2,
-                    max_tokens=4096,
+                    max_tokens=8192,
                 )
                 result = _parse_extraction(response.content)
                 if ontology:
@@ -429,9 +486,14 @@ async def extract_paper_graph(
                 return section_name, ExtractedGraph()
 
         def _ingest_result(section_name: str, section_graph: ExtractedGraph) -> int:
-            """Merge extraction results into paper_graph. Returns nodes added."""
+            """Merge extraction results into paper_graph. Returns nodes added.
+
+            Auto-creates APPEARS_IN edges from each new entity to the
+            section node, bridging the structural and semantic subgraphs.
+            """
             nodes_before = len(paper_graph.nodes)
             name_to_id = {}
+            new_node_ids = []
             for e in section_graph.entities:
                 node = paper_graph.add_node(
                     label=e.name,
@@ -440,6 +502,7 @@ async def extract_paper_graph(
                     source_section=section_name,
                 )
                 name_to_id[e.name] = node.id
+                new_node_ids.append(node.id)
 
             label_to_id = {n.label.lower(): n.id for n in paper_graph.nodes}
             for r in section_graph.relationships:
@@ -451,6 +514,31 @@ async def extract_paper_graph(
                         edge_type=r.type, description=r.description,
                         source_text=section_name,
                     )
+
+            # Auto-bridge: create APPEARS_IN edges from new entities to section node.
+            # Use the base section name (before " > subsection") for matching.
+            base_section = section_name.split(" > ")[0] if " > " in section_name else section_name
+            sec_node = None
+            for n in paper_graph.nodes:
+                if n.node_type == "Section" and (
+                    n.label.lower() == base_section.lower()
+                    or base_section.lower() in n.label.lower()
+                    or n.label.lower() in base_section.lower()
+                ):
+                    sec_node = n
+                    break
+            if sec_node:
+                _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+                for nid in new_node_ids:
+                    node = paper_graph.node_by_id(nid)
+                    if node and node.node_type not in _STRUCTURAL:
+                        paper_graph.add_edge(
+                            source_id=nid,
+                            target_id=sec_node.id,
+                            edge_type="APPEARS_IN",
+                            description=f"extracted from {section_name}",
+                        )
+
             return len(paper_graph.nodes) - nodes_before
 
         # Process sections in batches

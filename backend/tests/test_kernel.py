@@ -1330,14 +1330,15 @@ class TestPaperGraphNewMethods:
         assert "Frontier" in ctx
         assert "Introduction" not in ctx  # structural filtered out
 
-    def test_get_accumulated_context_max_tokens(self):
+    def test_get_accumulated_context_all_entities(self):
         from protoneo.knowledge.paper_graph import PaperGraph
         pg = PaperGraph()
         for i in range(100):
             pg.add_node(f"Entity{i}", "Method", description="A" * 60)
-        ctx = pg.get_accumulated_context(max_tokens=100)
-        # Should be truncated to roughly 400 chars (100 tokens * 4 chars/token)
-        assert len(ctx) < 1000
+        ctx = pg.get_accumulated_context()
+        # All 100 entities should appear (no truncation)
+        for i in range(100):
+            assert f"Entity{i}" in ctx
 
     def test_snapshot_and_restore(self):
         from protoneo.knowledge.paper_graph import PaperGraph

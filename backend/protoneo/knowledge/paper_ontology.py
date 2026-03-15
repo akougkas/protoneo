@@ -435,6 +435,31 @@ def ontology_to_extraction_prompt(ontology: PaperOntology) -> str:
     )
 
 
+_REFINE_SYSTEM = """\
+You are a critical reviewer of ontology schemas for academic paper analysis.
+Your job is to challenge and refine an ontology, ensuring it captures everything
+a peer reviewer needs to evaluate the paper. Always respond with valid JSON only."""
+
+_REFINE_USER = """\
+Below is a draft ontology generated for an academic paper. Challenge and refine it:
+
+1. Are any entity types too vague or overlapping? Merge or sharpen them.
+2. Are any important domain-specific types missing? Add them.
+3. Do the edge types capture all key relationships a reviewer needs?
+4. Are the examples specific enough to guide extraction?
+
+## Draft Ontology:
+{draft_json}
+
+## Paper excerpt (for context):
+{paper_excerpt}
+
+Return the refined ontology in the same JSON format:
+{{"entity_types": [...], "edge_types": [...], "analysis_summary": "...", "paper_domain": "...", "key_contributions": [...]}}
+
+Keep 3-5 entity types and 3-5 edge types. Only return paper-specific types (base types like Claim, Method, Dataset are added automatically)."""
+
+
 async def generate_paper_ontology(
     text: str,
     llm_client: LLMClient,
@@ -442,6 +467,7 @@ async def generate_paper_ontology(
     session_id: str | None = None,
     conference_context: str = "",
     metadata: "PaperMetadata | None" = None,
+    markdown: str = "",
 ) -> PaperOntology:
     """Generate a domain-specific ontology for an academic paper.
 
@@ -450,22 +476,27 @@ async def generate_paper_ontology(
     specific paper, similar to how MiroFish generates ontology before
     building the knowledge graph.
 
+    Uses a two-pass approach: Pass 1 generates the initial ontology,
+    Pass 2 challenges and refines it with the same model.
+
     When metadata is provided, the LLM receives the paper's structural
     summary (title, sections, figure/table counts, reference count) which
     produces significantly better ontology types than raw text alone.
 
     Args:
-        text: Full paper text (truncated to 30k chars for the LLM).
+        text: Full paper text (no truncation applied).
         llm_client: LLM client for the generation call.
         model: Which model to use.
         session_id: Optional session ID for cost tracking.
         conference_context: Optional venue context (e.g., "HPC conference").
         metadata: Optional PaperMetadata for structural context.
+        markdown: Optional structured markdown from Docling.
 
     Returns:
         PaperOntology with entity types, edge types, and analysis.
     """
-    paper_text = text[:30000]
+    # Prefer markdown over flat text when available
+    paper_text = markdown if markdown else text
 
     # Build metadata preamble so the LLM knows the paper's structure
     meta_preamble = ""
@@ -490,6 +521,7 @@ async def generate_paper_ontology(
         {"role": "user", "content": user_content},
     ]
 
+    # Pass 1: Generate initial ontology
     response = await llm_client.complete(
         model=model,
         messages=messages,
@@ -498,8 +530,54 @@ async def generate_paper_ontology(
         max_tokens=16384,
     )
 
-    ontology = _parse_ontology(response.content)
-    ontology = _validate_ontology(ontology)
+    draft_ontology = _parse_ontology(response.content)
+
+    # Pass 2: Challenge and refine with the same model
+    try:
+        draft_json = json.dumps({
+            "entity_types": [et.model_dump() for et in draft_ontology.entity_types],
+            "edge_types": [rt.model_dump() for rt in draft_ontology.edge_types],
+            "analysis_summary": draft_ontology.analysis_summary,
+            "paper_domain": draft_ontology.paper_domain,
+            "key_contributions": draft_ontology.key_contributions,
+        }, indent=2)
+
+        # Use a shorter paper excerpt for the refinement pass
+        paper_excerpt = paper_text[:8000]
+
+        refine_messages = [
+            {"role": "system", "content": _REFINE_SYSTEM},
+            {"role": "user", "content": _REFINE_USER.format(
+                draft_json=draft_json, paper_excerpt=paper_excerpt,
+            )},
+        ]
+
+        refine_response = await llm_client.complete(
+            model=model,
+            messages=refine_messages,
+            session_id=session_id,
+            temperature=0.2,
+            max_tokens=16384,
+        )
+
+        refined = _parse_ontology(refine_response.content)
+        if refined.entity_types or refined.edge_types:
+            # Merge refinements: prefer refined fields if non-empty
+            if refined.entity_types:
+                draft_ontology.entity_types = refined.entity_types
+            if refined.edge_types:
+                draft_ontology.edge_types = refined.edge_types
+            if refined.analysis_summary:
+                draft_ontology.analysis_summary = refined.analysis_summary
+            if refined.paper_domain:
+                draft_ontology.paper_domain = refined.paper_domain
+            if refined.key_contributions:
+                draft_ontology.key_contributions = refined.key_contributions
+            logger.info("Ontology refined in pass 2")
+    except Exception as e:
+        logger.warning("Ontology refinement pass failed, using pass 1 result: %s", e)
+
+    ontology = _validate_ontology(draft_ontology)
 
     logger.info(
         "Generated ontology: %d entity types, %d edge types, domain=%s",

@@ -22,6 +22,7 @@ class PaperMetadata(BaseModel):
     citation_markers: list[dict] = Field(default_factory=list)  # [{marker: "[1]", position: 123}]
     equation_labels: list[str] = Field(default_factory=list)  # ["Eq. 1", "Theorem 2"]
     section_texts: dict[str, str] = Field(default_factory=dict)  # heading -> body text
+    section_texts_md: dict[str, str] = Field(default_factory=dict)  # heading -> markdown body
 
 
 # Numbered section: "1 Introduction", "3.1 Pivot Selection", "II. Related Work"
@@ -542,3 +543,84 @@ def build_structural_graph(metadata: "PaperMetadata") -> dict:
         })
 
     return {"nodes": nodes, "edges": edges}
+
+
+# ── Markdown-aware metadata extraction ───────────────────
+
+
+def extract_section_texts_md(markdown: str) -> dict[str, str]:
+    """Extract section heading to body mapping from structured markdown.
+
+    Splits on ## headers (level 2), which correspond to top-level paper
+    sections in Docling output. Returns heading text to body markdown.
+    """
+    if not markdown or not markdown.strip():
+        return {}
+
+    section_re = re.compile(r"^(#{1,2})\s+(.+)$", re.MULTILINE)
+    matches = list(section_re.finditer(markdown))
+    if not matches:
+        return {"Full Paper": markdown}
+
+    section_texts: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        heading = m.group(2).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(markdown)
+        body = markdown[start:end].strip()
+        if body:
+            section_texts[heading] = body
+
+    return section_texts
+
+
+def extract_metadata_from_markdown(markdown: str, flat_text: str = "") -> PaperMetadata:
+    """Extract metadata from structured markdown produced by Docling.
+
+    Parses markdown headers directly for section structure instead of
+    relying on regex heuristics. Falls back to flat-text extraction
+    for fields that markdown does not improve (figures, tables, refs).
+    """
+    text_for_counts = flat_text or markdown
+
+    # Sections from markdown headers
+    section_re = re.compile(r"^#{1,2}\s+(.+)$", re.MULTILINE)
+    sections = [m.group(1).strip() for m in section_re.finditer(markdown)]
+
+    # Title: first # header or fall back to flat text heuristic
+    title = ""
+    title_match = re.search(r"^#\s+(.+)$", markdown, re.MULTILINE)
+    if title_match:
+        title = title_match.group(1).strip()
+    elif flat_text:
+        title = _extract_title(flat_text)
+
+    # Abstract from markdown
+    abstract = ""
+    abstract_match = re.search(
+        r"(?:^|\n)#{1,2}\s+Abstract\s*\n(.*?)(?=\n#{1,2}\s+|\Z)",
+        markdown, re.DOTALL | re.IGNORECASE,
+    )
+    if abstract_match:
+        abstract = re.sub(r"\s+", " ", abstract_match.group(1).strip())
+    elif flat_text:
+        abstract = _extract_abstract(flat_text)
+
+    section_texts = extract_section_texts(text_for_counts) if flat_text else {}
+    section_texts_md = extract_section_texts_md(markdown)
+    ref_count, refs = _extract_references(text_for_counts)
+
+    return PaperMetadata(
+        title=title,
+        abstract=abstract,
+        sections=sections if sections else _extract_sections(text_for_counts),
+        figure_count=_count_figures(text_for_counts),
+        table_count=_count_tables(text_for_counts),
+        reference_count=ref_count,
+        references=refs[:50],
+        estimated_word_count=len(text_for_counts.split()),
+        citation_markers=extract_citation_markers(text_for_counts),
+        equation_labels=extract_equation_labels(text_for_counts),
+        section_texts=section_texts,
+        section_texts_md=section_texts_md,
+    )

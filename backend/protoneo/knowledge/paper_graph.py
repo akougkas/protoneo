@@ -195,25 +195,22 @@ class PaperGraph(BaseModel):
                 return n
         return None
 
-    def get_accumulated_context(self, max_tokens: int = 800) -> str:
+    def get_accumulated_context(self) -> str:
         """Compact summary of all entities for section-aware extraction context.
 
         Returns one line per entity: "entity_name (entity_type): description"
-        Truncated to approximately max_tokens characters. Skips structural nodes
-        (Paper, Section, Diagram, Table) to save token budget.
+        Includes all semantic entities so later sections can cross-reference
+        anything extracted from earlier sections. Skips structural nodes
+        (Paper, Section, Diagram, Table) to avoid noise.
         """
         _STRUCTURAL = {"Paper", "Section", "Diagram", "Table"}
         lines = []
-        char_count = 0
         for n in self.nodes:
             if n.node_type in _STRUCTURAL:
                 continue
             desc = n.description[:60] if n.description else ""
             line = f"- {n.label} ({n.node_type}): {desc}"
-            if char_count + len(line) > max_tokens * 4:  # ~4 chars per token
-                break
             lines.append(line)
-            char_count += len(line) + 1
         return "\n".join(lines)
 
     def update_stats(self) -> None:
@@ -655,6 +652,81 @@ class PaperGraph(BaseModel):
         if removed:
             self.update_stats()
         return removed
+
+    def prune_ungrounded(self, threshold: float = 0.3) -> int:
+        """Remove only low-confidence nodes below threshold. Returns count removed.
+
+        Unlike prune_orphans which removes all disconnected nodes, this
+        preserves orphans that are well-grounded (high confidence) and only
+        removes nodes flagged as potentially hallucinated by the verification
+        pass. Structural nodes are never pruned.
+        """
+        _KEEP = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+        before = len(self.nodes)
+        removed_ids = set()
+        self.nodes = [
+            n for n in self.nodes
+            if n.node_type in _KEEP or n.confidence >= threshold
+            or not (removed_ids.add(n.id) or False)  # track removals
+        ]
+        # Clean edges referencing removed nodes
+        if removed_ids:
+            self.edges = [
+                e for e in self.edges
+                if e.source_id not in removed_ids and e.target_id not in removed_ids
+            ]
+        removed = before - len(self.nodes)
+        if removed:
+            self.update_stats()
+        return removed
+
+    def ensure_structural_links(self) -> int:
+        """Create missing APPEARS_IN edges from semantic nodes to their source sections.
+
+        Scans all semantic nodes that have a source_section field and creates
+        APPEARS_IN edges to the matching Section node if one does not already
+        exist. This bridges the structural and semantic subgraphs.
+
+        Returns the number of APPEARS_IN edges created.
+        """
+        _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+
+        # Build section label to node ID map
+        section_map: dict[str, str] = {}
+        for n in self.nodes:
+            if n.node_type == "Section":
+                section_map[n.label.lower()] = n.id
+
+        # Build existing APPEARS_IN set for dedup
+        existing = {
+            (e.source_id, e.target_id)
+            for e in self.edges if e.edge_type == "APPEARS_IN"
+        }
+
+        created = 0
+        for n in self.nodes:
+            if n.node_type in _STRUCTURAL or not n.source_section:
+                continue
+            sec_id = section_map.get(n.source_section.lower())
+            if not sec_id:
+                # Try partial match (section name might be a substring)
+                for sec_label, sid in section_map.items():
+                    if n.source_section.lower() in sec_label or sec_label in n.source_section.lower():
+                        sec_id = sid
+                        break
+            if sec_id and (n.id, sec_id) not in existing:
+                self.add_edge(
+                    source_id=n.id,
+                    target_id=sec_id,
+                    edge_type="APPEARS_IN",
+                    description=f"extracted from {n.source_section}",
+                )
+                existing.add((n.id, sec_id))
+                created += 1
+
+        if created:
+            self.update_stats()
+        return created
 
     def graph_stats(self) -> dict[str, Any]:
         """Compute pure structural statistics about the graph.
