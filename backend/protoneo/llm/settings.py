@@ -23,8 +23,13 @@ _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
 _LOCALHOST = "localhost"
 _LAN = "lan"
 
+# Backward-compatibility aliases for settings migration.
+# Old settings.json files may reference these short names.
 _LEGACY_PROVIDER_IDS = {
+    "zbook": "localhost-lmstudio",
     "ollama": "localhost-ollama",
+    "mini": "lan-mini",
+    "dynamo": "lan-dynamo",
 }
 
 _KNOWN_ENDPOINTS = {
