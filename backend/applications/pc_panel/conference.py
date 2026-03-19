@@ -42,6 +42,7 @@ class ConferenceProfile(BaseModel):
     panel_agents: dict[str, PanelAgentDef] = Field(default_factory=dict)
     optional_agents: dict[str, PanelAgentDef] = Field(default_factory=dict)
     preflight_checks: list[str] = Field(default_factory=list)
+    graph_pruning_threshold: float = 0.3
 
     def scope_text(self) -> str:
         lines = [self.scope_summary]
@@ -93,6 +94,8 @@ def load_profile(slug: str) -> ConferenceProfile:
             role=adef.get("role", aid), focus=adef.get("focus", [])
         )
 
+    graph_cfg = raw.get("graph", {})
+
     return ConferenceProfile(
         slug=conf.get("slug", slug),
         name=conf.get("name", slug),
@@ -111,6 +114,7 @@ def load_profile(slug: str) -> ConferenceProfile:
         panel_agents=agents,
         optional_agents=optional,
         preflight_checks=checks,
+        graph_pruning_threshold=graph_cfg.get("pruning_threshold", 0.3),
     )
 
 

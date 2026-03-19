@@ -793,17 +793,21 @@ async def _run_graph_pipeline(
         if bridged:
             logger.info("Created %d structural APPEARS_IN links", bridged)
 
-        # Remove only low-confidence (likely hallucinated) entities, not orphans
-        pruned = paper_graph.prune_ungrounded(threshold=0.3)
+        # Remove only low-confidence (likely hallucinated) entities, not orphans.
+        # Threshold is venue-configurable (strict venues can demand 0.6+).
+        pruning_threshold = profile.graph_pruning_threshold
+        pruned = paper_graph.prune_ungrounded(threshold=pruning_threshold)
         if pruned:
-            logger.info("Pruned %d ungrounded entities (confidence < 0.3)", pruned)
+            logger.info(
+                "Pruned %d ungrounded entities (confidence < %.2f)",
+                pruned, pruning_threshold,
+            )
         paper_graph.summary = paper_graph.to_reviewer_summary()
         paper_graph.update_stats()
 
         session = await _session_manager.get(sid)
         if session:
             session.paper_graph = paper_graph.model_dump(mode="json")
-            session.paper_text = doc.text
             session.current_stage = "pre_review"
             session.pipeline_steps["summarize"] = StepState(
                 status="complete", started_at=step_start,
