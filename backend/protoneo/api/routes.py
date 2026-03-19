@@ -204,6 +204,13 @@ class SessionResponse(BaseModel):
     created_at: str
     result: dict[str, Any] | None = None
     error: str | None = None
+    # Fix 15: Include config, paper stats, and pipeline progress
+    config: dict[str, Any] | None = None
+    paper_text_length: int = 0
+    paper_markdown_length: int = 0
+    current_stage: str = ""
+    pipeline_steps: dict[str, Any] | None = None
+    paper_graph_stats: dict[str, Any] | None = None
 
 
 async def _run_with_events(
@@ -239,7 +246,7 @@ async def _auto_discover_after_login():
         oauth_registry = get_provider_registry()
 
         provider_credentials = {}
-        for name in ["anthropic", "openai", "google", "google-antigravity"]:
+        for name in ["anthropic", "openai"]:
             info = oauth_registry.resolve_credential_info(name)
             if info.get("api_key"):
                 provider_credentials[name] = info
@@ -330,6 +337,31 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             provider_registry=get_provider_registry(),
         )
 
+    # ── Presets ─────────────────────────────────────────────
+
+    @app.get("/api/presets")
+    async def list_presets():
+        """List all available model assignment presets."""
+        from ..llm.settings import get_all_presets, load_settings
+        settings = load_settings()
+        presets = get_all_presets(settings)
+        return {
+            "presets": [p.model_dump() for p in presets],
+            "active_preset": settings.active_preset,
+        }
+
+    @app.post("/api/presets/{name}/activate")
+    async def activate_preset(name: str):
+        """Set the active preset and return its assignments."""
+        from ..llm.settings import resolve_preset, load_settings, save_settings
+        settings = load_settings()
+        preset = resolve_preset(name, settings)
+        if not preset:
+            raise HTTPException(status_code=404, detail=f"Preset '{name}' not found")
+        settings.active_preset = name
+        save_settings(settings)
+        return {"active_preset": name, "assignments": preset.assignments}
+
     # ── Models ──────────────────────────────────────────────
 
     @app.get("/api/models")
@@ -365,7 +397,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         oauth_registry = get_provider_registry()
 
         provider_credentials = {}
-        for name in ["anthropic", "openai", "google", "google-antigravity"]:
+        for name in ["anthropic", "openai"]:
             info = oauth_registry.resolve_credential_info(name)
             if info.get("api_key"):
                 provider_credentials[name] = info
@@ -767,29 +799,54 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         session = await _session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        # Fix 15: Compute graph summary stats if paper_graph is present
+        graph_stats = None
+        if session.paper_graph:
+            graph_stats = {
+                "node_count": len(session.paper_graph.get("nodes", [])),
+                "edge_count": len(session.paper_graph.get("edges", [])),
+                "has_summary": bool(session.paper_graph.get("summary")),
+            }
         return SessionResponse(
             session_id=session.session_id,
             status=session.status.value,
             created_at=session.created_at.isoformat(),
             result=session.result,
             error=session.error,
+            config=session.config or None,
+            paper_text_length=len(session.paper_text),
+            paper_markdown_length=len(session.paper_markdown),
+            current_stage=session.current_stage,
+            pipeline_steps=session.pipeline_steps or None,
+            paper_graph_stats=graph_stats,
         )
 
     @app.get("/api/sessions")
     async def list_sessions(limit: int = 50):
         sessions = await _session_manager.list_sessions(limit=limit)
-        return {
-            "sessions": [
-                SessionResponse(
-                    session_id=s.session_id,
-                    status=s.status.value,
-                    created_at=s.created_at.isoformat(),
-                    result=s.result,
-                    error=s.error,
-                )
-                for s in sessions
-            ]
-        }
+        items = []
+        for s in sessions:
+            graph_stats = None
+            if s.paper_graph:
+                graph_stats = {
+                    "node_count": len(s.paper_graph.get("nodes", [])),
+                    "edge_count": len(s.paper_graph.get("edges", [])),
+                    "has_summary": bool(s.paper_graph.get("summary")),
+                }
+            items.append(SessionResponse(
+                session_id=s.session_id,
+                status=s.status.value,
+                created_at=s.created_at.isoformat(),
+                result=s.result,
+                error=s.error,
+                config=s.config or None,
+                paper_text_length=len(s.paper_text),
+                paper_markdown_length=len(s.paper_markdown),
+                current_stage=s.current_stage,
+                pipeline_steps=s.pipeline_steps or None,
+                paper_graph_stats=graph_stats,
+            ))
+        return {"sessions": items}
 
     @app.post("/api/sessions/{session_id}/upload")
     async def upload_document(session_id: str, file: UploadFile = File(...)):
@@ -870,18 +927,20 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         bus = _event_buses.get(session_id)
 
-        if not bus and session.status in (SessionStatus.COMPLETED, "completed"):
-            await websocket.send_json({"type": "completed", "result": session.result})
-            await websocket.close()
-            return
         if not bus and session.status in (SessionStatus.FAILED, "failed"):
             await websocket.send_json({"type": "error", "detail": session.error or "Unknown error"})
             await websocket.close()
             return
 
+        # Always ensure a bus exists so post-review chat can emit events.
         if not bus:
             bus = SessionEventBus()
             _event_buses[session_id] = bus
+
+        # For already-completed sessions, send the terminal event immediately
+        # but keep the connection open for post-review chat streaming.
+        if session.status in (SessionStatus.COMPLETED, "completed"):
+            await websocket.send_json({"type": "completed", "result": session.result})
 
         queue = bus.subscribe()
 
@@ -911,7 +970,10 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             while True:
                 event = await queue.get()
                 await websocket.send_json(event)
-                if event["type"] in ("completed", "error"):
+                # Only terminate on unrecoverable errors.
+                # Keep the connection alive after "completed" so
+                # post-review chat tokens can stream through.
+                if event["type"] == "error":
                     break
         except WebSocketDisconnect:
             logger.info("WebSocket disconnected for session %s", session_id)

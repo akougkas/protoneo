@@ -7,7 +7,6 @@ provider-specific API endpoints and auth headers:
 
 - Anthropic (Claude Max): LiteLLM with api_key='' and Bearer via extra_headers
 - OpenAI (ChatGPT Plus): Direct HTTP to chatgpt.com/backend-api (Codex Responses API)
-- Google (Gemini CLI): Direct HTTP to cloudcode-pa.googleapis.com (Cloud Code Assist)
 
 These direct paths replicate the exact same HTTP calls that pi-ai makes.
 """
@@ -55,24 +54,6 @@ _ANTHROPIC_BETA = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-strea
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 _CODEX_JWT_CLAIM = "https://api.openai.com/auth"
 
-# Google Cloud Code Assist: per-provider endpoint and header configuration
-_GOOGLE_PROVIDER_CONFIG = {
-    "google": {
-        "endpoints": ["https://cloudcode-pa.googleapis.com"],
-        "user_agent": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-        "request_type": None,
-    },
-    "google-antigravity": {
-        "endpoints": [
-            "https://daily-cloudcode-pa.sandbox.googleapis.com",
-            "https://autopush-cloudcode-pa.sandbox.googleapis.com",
-            "https://cloudcode-pa.googleapis.com",
-        ],
-        "user_agent": "antigravity/1.18.4 darwin/arm64",
-        "request_type": "agent",
-    },
-}
-
 
 def _is_anthropic_oauth(provider: str, api_key: str) -> bool:
     return provider == "anthropic" and api_key.startswith("sk-ant-oat")
@@ -82,10 +63,6 @@ def _is_openai_oauth(provider: str, api_key: str) -> bool:
     """OpenAI OAuth tokens are JWTs (eyJ...) from ChatGPT subscription login."""
     return provider == "openai" and api_key.startswith("eyJ")
 
-
-def _is_google_oauth(provider: str, api_key: str) -> bool:
-    """Google OAuth tokens are ya29. access tokens from Cloud Code Assist login."""
-    return provider in ("google", "google-antigravity") and api_key.startswith("ya29.")
 
 
 def _extract_openai_account_id(jwt_token: str) -> str:
@@ -111,8 +88,7 @@ class LLMClient:
 
     Routes through LiteLLM for providers that use standard API key auth.
     Makes direct HTTP calls for subscription providers (Anthropic OAuth,
-    OpenAI ChatGPT, Google Gemini CLI) that require non-standard endpoints
-    and auth mechanisms.
+    OpenAI ChatGPT) that require non-standard endpoints and auth mechanisms.
     """
 
     def __init__(
@@ -141,14 +117,6 @@ class LLMClient:
         if provider == "unknown" and "legacy" in self._api_keys:
             return self._api_keys["legacy"]
         return None
-
-    def _resolve_google_project_id(self, provider_name: str = "google") -> str:
-        """Load projectId from stored Google OAuth credentials."""
-        from .providers.oauth_base import load_credentials
-        creds = load_credentials(provider_name)
-        if creds:
-            return creds.extra.get("projectId", "")
-        return ""
 
     # ── Direct provider calls (subscription OAuth) ───────────
 
@@ -241,227 +209,6 @@ class LLMClient:
         )
 
         return LLMResponse(content=content, model=model_id, usage=usage, raw={})
-
-    async def _call_google_cloud_code(
-        self,
-        token: str,
-        messages: list[dict],
-        model_id: str,
-        provider_name: str = "google",
-        temperature: float = 0.7,
-        max_tokens: int | None = None,
-    ) -> LLMResponse:
-        """Call Google Cloud Code Assist API.
-
-        Supports both Gemini CLI (single endpoint) and Antigravity
-        (fallback endpoint chain). Matches pi-ai's request envelope,
-        headers, and retry logic.
-        """
-        config = _GOOGLE_PROVIDER_CONFIG.get(provider_name, _GOOGLE_PROVIDER_CONFIG["google"])
-
-        project_id = self._resolve_google_project_id(provider_name)
-        if not project_id:
-            project_id = await self._discover_google_project(token, provider_name)
-            if not project_id:
-                raise ValueError(
-                    f"No Google Cloud project for {provider_name}. Re-login via Settings."
-                )
-
-        # Build contents and extract system instruction
-        contents = []
-        system_instruction = None
-        for msg in messages:
-            role = msg.get("role", "user")
-            text = msg.get("content", "")
-            if role == "system":
-                system_instruction = {"role": "user", "parts": [{"text": text}]}
-            else:
-                gemini_role = "model" if role == "assistant" else "user"
-                contents.append({"role": gemini_role, "parts": [{"text": text}]})
-
-        request: dict[str, Any] = {"contents": contents}
-        generation_config: dict[str, Any] = {}
-        if temperature is not None:
-            generation_config["temperature"] = temperature
-        if max_tokens:
-            generation_config["maxOutputTokens"] = max_tokens
-        if generation_config:
-            request["generationConfig"] = generation_config
-        if system_instruction:
-            request["systemInstruction"] = system_instruction
-
-        user_agent = config["user_agent"]
-        body: dict[str, Any] = {
-            "project": project_id,
-            "model": model_id,
-            "request": request,
-            "userAgent": user_agent,
-        }
-        if config["request_type"]:
-            body["requestType"] = config["request_type"]
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": user_agent,
-            "X-Goog-Api-Client": "gl-node/22.17.0",
-            "Client-Metadata": json.dumps({
-                "ideType": "IDE_UNSPECIFIED",
-                "platform": "PLATFORM_UNSPECIFIED",
-                "pluginType": "GEMINI",
-            }),
-        }
-
-        endpoints = config["endpoints"]
-        max_retries = 3
-        last_error = None
-
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            for endpoint in endpoints:
-                url = f"{endpoint}/v1internal:generateContent"
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        resp = await client.post(url, headers=headers, json=body)
-                    except httpx.HTTPError as e:
-                        last_error = e
-                        if attempt < max_retries:
-                            await asyncio.sleep(_BASE_DELAY * (2 ** (attempt - 1)))
-                            continue
-                        break
-
-                    if resp.status_code == 429 and attempt < max_retries:
-                        delay = self._parse_google_retry_delay(resp.text)
-                        logger.info(
-                            "Google rate limit on %s (attempt %d/%d), waiting %ds",
-                            endpoint, attempt, max_retries, delay,
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-
-                    if resp.status_code in (403, 404) and len(endpoints) > 1:
-                        logger.info(
-                            "Google %d on %s, trying next endpoint",
-                            resp.status_code, endpoint,
-                        )
-                        last_error = RuntimeError(
-                            f"Google {resp.status_code}: {resp.text[:200]}"
-                        )
-                        break  # next endpoint
-
-                    if resp.status_code >= 500 and attempt < max_retries:
-                        delay = _BASE_DELAY * (2 ** (attempt - 1))
-                        logger.warning(
-                            "Google %d on %s (attempt %d/%d), retrying in %.1fs",
-                            resp.status_code, endpoint, attempt, max_retries, delay,
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-
-                    if resp.status_code != 200:
-                        last_error = RuntimeError(
-                            f"Google Cloud Code API error {resp.status_code}: "
-                            f"{resp.text[:500]}"
-                        )
-                        break
-
-                    # Success
-                    data = resp.json()
-                    return self._parse_google_response(data, model_id)
-                else:
-                    continue  # ran out of retries for this endpoint, try next
-
-        raise last_error or RuntimeError("All Google Cloud Code endpoints failed")
-
-    @staticmethod
-    def _parse_google_response(data: dict, model_id: str) -> "LLMResponse":
-        """Parse Cloud Code Assist generateContent response."""
-        response_data = data.get("response", data)
-
-        content = ""
-        candidates = response_data.get("candidates", [])
-        if candidates:
-            for part in candidates[0].get("content", {}).get("parts", []):
-                text = part.get("text", "")
-                if text and not part.get("thought"):
-                    content += text
-
-        usage_meta = response_data.get("usageMetadata", {})
-        usage = TokenUsage(
-            prompt_tokens=usage_meta.get("promptTokenCount", 0),
-            completion_tokens=usage_meta.get("candidatesTokenCount", 0),
-            total_tokens=usage_meta.get("totalTokenCount", 0),
-        )
-
-        return LLMResponse(content=content, model=model_id, usage=usage, raw=data)
-
-    @staticmethod
-    def _parse_google_retry_delay(error_text: str) -> int:
-        """Extract retry delay from Google 429 error (matches pi-ai's extractRetryDelay).
-
-        Parses patterns like "reset after 36s", "reset after 1m15s",
-        "Please retry in 5s", and retryDelay JSON field.
-        """
-        # "reset after Xs" / "reset after XmYs" / "reset after XhYmZs"
-        m = re.search(
-            r"reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s",
-            error_text, re.IGNORECASE,
-        )
-        if m:
-            hours = int(m.group(1) or 0)
-            minutes = int(m.group(2) or 0)
-            seconds = float(m.group(3))
-            return int(hours * 3600 + minutes * 60 + seconds + 1)
-
-        # "Please retry in Xs"
-        m = re.search(r"retry in (\d+(?:\.\d+)?)s", error_text, re.IGNORECASE)
-        if m:
-            return int(float(m.group(1)) + 1)
-
-        # JSON retryDelay field: "34.074824224s"
-        m = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)s"', error_text)
-        if m:
-            return int(float(m.group(1)) + 1)
-
-        return 30
-
-    async def _discover_google_project(
-        self, token: str, provider_name: str = "google",
-    ) -> str:
-        """Discover and persist Google Cloud project via loadCodeAssist.
-
-        No free-tier onboarding. The user must already have a subscription.
-        For Antigravity, tries each endpoint in the fallback chain.
-        """
-        from .providers.google_oauth import (
-            GEMINI_ENDPOINT, AG_ENDPOINTS, _discover_project,
-        )
-
-        if provider_name == "google-antigravity":
-            endpoints = AG_ENDPOINTS
-        else:
-            endpoints = [GEMINI_ENDPOINT]
-
-        for endpoint in endpoints:
-            project_id = await _discover_project(token, endpoint)
-            if project_id:
-                self._persist_google_project(project_id, provider_name)
-                return project_id
-
-        return ""
-
-    def _persist_google_project(
-        self, project_id: str, provider_name: str = "google",
-    ) -> None:
-        """Save discovered projectId into stored credentials."""
-        from .providers.oauth_base import load_credentials, save_credentials
-        creds = load_credentials(provider_name)
-        if creds:
-            creds.extra["projectId"] = project_id
-            save_credentials(provider_name, creds)
-            logger.info(
-                "Google project discovered and saved for %s: %s",
-                provider_name, project_id,
-            )
 
     # ── LiteLLM kwargs builder (for non-subscription providers) ──
 
@@ -596,21 +343,6 @@ class LLMClient:
                 self._session_costs[session_id] += response.usage.cost
             return response
 
-        if api_key and not has_local_endpoint and _is_google_oauth(provider, api_key):
-            raw_model = model.split("/", 1)[1] if "/" in model else model
-            response = await self._call_google_cloud_code(
-                token=api_key,
-                messages=messages,
-                model_id=raw_model,
-                provider_name=provider,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            response.content = self._strip_thinking(response.content)
-            if session_id:
-                self._session_costs[session_id] += response.usage.cost
-            return response
-
         # All other providers: LiteLLM
         call_overrides: dict[str, Any] = {"temperature": temperature, **kwargs}
         if max_tokens is not None:
@@ -652,7 +384,16 @@ class LLMClient:
         if not content and reasoning_content:
             content = reasoning_content
 
+        raw_len = len(content)
         content = self._strip_thinking(content)
+
+        # Fix 1: Warn when strip_thinking removes all content (model produced
+        # only <think> tokens with no final answer)
+        if not content.strip() and raw_len > 0:
+            logger.warning(
+                "Model %s produced %d chars of thinking tokens but no final answer",
+                model, raw_len,
+            )
 
         model_info = self.registry.get(model)
         usage = self._extract_usage(response, model_info)
@@ -695,7 +436,7 @@ class LLMClient:
         # Subscription providers with direct HTTP paths do not yet expose
         # native streaming here, so reuse complete() and yield one chunk.
         if api_key and not has_local_endpoint:
-            if _is_openai_oauth(provider, api_key) or _is_google_oauth(provider, api_key):
+            if _is_openai_oauth(provider, api_key):
                 response = await self.complete(
                     model=model,
                     messages=messages,

@@ -33,3 +33,5 @@ Prioritize, in order:
 - IEEE format, 12 pages excluding references. Optional 4-page appendix for artifact description.
 - SC accepts technical papers, experience papers, and state-of-the-practice papers. Evaluate against the correct category.
 - Artifact evaluation is increasingly important. Note whether the paper includes reproducibility signals.
+
+**Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

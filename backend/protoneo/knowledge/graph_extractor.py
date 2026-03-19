@@ -441,14 +441,10 @@ async def extract_paper_graph(
         # Round-robin model list for multi-endpoint dispatch
         model_list = models if models else [model]
 
-        # Build ontology guide once (compact form for the nested helper)
-        ont_guide = ""
-        if ontology and ontology.entity_types:
-            types = ", ".join(et.name for et in ontology.entity_types)
-            rels = ", ".join(rt.name for rt in ontology.edge_types) if ontology.edge_types else "RELATED_TO"
-            ont_guide = f"Entity types: {types}\nRelationship types: {rels}"
-        if not ont_guide:
-            ont_guide = ontology_guide
+        # Reuse the full ontology guide (with descriptions, attributes, examples)
+        # built at the top of the function. This ensures the batch path gets
+        # the same rich extraction guidance as the chunk-based fallback path.
+        ont_guide = ontology_guide
 
         async def _extract_one_section(
             section_name: str, section_text: str,

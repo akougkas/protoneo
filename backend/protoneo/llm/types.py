@@ -28,7 +28,7 @@ class ModelInfo(BaseModel):
     """Describes a model's identity, routing, and capabilities."""
 
     model_id: str = Field(description="ProtoNeo model identifier used by agents")
-    provider: str = Field(description="Provider name or endpoint id: lan-mini, localhost-lmstudio, openrouter, anthropic, openai, google, etc.")
+    provider: str = Field(description="Provider name or endpoint id: lan-mini, localhost-lmstudio, openrouter, anthropic, openai, etc.")
     litellm_model: str | None = Field(
         default=None,
         description="LiteLLM model string if different from model_id (e.g. 'openai/Qwen35-Distilled-i1-Q4_K_M')",

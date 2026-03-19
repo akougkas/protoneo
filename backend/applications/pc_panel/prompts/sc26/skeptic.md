@@ -32,3 +32,5 @@ Prioritize, in order:
 - Watch for papers that show performance only on synthetic benchmarks without real-world workloads.
 - "State of the practice" papers should be held to a different standard than technical papers. Focus on lessons learned rather than raw performance claims.
 - Missing artifact descriptions or reproducibility statements are worth flagging.
+
+**Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

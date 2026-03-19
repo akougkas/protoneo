@@ -100,6 +100,8 @@ Work only from provided materials unless explicit retrieval is enabled.
 
 Return a JSON object with this structure:
 
+Set `reviewer_role` to your assigned role name as stated at the top of your system prompt.
+
 ```json
 {
   "reviewer_role": "",
@@ -134,3 +136,7 @@ If you can see other reviewers:
 - Update your score if another reviewer exposes a genuine mistake in your reasoning.
 - Preserve principled disagreement when evidence is genuinely mixed.
 - Highlight the minimum changes that would shift your recommendation upward.
+
+## CRITICAL: Output format
+
+Your ENTIRE response must be a single valid JSON object matching the output contract above. Do not wrap it in markdown code fences. Do not add any text before or after the JSON. Do not use markdown headers, bullet points, or prose outside the JSON structure. Every observation, score, strength, weakness, and comment must go inside the appropriate JSON field. If you produce anything other than a JSON object, your review will fail to parse and will be discarded.

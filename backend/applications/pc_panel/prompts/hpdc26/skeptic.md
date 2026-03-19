@@ -55,3 +55,5 @@ Be especially alert to:
 Your `internal_committee_concerns` should read like the strongest discussion points that could change the panel outcome.
 
 Your `revision_actions` should identify the smallest set of changes that would neutralize the most damaging objections.
+
+**Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

@@ -3,27 +3,37 @@
     <div class="card-header">
       <span :class="['agent-dot', agent.status]"></span>
       <span class="agent-role">{{ agent.role }}</span>
+      <span v-if="agent.status === 'running' && streamingText" class="stream-counter">
+        {{ streamingText.length.toLocaleString() }} chars
+      </span>
     </div>
     <div class="agent-model" v-if="agent.model">{{ agent.model }}</div>
-    <div class="agent-status-text">
-      {{ statusLabel }}
-      <span v-if="agent.duration" class="agent-timing">{{ agent.duration }}s</span>
-      <span v-if="agent.tokens" class="agent-tokens">{{ agent.tokens }} tok</span>
+    <div class="agent-metrics">
+      <span class="metric-label">{{ statusLabel }}</span>
+      <span v-if="agent.duration" class="metric mono">{{ agent.duration }}s</span>
+      <span v-if="agent.tokens" class="metric mono">{{ agent.tokens.toLocaleString() }} tok</span>
+      <span v-if="agent.completionTokens" class="metric mono dim">{{ agent.completionTokens.toLocaleString() }} out</span>
+      <span v-if="throughput" class="metric mono dim">{{ throughput }} tok/s</span>
     </div>
     <!-- Live streaming text preview -->
     <div v-if="streamingText && agent.status === 'running'" class="stream-preview">
-      <div class="stream-text">{{ streamTail }}</div>
+      <div :class="['stream-text', { expanded }]" ref="streamEl">{{ expanded ? streamingText : streamTail }}</div>
+      <button v-if="streamingText.length > 200" class="expand-toggle" @click="expanded = !expanded">
+        {{ expanded ? 'Collapse' : 'Expand' }}
+      </button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 
 const props = defineProps({
   agent: { type: Object, required: true },
   streamingText: { type: String, default: '' },
 })
+
+const expanded = ref(false)
 
 const statusLabel = computed(() => {
   switch (props.agent.status) {
@@ -35,7 +45,13 @@ const statusLabel = computed(() => {
   }
 })
 
-// Show last ~200 chars of streaming output for a live preview
+const throughput = computed(() => {
+  if (props.agent.tokens && props.agent.duration && props.agent.duration > 0) {
+    return (props.agent.tokens / props.agent.duration).toFixed(1)
+  }
+  return null
+})
+
 const streamTail = computed(() => {
   const text = props.streamingText
   if (!text) return ''
@@ -49,7 +65,7 @@ const streamTail = computed(() => {
   border: 1px solid #e0e0e0;
   border-radius: 5px;
   padding: 14px 16px;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, background 0.2s;
 }
 
 .agent-card.running {
@@ -99,6 +115,14 @@ const streamTail = computed(() => {
   font-weight: 600;
 }
 
+.stream-counter {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: #e8a500;
+  animation: pulse 1.5s infinite;
+}
+
 .agent-model {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
@@ -109,25 +133,24 @@ const streamTail = computed(() => {
   white-space: nowrap;
 }
 
-.agent-status-text {
+.agent-metrics {
   font-size: 12px;
   color: #666;
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
-.agent-timing {
+.metric-label { font-weight: 500; }
+
+.metric.mono {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   color: #999;
 }
 
-.agent-tokens {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: #aaa;
-}
+.metric.dim { color: #bbb; }
 
 .stream-preview {
   margin-top: 8px;
@@ -144,5 +167,28 @@ const streamTail = computed(() => {
   overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
+  transition: max-height 0.2s;
+}
+
+.stream-text.expanded {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.expand-toggle {
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #888;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+
+.expand-toggle:hover {
+  color: #000;
+  background: #f0f0f0;
 }
 </style>

@@ -25,6 +25,7 @@ class PhaseResult(BaseModel):
     mode: str
     outputs: list[AgentOutput] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
+    failed_agents: list[dict[str, Any]] = Field(default_factory=list)
     duration_seconds: float = 0.0
 
 

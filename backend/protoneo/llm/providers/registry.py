@@ -16,7 +16,6 @@ from typing import Any
 from .oauth_base import OAuthProvider, load_credentials
 from .anthropic_oauth import AnthropicOAuth
 from .openai_oauth import OpenAIOAuth
-from .google_oauth import GoogleGeminiOAuth, GoogleAntigravityOAuth
 
 logger = logging.getLogger("protoneo.llm.providers.registry")
 
@@ -44,8 +43,6 @@ class ProviderRegistry:
         self._providers: dict[str, OAuthProvider] = {
             "anthropic": AnthropicOAuth(),
             "openai": OpenAIOAuth(),
-            "google": GoogleGeminiOAuth(),
-            "google-antigravity": GoogleAntigravityOAuth(),
         }
 
     def get_provider(self, name: str) -> OAuthProvider | None:
@@ -170,8 +167,6 @@ class ProviderRegistry:
         env_map = {
             "anthropic": ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
             "openai": ["OPENAI_API_KEY"],
-            "google": ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-            "google-antigravity": [],  # OAuth only, no env var fallback
         }
         for env_var in env_map.get(provider_name, []):
             val = os.getenv(env_var)

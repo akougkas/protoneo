@@ -25,8 +25,8 @@ _TAG_CAPABILITIES = {
     "reasoning": ModelCapability.EXTENDED_THINKING,
 }
 
-_VISION_HINTS = ("vision", "vl", "gemini", "gpt-4.1", "claude", "ocr")
-_FUNCTION_CALLING_PROVIDERS = {"anthropic", "openai", "google", "google-antigravity", "openrouter"}
+_VISION_HINTS = ("vision", "vl", "gpt-4.1", "claude", "ocr")
+_FUNCTION_CALLING_PROVIDERS = {"anthropic", "openai", "openrouter"}
 
 
 def _provider_prefixed_model_id(provider: str, model_id: str) -> str:
@@ -167,10 +167,6 @@ class CapabilityRegistry:
             return f"openrouter/{raw_model_id}"
         if provider == "anthropic":
             return f"anthropic/{raw_model_id}"
-        if provider == "google":
-            return f"gemini/{raw_model_id}"
-        if provider == "google-antigravity":
-            return f"google-antigravity/{raw_model_id}"
         if provider == "openai":
             return raw_model_id
         return None
@@ -272,7 +268,7 @@ class CapabilityRegistry:
         provider = model_id.split("/", 1)[0] if "/" in model_id else "unknown"
         requested_raw_id = model_id.split("/", 1)[1] if "/" in model_id else model_id
         # Map LiteLLM prefixes to canonical provider names
-        _LITELLM_PROVIDER = {"gemini": "google", "google-antigravity": "google-antigravity", "ollama_chat": "ollama"}
+        _LITELLM_PROVIDER = {"ollama_chat": "ollama"}
         provider = _LITELLM_PROVIDER.get(provider, provider)
         mapped_provider = self._provider_aliases.get(provider, provider)
         exact_alias_id = _provider_prefixed_model_id(mapped_provider, requested_raw_id)

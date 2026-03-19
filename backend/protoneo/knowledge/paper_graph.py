@@ -382,13 +382,34 @@ class PaperGraph(BaseModel):
     # ── Export methods ───────────────────────────────────────
 
     def to_d3_format(self) -> dict[str, Any]:
-        """Convert to GraphPanel-compatible D3 format."""
+        """Convert to GraphPanel-compatible D3 format.
+
+        Each node includes an explicit 'type' field (the semantic entity type)
+        and a numeric 'group' for D3 force-graph coloring, in addition to the
+        standard 'labels' array.
+        """
+        # Fix 4: Build stable type-to-group mapping for D3 coloring
+        all_types = sorted({n.node_type for n in self.nodes})
+        type_to_group = {t: i for i, t in enumerate(all_types)}
+
+        def _display_name(label: str) -> str:
+            """Extract a short display name (under 50 chars) from a verbose label."""
+            for sep in (":", "(", " — "):
+                if sep in label:
+                    short = label.split(sep)[0].strip()
+                    if len(short) > 2:
+                        return short[:50]
+            return label[:50]
+
         nodes = []
         for n in self.nodes:
             nodes.append(
                 {
                     "uuid": n.id,
                     "name": n.label,
+                    "display_name": _display_name(n.label),
+                    "type": n.node_type,
+                    "group": type_to_group.get(n.node_type, 0),
                     "labels": ["Entity", n.node_type],
                     "attributes": {"description": n.description, **n.attributes},
                 }
@@ -409,11 +430,11 @@ class PaperGraph(BaseModel):
         return {"nodes": nodes, "edges": edges}
 
     def to_reviewer_summary(self) -> str:
-        """Structured knowledge graph dump for reviewer context.
+        """Concise review briefing derived from the knowledge graph.
 
-        Pure factual representation: what the paper contains and how
-        concepts connect. No opinions, no gap judgments. Reviewers
-        do the judging; the graph does the bookkeeping.
+        Structured as three sections that directly support review writing:
+        key claims, methodology concerns, and evaluation summary. Capped
+        at ~3000 chars to avoid overwhelming reviewers.
         """
         if not self.nodes:
             return ""
@@ -433,56 +454,116 @@ class PaperGraph(BaseModel):
 
         label_map = {n.id: n.label for n in self.nodes}
         sem_edges = [e for e in self.edges if e.edge_type not in _NON_SEMANTIC_RELS]
-
         stats = self.graph_stats()
+
         lines = [
-            f"\n\n## Paper Knowledge Graph ({stats['semantic_entities']} entities, "
-            f"{stats['semantic_edges']} relationships, "
+            f"\n\n## Paper Knowledge Graph Review Briefing"
+            f" ({stats['semantic_entities']} entities, "
             f"{stats['connectivity_ratio']:.0%} connected)\n"
         ]
 
-        # ── Entities by Type ──
-        lines.append("### Entities by Type")
-        for etype, enodes in sorted(typed.items(), key=lambda x: -len(x[1])):
-            lines.append(f"**{etype.upper()}** ({len(enodes)}):")
-            for n in enodes[:12]:
-                parts = [n.label]
-                if n.description:
-                    parts.append(f"({n.description[:80]})")
-                if n.source_section:
-                    parts.append(f"[{n.source_section[:30]}]")
-                lines.append(f"  " + " ".join(parts))
-            if len(enodes) > 12:
-                lines.append(f"  ... +{len(enodes) - 12} more")
+        # ── Section 1: Key Claims ──
+        claims = typed.get("Claim", [])
+        methods = typed.get("Method", [])
+        contributions = (
+            self.ontology.key_contributions if self.ontology and self.ontology.key_contributions else []
+        )
 
-        # ── Relationships ──
-        if sem_edges:
-            lines.append(f"\n### Relationships ({len(sem_edges)} total)")
-            # Show ALL relationship types, grouped
-            by_type: dict[str, list] = defaultdict(list)
+        lines.append("### Key Claims & Contributions")
+        if contributions:
+            for c in contributions[:7]:
+                lines.append(f"- {c}")
+        for claim in claims[:5]:
+            sec = f" [{claim.source_section}]" if claim.source_section else ""
+            lines.append(f"- {claim.label}{sec}")
+        if not contributions and not claims:
+            for m in methods[:5]:
+                sec = f" [{m.source_section}]" if m.source_section else ""
+                lines.append(f"- Method: {m.label}{sec}")
+
+        # ── Section 2: Methodology & Grounding ──
+        lines.append("\n### Methodology")
+        # Show methods and what they use/evaluate
+        method_edges = [e for e in sem_edges if e.edge_type in ("USES", "EVALUATES_ON", "COMPARED_AGAINST")]
+        shown = set()
+        for e in method_edges[:8]:
+            src = label_map.get(e.source_id, "?")
+            tgt = label_map.get(e.target_id, "?")
+            key = (src, e.edge_type, tgt)
+            if key not in shown:
+                lines.append(f"- {src} {e.edge_type.lower().replace('_', ' ')} {tgt}")
+                shown.add(key)
+        if not method_edges:
+            for m in methods[:4]:
+                lines.append(f"- {m.label}")
+
+        # ── Section 3: Evaluation Summary ──
+        results = typed.get("Result", [])
+        baselines = typed.get("Baseline", [])
+        metrics = typed.get("Metric", [])
+        datasets = typed.get("Dataset", [])
+
+        lines.append("\n### Evaluation")
+        if baselines:
+            names = ", ".join(b.label.split(":")[0].strip() for b in baselines[:6])
+            lines.append(f"- Baselines: {names}")
+        if metrics:
+            names = ", ".join(m.label.split(":")[0].strip() for m in metrics[:8])
+            lines.append(f"- Metrics: {names}")
+        if datasets:
+            names = ", ".join(d.label.split(":")[0].strip() for d in datasets[:5])
+            lines.append(f"- Datasets/workloads: {names}")
+        for r in results[:5]:
+            sec = f" [{r.source_section}]" if r.source_section else ""
+            lines.append(f"- Result: {r.label[:80]}{sec}")
+
+        # Figures/tables referenced by semantic entities
+        _VISUAL_TYPES = {"Diagram", "Table"}
+        visual_nodes = {n.id: n for n in self.nodes if n.node_type in _VISUAL_TYPES}
+        if visual_nodes:
+            referenced_visuals: list[str] = []
             for e in sem_edges:
-                by_type[e.edge_type].append(e)
-            for etype, edges in sorted(by_type.items(), key=lambda x: -len(x[1])):
-                lines.append(f"**{etype}** ({len(edges)}):")
-                for e in edges[:6]:
-                    src = label_map.get(e.source_id, "?")
-                    tgt = label_map.get(e.target_id, "?")
-                    desc = f" [{e.description}]" if e.description else ""
-                    lines.append(f"  {src} → {tgt}{desc}")
-                if len(edges) > 6:
-                    lines.append(f"  ... +{len(edges) - 6} more")
+                if e.source_id in visual_nodes:
+                    tgt = label_map.get(e.target_id, "")
+                    if tgt:
+                        referenced_visuals.append(f"{visual_nodes[e.source_id].label} ({tgt})")
+                elif e.target_id in visual_nodes:
+                    src = label_map.get(e.source_id, "")
+                    if src:
+                        referenced_visuals.append(f"{visual_nodes[e.target_id].label} ({src})")
+            if referenced_visuals:
+                lines.append(f"- Evidence artifacts: {', '.join(referenced_visuals[:6])}")
 
-        # ── Graph Coverage ──
-        lines.append(f"\n### Coverage")
-        lines.append(f"- Sections with extracted entities: {stats['sections_covered']}/{stats['total_sections']}")
-        lines.append(f"- Entity types: {stats['entity_types']}")
-        lines.append(f"- Relationship types: {stats['edge_types']}")
-        if self.ontology and self.ontology.key_contributions:
-            lines.append(f"- Key contributions identified: {len(self.ontology.key_contributions)}")
-            for c in self.ontology.key_contributions:
-                lines.append(f"  {c}")
+        # ── Section 4: Limitations ──
+        limitations = typed.get("Limitation", [])
+        if limitations:
+            lines.append("\n### Limitations")
+            for lim in limitations[:5]:
+                sec = f" [{lim.source_section}]" if lim.source_section else ""
+                lines.append(f"- {lim.label[:80]}{sec}")
 
-        return "\n".join(lines) + "\n"
+        # ── Section 5: Potential Concerns ──
+        low_confidence = [n for n in semantic if n.confidence < 0.5]
+        if low_confidence:
+            lines.append("\n### Potential Concerns")
+            lines.append("*Entities flagged by verification (confidence < 0.5):*")
+            for n in sorted(low_confidence, key=lambda x: x.confidence)[:8]:
+                lines.append(
+                    f"- {n.label} ({n.node_type}, confidence={n.confidence:.2f})"
+                )
+
+        # ── Coverage stats (compact) ──
+        lines.append(
+            f"\n*Graph: {stats['entity_types']} entity types, "
+            f"{stats['edge_types']} edge types, "
+            f"{stats['sections_covered']}/{stats['total_sections']} sections covered.*"
+        )
+
+        summary = "\n".join(lines) + "\n"
+        # Cap at ~5000 chars to accommodate the additional sections
+        if len(summary) > 5200:
+            summary = summary[:5000].rsplit("\n", 1)[0] + "\n"
+        return summary
 
     # ── Review annotation ────────────────────────────────────
 
@@ -578,11 +659,28 @@ class PaperGraph(BaseModel):
         referenced_ids: set[str] = set()
         type_coverage: dict[str, dict] = defaultdict(lambda: {"total": 0, "referenced": 0})
 
+        def _match_aliases(node: GraphNode) -> list[str]:
+            """Generate match aliases for a node: full label, short name, key terms."""
+            aliases = set()
+            label = node.label.strip()
+            aliases.add(label.lower())
+            # Short name: text before first colon or parenthesis
+            for sep in (":", "(", " — "):
+                if sep in label:
+                    short = label.split(sep)[0].strip()
+                    if len(short) > 2:
+                        aliases.add(short.lower())
+                    break
+            # Node name field may differ from label (for ingested D3 data)
+            if hasattr(node, "attributes") and node.attributes.get("short_name"):
+                aliases.add(node.attributes["short_name"].lower())
+            return [a for a in aliases if len(a) > 2]
+
         for node in semantic:
-            label_lower = node.label.lower()
+            match_strings = _match_aliases(node)
             mentioning_reviewers = []
             for aid, text in reviewer_texts.items():
-                if label_lower in text:
+                if any(alias in text for alias in match_strings):
                     mentioning_reviewers.append(aid)
             per_entity.append({
                 "entity_id": node.id,
@@ -662,20 +760,20 @@ class PaperGraph(BaseModel):
         pass. Structural nodes are never pruned.
         """
         _KEEP = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
-        before = len(self.nodes)
-        removed_ids = set()
-        self.nodes = [
-            n for n in self.nodes
-            if n.node_type in _KEEP or n.confidence >= threshold
-            or not (removed_ids.add(n.id) or False)  # track removals
-        ]
-        # Clean edges referencing removed nodes
+        kept: list[GraphNode] = []
+        removed_ids: set[str] = set()
+        for n in self.nodes:
+            if n.node_type in _KEEP or n.confidence >= threshold:
+                kept.append(n)
+            else:
+                removed_ids.add(n.id)
+        self.nodes = kept
         if removed_ids:
             self.edges = [
                 e for e in self.edges
                 if e.source_id not in removed_ids and e.target_id not in removed_ids
             ]
-        removed = before - len(self.nodes)
+        removed = len(removed_ids)
         if removed:
             self.update_stats()
         return removed

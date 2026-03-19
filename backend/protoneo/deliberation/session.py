@@ -100,6 +100,7 @@ class Session(BaseModel):
 
     # Unified paper graph (persisted, survives restart)
     paper_text: str = ""
+    paper_markdown: str = ""
     paper_graph: dict[str, Any] | None = None
 
     # Pipeline stage tracking

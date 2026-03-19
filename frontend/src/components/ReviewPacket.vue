@@ -294,64 +294,41 @@
       </div>
     </div>
 
-    <!-- PC Chair Review (author-facing) -->
-    <div v-if="packet.pc_chair_review" class="pc-chair-section">
-      <h3>PC Chair Review</h3>
-      <div class="pc-chair-review-content" v-html="md(packet.pc_chair_review)"></div>
-      <div class="pc-chair-actions">
-        <button @click="copyPcChairReview" class="copy-btn" :class="{ copied: copySuccess }">
-          {{ copySuccess ? 'Copied!' : 'Copy PC Chair Review' }}
-        </button>
-        <span class="copy-hint">For pasting into HotCRP</span>
+    <!-- Export Controls -->
+    <div class="export-section">
+      <h3 class="export-heading">Export</h3>
+      <div class="export-grid">
+        <div class="export-card" @click="exportJSON">
+          <div class="export-icon">{ }</div>
+          <div class="export-label">Full Packet</div>
+          <div class="export-format">JSON</div>
+        </div>
+        <div class="export-card" @click="exportMarkdown">
+          <div class="export-icon">MD</div>
+          <div class="export-label">Full Packet</div>
+          <div class="export-format">Markdown</div>
+        </div>
+        <div class="export-card" @click="exportPDF">
+          <div class="export-icon">PDF</div>
+          <div class="export-label">Full Packet</div>
+          <div class="export-format">PDF</div>
+        </div>
+        <div class="export-card" @click="exportGraphJSON">
+          <div class="export-icon">KG</div>
+          <div class="export-label">Knowledge Graph</div>
+          <div class="export-format">JSON</div>
+        </div>
       </div>
-    </div>
-
-    <!-- Export -->
-    <div class="export-bar">
-      <button @click="exportJSON" class="export-btn">Export JSON</button>
-      <button @click="exportMarkdown" class="export-btn">Export Markdown</button>
-      <button @click="exportPDF" class="export-btn">Export PDF</button>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
-import { getReviewPacketMd, getReviewPacketPdf } from '../api/kernel.js'
+import { getReviewPacketMd, getReviewPacketPdf, exportGraph } from '../api/kernel.js'
+import { renderMarkdown } from '../utils/markdown.js'
 
-function md(text) {
-  if (!text) return ''
-  let html = text
-    // Escape HTML
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    // Headers
-    .replace(/^### (.+)$/gm, '<h4>$1</h4>')
-    .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^# (.+)$/gm, '<h2>$1</h2>')
-    // Bold
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    // Italic
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    // Code
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    // Lists
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>')
-    // Simple table detection: lines with | separators
-    .replace(/^\|(.+)\|$/gm, (match, content) => {
-      const cells = content.split('|').map(c => c.trim())
-      if (cells.every(c => /^[-:]+$/.test(c))) return '' // separator row
-      const tag = 'td'
-      return '<tr>' + cells.map(c => `<${tag}>${c}</${tag}>`).join('') + '</tr>'
-    })
-    // Wrap consecutive <tr> in <table>
-    .replace(/((?:<tr>.*<\/tr>\n?)+)/g, '<table class="md-table">$1</table>')
-    // Paragraphs (double newlines)
-    .replace(/\n\n/g, '</p><p>')
-    // Single newlines to <br>
-    .replace(/\n/g, '<br>')
-  return '<p>' + html + '</p>'
-}
+const md = renderMarkdown
 
 const props = defineProps({
   packet: { type: Object, required: true },
@@ -361,7 +338,6 @@ const expandedReviews = ref({})
 const showGraphCtx = ref(false)
 const showUtilization = ref(false)
 const showDelib = ref(false)
-const copySuccess = ref(false)
 
 // Expand the first review by default
 if (props.packet.reviews?.length > 0) {
@@ -419,24 +395,6 @@ function formatReadiness(status) {
   return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
-async function copyPcChairReview() {
-  try {
-    await navigator.clipboard.writeText(props.packet.pc_chair_review || '')
-    copySuccess.value = true
-    setTimeout(() => { copySuccess.value = false }, 2000)
-  } catch (e) {
-    // Fallback for older browsers
-    const ta = document.createElement('textarea')
-    ta.value = props.packet.pc_chair_review || ''
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    copySuccess.value = true
-    setTimeout(() => { copySuccess.value = false }, 2000)
-  }
-}
-
 function exportJSON() {
   const blob = new Blob([JSON.stringify(props.packet, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -474,6 +432,21 @@ async function exportPDF() {
     console.error('Failed to export PDF:', e)
   }
 }
+
+async function exportGraphJSON() {
+  try {
+    const res = await exportGraph(props.packet.session_id)
+    const url = URL.createObjectURL(res.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `graph-${props.packet.session_id || 'export'}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('Failed to export graph:', e)
+  }
+}
+
 </script>
 
 <style scoped>
@@ -961,87 +934,63 @@ async function exportPDF() {
 .readiness-status.revise_before_submit { color: #a07000; }
 .readiness-status.not_ready { color: #900; }
 
-/* PC Chair review */
-.pc-chair-section {
-  margin-bottom: 24px;
-  border: 2px solid #000;
-  border-radius: 6px;
-  padding: 20px 24px;
-  background: #fafafa;
-}
-
-.pc-chair-section h3 {
-  font-size: 14px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 14px;
-}
-
-.pc-chair-review-content {
-  font-size: 14px;
-  line-height: 1.7;
-  color: #333;
-  margin-bottom: 16px;
-}
-
-.pc-chair-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding-top: 12px;
-  border-top: 1px solid #e0e0e0;
-}
-
-.copy-btn {
-  padding: 8px 20px;
-  font-size: 13px;
-  font-weight: 600;
-  border: 2px solid #000;
-  background: #000;
-  color: #fff;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.copy-btn:hover {
-  background: #222;
-}
-
-.copy-btn.copied {
-  background: #4a4;
-  border-color: #4a4;
-}
-
-.copy-hint {
-  font-size: 11px;
-  color: #999;
-}
-
-/* Export */
-.export-bar {
+/* Export section */
+.export-section {
   margin-top: 24px;
   padding-top: 16px;
   border-top: 1px solid #e0e0e0;
-  display: flex;
-  gap: 12px;
 }
 
-.export-btn {
-  padding: 8px 20px;
+.export-heading {
   font-size: 13px;
-  font-weight: 500;
-  border: 1px solid #000;
-  background: #fff;
-  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #666;
+  margin-bottom: 12px;
+}
+
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.export-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 14px 16px;
   cursor: pointer;
   transition: all 0.15s;
+  text-align: center;
 }
 
-.export-btn:hover {
-  background: #000;
-  color: #fff;
+.export-card:hover {
+  border-color: #000;
+  background: #fafafa;
+}
+
+.export-icon {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 16px;
+  font-weight: 700;
+  color: #333;
+  margin-bottom: 6px;
+}
+
+.export-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #333;
+  margin-bottom: 2px;
+}
+
+.export-format {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #999;
 }
 
 /* Graph context section */

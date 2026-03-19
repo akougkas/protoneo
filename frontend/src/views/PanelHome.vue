@@ -159,6 +159,24 @@
         </div>
       </div>
 
+      <!-- Preset Selector -->
+      <div v-if="presets.length > 0 && panelAgents.length > 0" class="panel-section preset-section">
+        <h2 class="section-heading">
+          Model Preset
+          <span class="agent-count">Pre-configured model assignments</span>
+        </h2>
+        <div class="preset-row">
+          <select v-model="activePresetName" class="preset-select" @change="selectPreset(activePresetName)">
+            <option value="">Custom</option>
+            <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+          </select>
+          <span class="preset-desc" v-if="activePresetName">
+            {{ presets.find(p => p.name === activePresetName)?.description }}
+          </span>
+          <span class="preset-desc" v-else>Manual model selection below</span>
+        </div>
+      </div>
+
       <!-- Review Panel: Agent Cards -->
       <div v-if="panelAgents.length > 0" class="panel-section">
         <h2 class="section-heading">
@@ -206,11 +224,11 @@
         </div>
       </div>
 
-      <!-- Graph Processing Models -->
-      <div class="panel-section" v-if="availableModels.length > 0">
+      <!-- Graph Processing Models (local only) -->
+      <div class="panel-section" v-if="localModels.length > 0">
         <h2 class="section-heading">
           Graph Processing
-          <span class="agent-count">Models for pre-review knowledge graph pipeline</span>
+          <span class="agent-count">Local models for pre-review knowledge graph pipeline</span>
         </h2>
         <div class="graph-model-grid">
           <div v-for="step in graphSteps" :key="step.id" class="graph-model-card">
@@ -219,10 +237,20 @@
               <div class="gmc-desc">{{ step.desc }}</div>
             </div>
             <select v-model="modelMap[step.id]" class="model-select">
-              <option v-for="m in availableModels" :key="m.model_id" :value="m.model_id">{{ modelLabel(m) }}</option>
+              <option v-for="m in localModels" :key="m.model_id" :value="m.model_id">{{ modelLabel(m) }}</option>
             </select>
           </div>
         </div>
+      </div>
+      <div class="panel-section panel-section--muted" v-else-if="availableModels.length > 0">
+        <h2 class="section-heading">
+          Graph Processing
+          <span class="agent-count">No local models available</span>
+        </h2>
+        <p class="no-local-hint">
+          Start LM Studio or Ollama with a loaded model. Graph processing runs on local models
+          to preserve subscription tokens for reviews.
+        </p>
       </div>
 
       <!-- User Instructions -->
@@ -406,7 +434,7 @@ Examples:
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getConferences, getConference, getModels, startPanelReview, runPreflight, listSessions, getSettings, getActiveModelAssignments, startBatch, reviewWithGraph, listBatches } from '../api/kernel.js'
+import { getConferences, getConference, getModels, startPanelReview, runPreflight, listSessions, getSettings, getActiveModelAssignments, startBatch, reviewWithGraph, listBatches, getPresets, activatePreset } from '../api/kernel.js'
 
 const router = useRouter()
 
@@ -443,6 +471,10 @@ const batchFiles = ref([])
 const importFile = ref(null)
 const importGraphStats = ref(null)
 const recentBatches = ref([])
+
+// Presets
+const presets = ref([])
+const activePresetName = ref('')
 
 // Agent assignments built from conference profile
 const panelAgents = ref([])
@@ -481,6 +513,13 @@ const graphSteps = [
   { id: 'coref', label: 'Co-reference', desc: 'Resolves co-references and abbreviations' },
   { id: 'verification', label: 'Verification', desc: 'Grounding, completeness, consistency checks' },
 ]
+
+// Graph pipeline steps use local models only. Subscription tokens
+// (Anthropic, OpenAI) are reserved for review roles.
+const _SUBSCRIPTION_PROVIDERS = new Set(['anthropic', 'openai'])
+const localModels = computed(() =>
+  availableModels.value.filter(m => !_SUBSCRIPTION_PROVIDERS.has(m.provider))
+)
 
 function benchmarkTokensPerSecond(bench) {
   if (!bench) return null
@@ -609,6 +648,27 @@ function buildPanelFromProfile(profile) {
   panelAgents.value = agents
 }
 
+function applyPresetAssignments(assignments) {
+  if (!assignments || typeof assignments !== 'object') return
+  for (const [key, modelId] of Object.entries(assignments)) {
+    const resolved = normalizeModelId(modelId)
+    if (resolved) modelMap[key] = resolved
+  }
+}
+
+async function selectPreset(name) {
+  activePresetName.value = name
+  const preset = presets.value.find(p => p.name === name)
+  if (preset) {
+    applyPresetAssignments(preset.assignments)
+  }
+  try {
+    await activatePreset(name)
+  } catch (e) {
+    console.warn('Failed to persist preset selection:', e.message)
+  }
+}
+
 function modelLabel(m) {
   const mid = m.model_id || ''
   // Check if this model is an active assignment (mark it)
@@ -693,9 +753,24 @@ onMounted(async () => {
       console.warn('Active model assignments unavailable, using model list:', e.message)
     }
 
+    // Load presets
+    try {
+      const presetRes = await getPresets()
+      presets.value = presetRes.data.presets || []
+      activePresetName.value = presetRes.data.active_preset || ''
+    } catch (e) {
+      console.warn('Presets unavailable:', e.message)
+    }
+
     // Load default conference profile for agent cards
     if (selectedConference.value) {
-      selectConference(selectedConference.value)
+      await selectConference(selectedConference.value)
+    }
+
+    // Auto-apply active preset after conference profile sets default modelMap
+    if (activePresetName.value) {
+      const preset = presets.value.find(p => p.name === activePresetName.value)
+      if (preset) applyPresetAssignments(preset.assignments)
     }
   } catch (e) {
     console.error('Failed to load config:', e)
@@ -1034,6 +1109,17 @@ async function launchImport() {
 
 /* ── Review Panel: Agent Assignment Cards ── */
 .panel-section { margin-bottom: 28px; }
+.panel-section--muted { opacity: 0.6; }
+.no-local-hint { font-size: 0.85rem; color: var(--text-muted, #888); margin: 8px 0 0; }
+
+.preset-section { margin-bottom: 20px; }
+.preset-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.preset-select {
+  padding: 6px 10px; border-radius: 6px; font-size: 0.9rem;
+  border: 1px solid var(--border, #333); background: var(--bg-card, #1a1a2e);
+  color: var(--text, #e0e0e0); min-width: 180px;
+}
+.preset-desc { font-size: 0.82rem; color: var(--text-muted, #888); }
 
 .section-heading {
   display: flex;

@@ -60,3 +60,5 @@ In your `weaknesses`, always identify:
 - the highest-risk methodological issue;
 - the highest-risk evaluation issue;
 - the single most important revision the authors should make before submission.
+
+**Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

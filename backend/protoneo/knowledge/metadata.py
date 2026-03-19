@@ -391,22 +391,64 @@ def extract_equation_labels(text: str) -> list[str]:
     return labels
 
 
+def _assign_sections_to_citations(
+    sections: list[str],
+    text: str,
+    citations: list[dict],
+) -> list[dict]:
+    """Map each citation marker to its enclosing section based on position.
+
+    Finds the start position of each section heading in the text and assigns
+    each citation to the section whose start position is the closest preceding
+    position relative to the citation's position.
+    """
+    if not sections or not citations:
+        return citations
+
+    # Build sorted (position, heading) pairs
+    sec_positions: list[tuple[int, str]] = []
+    for sec in sections:
+        pos = text.find(sec)
+        if pos >= 0:
+            sec_positions.append((pos, sec))
+    sec_positions.sort(key=lambda x: x[0])
+
+    if not sec_positions:
+        return citations
+
+    for cm in citations:
+        cite_pos = cm.get("position", 0)
+        # Binary-ish search: find the last section that starts before cite_pos
+        assigned = sec_positions[0][1]
+        for sp, heading in sec_positions:
+            if sp <= cite_pos:
+                assigned = heading
+            else:
+                break
+        cm["section"] = assigned
+
+    return citations
+
+
 def extract_metadata(text: str) -> PaperMetadata:
     """Extract structured metadata from academic paper text."""
     ref_count, refs = _extract_references(text)
     word_count = len(text.split())
     section_texts = extract_section_texts(text)
+    sections = _extract_sections(text)
+    citations = extract_citation_markers(text)
+    citations = _assign_sections_to_citations(sections, text, citations)
 
     return PaperMetadata(
         title=_extract_title(text),
         abstract=_extract_abstract(text),
-        sections=_extract_sections(text),
+        sections=sections,
         figure_count=_count_figures(text),
         table_count=_count_tables(text),
         reference_count=ref_count,
         references=refs[:50],
         estimated_word_count=word_count,
-        citation_markers=extract_citation_markers(text),
+        citation_markers=citations,
         equation_labels=extract_equation_labels(text),
         section_texts=section_texts,
     )
@@ -609,17 +651,20 @@ def extract_metadata_from_markdown(markdown: str, flat_text: str = "") -> PaperM
     section_texts = extract_section_texts(text_for_counts) if flat_text else {}
     section_texts_md = extract_section_texts_md(markdown)
     ref_count, refs = _extract_references(text_for_counts)
+    final_sections = sections if sections else _extract_sections(text_for_counts)
+    citations = extract_citation_markers(text_for_counts)
+    citations = _assign_sections_to_citations(final_sections, text_for_counts, citations)
 
     return PaperMetadata(
         title=title,
         abstract=abstract,
-        sections=sections if sections else _extract_sections(text_for_counts),
+        sections=final_sections,
         figure_count=_count_figures(text_for_counts),
         table_count=_count_tables(text_for_counts),
         reference_count=ref_count,
         references=refs[:50],
         estimated_word_count=len(text_for_counts.split()),
-        citation_markers=extract_citation_markers(text_for_counts),
+        citation_markers=citations,
         equation_labels=extract_equation_labels(text_for_counts),
         section_texts=section_texts,
         section_texts_md=section_texts_md,

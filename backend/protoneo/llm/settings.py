@@ -63,6 +63,19 @@ class LocalEndpoint(BaseModel):
     location: str = _LOCALHOST  # "localhost" or "lan"
 
 
+class ModelPreset(BaseModel):
+    """Named model assignment preset.
+
+    Maps role IDs and graph step IDs to provider-prefixed model IDs.
+    Graph steps: ontology, extraction, coref, verification.
+    Review roles: defined by conference profile (technical, novelty, etc.).
+    """
+
+    name: str
+    description: str = ""
+    assignments: dict[str, str] = Field(default_factory=dict)
+
+
 class ProtoNeoSettings(BaseModel):
     """Root settings object persisted to disk.
 
@@ -91,6 +104,8 @@ class ProtoNeoSettings(BaseModel):
     openrouter_free_only: bool = True
     provider_enabled: dict[str, bool] = Field(default_factory=dict)
     active_models: dict[str, str] = Field(default_factory=dict)
+    presets: list[ModelPreset] = Field(default_factory=list)
+    active_preset: str = Field(default="", description="Name of the currently active preset")
     benchmark_results: list[dict[str, Any]] = Field(default_factory=list)
     discovered_models: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
@@ -388,6 +403,138 @@ def update_settings(patch: dict[str, Any]) -> ProtoNeoSettings:
     updated = ProtoNeoSettings.model_validate(_migrate_settings_data(merged))
     save_settings(updated)
     return updated
+
+
+# ── Built-in presets ──────────────────────────────────────
+#
+# These ship with ProtoNeo and are always available. Users can
+# override them or add custom presets via settings.json.
+# Model IDs use the provider-prefixed format (e.g. "lan-dynamo/model-name").
+
+_BUILTIN_PRESETS: list[ModelPreset] = [
+    ModelPreset(
+        name="dynamo-heavy",
+        description="Dynamo runs graph pipeline (distilled reasoning model), cloud runs reviews",
+        assignments={
+            # Graph pipeline: local only
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "extraction": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "coref": "lan-dynamo/qwen3.5-35b-a3b",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            # Reviews: cloud models
+            "technical": "anthropic/claude-opus-4-6",
+            "systems": "anthropic/claude-sonnet-4-6",
+            "novelty": "openai/gpt-5.4",
+            "clarity": "anthropic/claude-sonnet-4-6",
+            "skeptic": "openai/gpt-5.4",
+            "meta_reviewer": "anthropic/claude-opus-4-6",
+            "meta": "anthropic/claude-opus-4-6",
+        },
+    ),
+    ModelPreset(
+        name="split-local",
+        description="Dynamo handles reasoning-heavy steps, Mini handles fast extraction",
+        assignments={
+            # Graph pipeline: split across nodes
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "extraction": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "coref": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            # Reviews: cloud models
+            "technical": "anthropic/claude-opus-4-6",
+            "systems": "anthropic/claude-sonnet-4-6",
+            "novelty": "openai/gpt-5.4",
+            "clarity": "anthropic/claude-sonnet-4-6",
+            "skeptic": "openai/gpt-5.4",
+            "meta_reviewer": "anthropic/claude-opus-4-6",
+            "meta": "anthropic/claude-opus-4-6",
+        },
+    ),
+    ModelPreset(
+        name="dynamo-nemotron",
+        description="Nemotron MoE for graph pipeline, cloud for reviews",
+        assignments={
+            "ontology": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "extraction": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "coref": "lan-dynamo/qwen3.5-35b-a3b",
+            "verification": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "technical": "anthropic/claude-opus-4-6",
+            "systems": "anthropic/claude-sonnet-4-6",
+            "novelty": "openai/gpt-5.4",
+            "clarity": "anthropic/claude-sonnet-4-6",
+            "skeptic": "openai/gpt-5.4",
+            "meta_reviewer": "anthropic/claude-opus-4-6",
+            "meta": "anthropic/claude-opus-4-6",
+        },
+    ),
+    ModelPreset(
+        name="dynamo-granite",
+        description="IBM Granite for graph pipeline, cloud for reviews",
+        assignments={
+            "ontology": "lan-dynamo/ibm/granite-4-h-small",
+            "extraction": "lan-dynamo/ibm/granite-4-h-small",
+            "coref": "lan-dynamo/ibm/granite-4-h-micro",
+            "verification": "lan-dynamo/ibm/granite-4-h-small",
+            "technical": "anthropic/claude-opus-4-6",
+            "systems": "anthropic/claude-sonnet-4-6",
+            "novelty": "openai/gpt-5.4",
+            "clarity": "anthropic/claude-sonnet-4-6",
+            "skeptic": "openai/gpt-5.4",
+            "meta_reviewer": "anthropic/claude-opus-4-6",
+            "meta": "anthropic/claude-opus-4-6",
+        },
+    ),
+    ModelPreset(
+        name="dynamo-ministral",
+        description="Mistral Ministral 14B for graph pipeline, cloud for reviews",
+        assignments={
+            "ontology": "lan-dynamo/mistralai/ministral-3-14b-reasoning",
+            "extraction": "lan-dynamo/mistralai/ministral-3-14b",
+            "coref": "lan-dynamo/mistralai/ministral-3-8b",
+            "verification": "lan-dynamo/mistralai/ministral-3-14b-reasoning",
+            "technical": "anthropic/claude-opus-4-6",
+            "systems": "anthropic/claude-sonnet-4-6",
+            "novelty": "openai/gpt-5.4",
+            "clarity": "anthropic/claude-sonnet-4-6",
+            "skeptic": "openai/gpt-5.4",
+            "meta_reviewer": "anthropic/claude-opus-4-6",
+            "meta": "anthropic/claude-opus-4-6",
+        },
+    ),
+    ModelPreset(
+        name="full-local",
+        description="All local, no cloud tokens used (for testing pipeline)",
+        assignments={
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "extraction": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "coref": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "technical": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "systems": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "novelty": "lan-dynamo/qwen3.5-35b-a3b",
+            "clarity": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "skeptic": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "meta_reviewer": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "meta": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+        },
+    ),
+]
+
+
+def get_all_presets(settings: ProtoNeoSettings | None = None) -> list[ModelPreset]:
+    """Return built-in presets plus any user-defined ones from settings."""
+    s = settings or load_settings()
+    builtin_names = {p.name for p in _BUILTIN_PRESETS}
+    user_presets = [p for p in s.presets if p.name not in builtin_names]
+    return _BUILTIN_PRESETS + user_presets
+
+
+def resolve_preset(name: str, settings: ProtoNeoSettings | None = None) -> ModelPreset | None:
+    """Look up a preset by name."""
+    for p in get_all_presets(settings):
+        if p.name == name:
+            return p
+    return None
 
 
 def all_configured_endpoints(settings: ProtoNeoSettings | None = None) -> list[LocalEndpoint]:

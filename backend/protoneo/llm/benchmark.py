@@ -693,7 +693,7 @@ async def benchmark_model(
 
     # Cloud providers (subscription APIs) don't need warmup. Models are
     # always loaded. Local providers need warmup to load weights into VRAM.
-    is_cloud = provider in ("google", "google-antigravity", "anthropic", "openai")
+    is_cloud = provider in ("anthropic", "openai")
     if not is_cloud:
         try:
             await llm_client.complete(
@@ -716,10 +716,7 @@ async def benchmark_model(
     total_prompt_tokens = 0
     total_latency = 0
 
-    # Google Cloud Code Assist rate limits: production ~1 req/20s,
-    # sandbox (Antigravity) is more lenient. Pace to avoid 429 storms.
-    _PACING = {"google": 25, "google-antigravity": 8}
-    pacing_seconds = _PACING.get(provider, 0)
+    pacing_seconds = 0
 
     for dim_idx, (dim_key, dim_name, prompt, scorer) in enumerate(_DIMENSIONS):
         if on_dimension:

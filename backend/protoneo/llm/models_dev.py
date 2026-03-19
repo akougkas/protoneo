@@ -4,7 +4,7 @@ Fetches the same data source that pi-ai uses at build time (models.dev/api.json)
 but queries it at runtime. Results are cached to disk so we only hit the API once
 per session (or when explicitly refreshed).
 
-This is the discovery source for subscription providers (Anthropic, OpenAI, Google)
+This is the discovery source for subscription providers (Anthropic, OpenAI)
 whose OAuth tokens cannot enumerate models via /v1/models.
 
 models.dev JSON structure:
@@ -23,7 +23,6 @@ models.dev JSON structure:
             }
         },
         "openai": { ... },
-        "google": { ... },
         ...
     }
 """
@@ -47,7 +46,6 @@ _CACHE_TTL = 3600 * 6  # 6 hours
 _CHAT_PREFIXES = {
     "anthropic": ("claude-",),
     "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
-    "google": ("gemini-",),
 }
 
 # Skip models containing these substrings (embeddings, previews with weird suffixes)

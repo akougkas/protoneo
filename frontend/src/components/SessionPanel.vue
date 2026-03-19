@@ -19,7 +19,11 @@
             v-for="step in stage.steps"
             :key="step.key"
             :class="['sub-step', stepClass(step.key)]"
-          >{{ step.label }}</span>
+          >
+            {{ step.label }}
+            <span v-if="pipelineSteps[step.key]?.model" class="sub-step-model">{{ shortModel(pipelineSteps[step.key].model) }}</span>
+            <span v-if="pipelineSteps[step.key]?.duration" class="sub-step-dur">{{ Math.round(pipelineSteps[step.key].duration) }}s</span>
+          </span>
         </div>
       </div>
     </div>
@@ -130,6 +134,19 @@
       </div>
     </div>
 
+    <!-- Live Activity Ticker -->
+    <div v-if="status === 'running' && events.length" class="activity-ticker">
+      <div class="ticker-latest">
+        <span class="ticker-dot"></span>
+        {{ events[events.length - 1]?.text }}
+      </div>
+      <div class="ticker-context">
+        <span v-if="currentStepDesc" class="ticker-desc">{{ currentStepDesc }}</span>
+        <span v-if="currentStepModel" class="ticker-model">{{ currentStepModel }}</span>
+        <span v-if="totalTokens > 0" class="ticker-tokens">{{ totalTokens.toLocaleString() }} tokens</span>
+      </div>
+    </div>
+
     <!-- Pipeline Control Bar -->
     <div class="pipeline-control-bar" v-if="status !== 'completed' && status !== 'failed' && !showGate">
       <div v-if="pipelineMessage" class="pipeline-indicator">
@@ -193,6 +210,15 @@
       </div>
     </div>
 
+    <!-- Final Review Form (when complete) -->
+    <FinalReview
+      v-if="status === 'completed' && finalReview && Object.keys(finalReview).length > 0"
+      ref="finalReviewRef"
+      :session-id="sessionId"
+      :initial-review="finalReview"
+      :chair-model="chairModel"
+    />
+
     <!-- Review Packet (when complete) -->
     <ReviewPacket v-if="packet" :packet="packet" />
 
@@ -204,33 +230,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { getSession, getReviewPacket, connectStream, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph } from '../api/kernel.js'
+import { renderMarkdown } from '../utils/markdown.js'
 import AgentCard from './AgentCard.vue'
 import ReviewPacket from './ReviewPacket.vue'
+import FinalReview from './FinalReview.vue'
 
-function md(text) {
-  if (!text) return ''
-  let html = text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/^### (.+)$/gm, '<h4>$1</h4>')
-    .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^# (.+)$/gm, '<h2>$1</h2>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>')
-    .replace(/^\|(.+)\|$/gm, (match, content) => {
-      const cells = content.split('|').map(c => c.trim())
-      if (cells.every(c => /^[-:]+$/.test(c))) return ''
-      return '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>'
-    })
-    .replace(/((?:<tr>.*<\/tr>\n?)+)/g, '<table class="md-table">$1</table>')
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br>')
-  return '<p>' + html + '</p>'
-}
+const md = renderMarkdown
 
 const props = defineProps({
   sessionId: { type: String, required: true },
@@ -272,7 +279,7 @@ const currentStage = ref('')
 const currentStep = ref('')
 const agents = ref([])
 const events = ref([])
-const showEvents = ref(false)
+const showEvents = ref(true)
 const packet = ref(null)
 const error = ref('')
 const agentStreams = reactive({})
@@ -289,7 +296,30 @@ const stepMeta = reactive({})
 const expandedStep = ref('')
 const deliberationChat = ref([])
 const pcChairReview = ref('')
+const finalReview = ref(null)
+const finalReviewRef = ref(null)
+const chairModel = ref('')
 const startTime = Date.now()
+
+const stepDescriptions = {
+  parse: 'Extracting PDF structure',
+  metadata: 'Analyzing sections, citations, equations',
+  ontology: 'Generating review-specific entity types',
+  extract: 'Building knowledge graph from paper',
+  coref: 'Resolving abbreviations and aliases',
+  verify: 'Auditing graph for grounding issues',
+  summarize: 'Generating reviewer-facing summary',
+  independent_reviews: 'Reviewers reading paper independently',
+  deliberation: 'Reviewers debating assessments',
+  meta_review: 'Synthesizing committee consensus',
+  pc_chair: 'Writing author-facing review letter',
+}
+
+function shortModel(m) {
+  if (!m) return ''
+  const parts = m.split('/')
+  return parts[parts.length - 1].slice(0, 24)
+}
 const elapsed = ref(0)
 let ws = null
 let pollTimer = null
@@ -313,6 +343,19 @@ const statusText = computed(() => {
     return 'Review in progress...'
   }
   return status.value
+})
+
+const totalTokens = computed(() => {
+  return agents.value.reduce((sum, a) => sum + (a.tokens || 0), 0)
+})
+
+const currentStepModel = computed(() => {
+  const step = pipelineSteps[currentStep.value]
+  return step?.model ? shortModel(step.model) : ''
+})
+
+const currentStepDesc = computed(() => {
+  return stepDescriptions[currentStep.value] || ''
 })
 
 const duration = computed(() => {
@@ -563,8 +606,24 @@ function handleStreamEvent(evt) {
 
   // ── PC Chair ────────────────────────────────────────
   else if (evt.type === 'pc_chair_review_done') {
-    pcChairReview.value = evt.review || ''
+    // evt.review is now a structured dict (or a string for old sessions)
+    if (typeof evt.review === 'object' && evt.review !== null) {
+      finalReview.value = evt.review
+      pcChairReview.value = evt.review.comments_for_authors || ''
+    } else {
+      pcChairReview.value = evt.review || ''
+    }
+    if (evt.model) chairModel.value = evt.model
     addEvent(`PC Chair review complete (${evt.duration_seconds || 0}s)`)
+  }
+
+  // ── Field Refinement Streaming ─────────────────────
+  else if (evt.type === 'refine_token') {
+    if (finalReviewRef.value) finalReviewRef.value.handleRefineToken(evt.field, evt.chunk)
+  } else if (evt.type === 'refine_done') {
+    if (finalReviewRef.value) finalReviewRef.value.handleRefineDone(evt.field, evt.content)
+  } else if (evt.type === 'refine_error') {
+    if (finalReviewRef.value) finalReviewRef.value.handleRefineError(evt.field, evt.detail)
   }
 
   // ── Pipeline control ───────────────────────────────
@@ -614,6 +673,13 @@ async function fetchPacket() {
   try {
     const res = await getReviewPacket(props.sessionId)
     packet.value = res.data
+    // Populate final review from packet data on reconnect
+    if (res.data.final_review && Object.keys(res.data.final_review).length > 0 && !finalReview.value) {
+      finalReview.value = res.data.final_review
+    }
+    if (res.data.pc_chair_review && !pcChairReview.value) {
+      pcChairReview.value = res.data.pc_chair_review
+    }
   } catch (e) {
     console.error('Failed to fetch review packet:', e)
   }
@@ -1437,5 +1503,58 @@ onUnmounted(() => {
   color: #333;
   border-color: #ccc;
 }
+/* Sub-step model/duration tags */
+.sub-step-model {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  opacity: 0.6;
+  margin-left: 2px;
+}
+.sub-step-dur {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  opacity: 0.5;
+}
+
 .gate-btn.view-graph:hover { border-color: #000; color: #000; }
+
+/* Activity Ticker */
+.activity-ticker {
+  padding: 10px 14px;
+  background: #000;
+  color: #fff;
+  border-radius: 4px;
+  margin-bottom: 16px;
+}
+
+.ticker-latest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ticker-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e8a500;
+  animation: pulse 1.5s infinite;
+  flex-shrink: 0;
+}
+
+.ticker-context {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(255,255,255,0.5);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.ticker-desc { color: rgba(255,255,255,0.6); }
+.ticker-model { color: rgba(255,255,255,0.4); }
+.ticker-tokens { color: rgba(255,255,255,0.35); }
+
 </style>

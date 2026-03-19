@@ -230,7 +230,7 @@
               <div class="manual-model-row">
                 <input
                   class="manual-model-input"
-                  :placeholder="p.provider === 'openai' ? 'e.g. gpt-4.1' : p.provider.startsWith('google') ? 'e.g. gemini-2.5-pro' : 'e.g. claude-sonnet-4-6'"
+                  :placeholder="p.provider === 'openai' ? 'e.g. gpt-4.1' : 'e.g. claude-sonnet-4-6'"
                   :value="settings.active_models[p.provider] || ''"
                   @change="setActiveModel(p.provider, $event.target.value.trim())"
                   @keydown.enter="setActiveModel(p.provider, $event.target.value.trim())"
@@ -419,7 +419,7 @@ let loginState = ''
 
 // Computed
 const subscriptionProviders = computed(() =>
-  providers.value.filter(p => ['anthropic', 'openai', 'google', 'google-antigravity'].includes(p.provider))
+  providers.value.filter(p => ['anthropic', 'openai'].includes(p.provider))
 )
 const openrouterAvailable = computed(() => providers.value.find(p => p.provider === 'openrouter')?.has_credentials ?? false)
 const openrouterModelCount = computed(() => discovery.value.openrouter?.models?.length || 0)
@@ -476,7 +476,7 @@ const activeModelCount = computed(() => {
     if (node.online && isProviderEnabled(node.id)) count += node.models?.length || 0
   }
   if (isProviderEnabled('openrouter') && discovery.value.openrouter?.models) count += discovery.value.openrouter.models.length
-  for (const prov of ['anthropic', 'openai', 'google', 'google-antigravity']) {
+  for (const prov of ['anthropic', 'openai']) {
     if (isProviderEnabled(prov) && discovery.value[prov]?.models) count += discovery.value[prov].models.length
   }
   return count

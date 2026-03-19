@@ -32,3 +32,5 @@ Prioritize, in order:
 - SC values systems contributions that push the boundaries of what is achievable on current and emerging architectures.
 - Look for evidence of real deployment or at minimum, experiments on production-scale systems.
 - Experience papers should demonstrate lessons learned from real deployments, not just benchmarks.
+
+**Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

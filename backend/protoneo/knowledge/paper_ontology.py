@@ -345,9 +345,8 @@ def _validate_ontology(ontology: PaperOntology) -> PaperOntology:
     """Enforce constraints and merge base + fallback + structural types.
 
     Keeps LLM-generated types that do not duplicate any base type name.
-    Caps LLM-added entity types at 5 and LLM-added edge types at 5.
+    Caps LLM-added entity types at 8 and LLM-added edge types at 8.
     Adds all base, fallback, and structural types automatically.
-    Total: 13-17 entity types and 15-17 edge types per paper.
     """
     # Truncate descriptions to 100 chars
     for et in ontology.entity_types:
@@ -369,8 +368,8 @@ def _validate_ontology(ontology: PaperOntology) -> PaperOntology:
         if et.name not in reserved_entity_names
     ]
 
-    # Cap LLM-added types at 5
-    llm_entity_types = llm_entity_types[:5]
+    # Cap LLM-added types at 8
+    llm_entity_types = llm_entity_types[:8]
 
     # Assemble final entity types: base + LLM-specific + fallback + structural
     ontology.entity_types = (
@@ -391,8 +390,8 @@ def _validate_ontology(ontology: PaperOntology) -> PaperOntology:
         if et.name not in reserved_edge_names
     ]
 
-    # Cap LLM-added edge types at 5
-    llm_edge_types = llm_edge_types[:5]
+    # Cap LLM-added edge types at 8
+    llm_edge_types = llm_edge_types[:8]
 
     # Assemble final edge types: base + LLM-specific + structural
     ontology.edge_types = (
@@ -460,6 +459,89 @@ Return the refined ontology in the same JSON format:
 Keep 3-5 entity types and 3-5 edge types. Only return paper-specific types (base types like Claim, Method, Dataset are added automatically)."""
 
 
+def _build_condensed_text(
+    metadata: "PaperMetadata | None",
+    full_text: str,
+) -> str:
+    """Build a condensed paper excerpt for ontology Pass 1.
+
+    Includes the abstract, section headings, Introduction (first 3000 chars),
+    Methodology/Design section (first 5000 chars), and Evaluation section
+    (first 3000 chars). Falls back to the full text if section_texts is
+    empty or the condensed version is under 2000 chars.
+    """
+    if not metadata:
+        return ""
+
+    # Pick the best available section texts (markdown preferred)
+    sec_texts = metadata.section_texts_md or metadata.section_texts
+    if not sec_texts:
+        return ""
+
+    _INTRO_KEYS = {"introduction", "1 introduction", "i introduction", "1. introduction"}
+    _METHOD_KEYS = {
+        "methodology", "methods", "method", "approach", "design",
+        "implementation", "system design", "architecture", "overview",
+        "framework", "system", "proposed",
+    }
+    _EVAL_KEYS = {
+        "evaluation", "experiments", "results", "experimental evaluation",
+        "experimental results", "performance evaluation", "experimental setup",
+        "performance", "analysis",
+    }
+
+    def _find_section(target_keys: set[str], max_chars: int) -> str:
+        for heading, body in sec_texts.items():
+            heading_lower = heading.lower().strip()
+            # Strip leading number/dot prefix for matching
+            bare = re.sub(r"^[\d.]+\s*", "", heading_lower).strip()
+            if bare in target_keys or heading_lower in target_keys:
+                return body[:max_chars]
+            # Partial match: check if any target key appears as a substring
+            for key in target_keys:
+                if key in bare:
+                    return body[:max_chars]
+        return ""
+
+    parts: list[str] = []
+
+    # Abstract
+    if metadata.abstract:
+        parts.append(f"## Abstract\n{metadata.abstract}")
+
+    # Section headings
+    if metadata.sections:
+        parts.append(f"## Sections\n{', '.join(metadata.sections)}")
+
+    # Introduction
+    intro = _find_section(_INTRO_KEYS, 3000)
+    if intro:
+        parts.append(f"## Introduction\n{intro}")
+
+    # Methodology / Design
+    method = _find_section(_METHOD_KEYS, 5000)
+    if method:
+        parts.append(f"## Methodology\n{method}")
+
+    # Evaluation
+    evaluation = _find_section(_EVAL_KEYS, 3000)
+    if evaluation:
+        parts.append(f"## Evaluation\n{evaluation}")
+
+    condensed = "\n\n".join(parts)
+
+    # If we only got the abstract and headings (no body sections matched),
+    # append the first 8000 chars of the full text as fallback material
+    if len(condensed) < 4000 and full_text:
+        condensed += f"\n\n## Paper Body (excerpt)\n{full_text[:8000]}"
+
+    # Fall back to full text if condensed version is still too thin
+    if len(condensed) < 2000:
+        return ""
+
+    return condensed
+
+
 async def generate_paper_ontology(
     text: str,
     llm_client: LLMClient,
@@ -512,7 +594,13 @@ async def generate_paper_ontology(
         meta_parts.append(f"Estimated words: {metadata.estimated_word_count}")
         meta_preamble = "## Paper Structure (extracted from PDF)\n\n" + "\n".join(meta_parts) + "\n\n"
 
-    user_content = meta_preamble + _ONTOLOGY_USER + paper_text
+    # Build a condensed version of the paper for Pass 1 instead of sending
+    # the full 60-80k char document. The ontology generator only needs to
+    # understand the domain, contributions, and evaluation approach.
+    condensed_text = _build_condensed_text(metadata, paper_text)
+    pass1_text = condensed_text if condensed_text else paper_text
+
+    user_content = meta_preamble + _ONTOLOGY_USER + pass1_text
     if conference_context:
         user_content += f"\n\n## Conference Context\n{conference_context}"
 

@@ -770,7 +770,7 @@ class TestParallelPatternResilience:
 
     @pytest.mark.asyncio
     async def test_failure_emits_agent_error_event(self):
-        """Failed agents trigger an agent_error event."""
+        """Failed agents trigger a warning then a definitive error after retry."""
         bad = _make_failing_agent("bad", "Reviewer", RuntimeError("boom"))
         ctx = SessionContext("s1")
         msg = Message(role="user", content="Paper")
@@ -778,11 +778,18 @@ class TestParallelPatternResilience:
         events = []
 
         pattern = ParallelPattern()
-        await pattern.execute([bad], ctx, msg, rules, on_event=lambda t, d: events.append((t, d)))
+        result = await pattern.execute([bad], ctx, msg, rules, on_event=lambda t, d: events.append((t, d)))
+        # First attempt emits agent_warning, retry emits agent_error
+        warning_events = [e for e in events if e[0] == "agent_warning"]
+        assert len(warning_events) == 1
+        assert warning_events[0][1]["agent_id"] == "bad"
         error_events = [e for e in events if e[0] == "agent_error"]
         assert len(error_events) == 1
         assert error_events[0][1]["agent_id"] == "bad"
         assert "boom" in error_events[0][1]["error"]
+        # Failed agent is recorded in phase result
+        assert len(result.failed_agents) == 1
+        assert result.failed_agents[0]["agent_id"] == "bad"
 
 
 class TestRoundRobinResilience:
@@ -1049,8 +1056,8 @@ class TestPaperOntology:
             ],
         )
         validated = _validate_ontology(ontology)
-        # Max 5 LLM types + 10 base/fallback/structural = 15
-        assert len(validated.entity_types) == 15
+        # Max 8 LLM types + 10 base/fallback/structural = 18
+        assert len(validated.entity_types) == 18
 
     def test_validate_truncates_descriptions(self):
         from protoneo.knowledge.paper_ontology import PaperOntology, OntologyEntityType, _validate_ontology

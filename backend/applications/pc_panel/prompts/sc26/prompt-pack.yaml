@@ -12,7 +12,7 @@ composition:
     systems:
       path: "prompts/sc26/systems.md"
       phase: independent_review
-      default_model_hint: "gemini/gemini-3.1-pro-preview"
+      default_model_hint: "anthropic/claude-sonnet-4-6"
     novelty:
       path: "prompts/sc26/novelty.md"
       phase: independent_review

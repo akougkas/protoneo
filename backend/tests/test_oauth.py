@@ -15,9 +15,7 @@ from protoneo.llm.providers.oauth_base import (
     clear_credentials,
 )
 from protoneo.llm.providers.anthropic_oauth import AnthropicOAuth
-from protoneo.llm.providers.google_oauth import GoogleAntigravityOAuth
 from protoneo.llm.providers.openai_oauth import OpenAIOAuth, _extract_account_id
-from protoneo.llm.providers.google_oauth import GoogleGeminiOAuth
 from protoneo.llm.providers.registry import ProviderRegistry
 
 
@@ -99,23 +97,6 @@ def test_openai_auth_url():
     assert auth["state"]
 
 
-def test_google_auth_url():
-    provider = GoogleGeminiOAuth()
-    auth = provider.build_auth_url()
-    assert "accounts.google.com/o/oauth2/v2/auth" in auth["url"]
-    assert "access_type=offline" in auth["url"]
-    assert auth["verifier"]
-    assert auth["state"]
-
-
-def test_google_antigravity_auth_url():
-    provider = GoogleAntigravityOAuth()
-    auth = provider.build_auth_url()
-    assert "accounts.google.com/o/oauth2/v2/auth" in auth["url"]
-    assert "access_type=offline" in auth["url"]
-    assert auth["verifier"]
-    assert auth["state"]
-
 
 # ── Callback Parsing Tests ─────────────────────────────────
 
@@ -173,8 +154,6 @@ def test_registry_lists_providers():
     providers = reg.list_providers()
     assert "anthropic" in providers
     assert "openai" in providers
-    assert "google" in providers
-    assert "google-antigravity" in providers
 
 
 def test_registry_begin_login():
@@ -186,24 +165,6 @@ def test_registry_begin_login():
         assert "state" in auth
 
 
-def test_registry_begin_login_google():
-    reg = ProviderRegistry()
-    auth = reg.begin_login("google")
-    assert "url" in auth
-    assert "verifier" in auth
-    assert "state" in auth
-    assert "accounts.google.com" in auth["url"]
-
-
-def test_registry_begin_login_google_antigravity():
-    reg = ProviderRegistry()
-    auth = reg.begin_login("google-antigravity")
-    assert "url" in auth
-    assert "verifier" in auth
-    assert "state" in auth
-    assert "accounts.google.com" in auth["url"]
-
-
 def test_registry_begin_login_unknown():
     reg = ProviderRegistry()
     with pytest.raises(ValueError, match="Unknown provider"):
@@ -213,18 +174,12 @@ def test_registry_begin_login_unknown():
 def test_registry_status_no_login():
     reg = ProviderRegistry()
     statuses = reg.all_status()
-    assert len(statuses) == 4
+    assert len(statuses) == 2
     for s in statuses:
         assert "provider" in s
         assert "logged_in" in s
         assert "has_credentials" in s
         assert "api_key_source" in s
-    google = next(s for s in statuses if s["provider"] == "google")
-    assert google["oauth_enabled"] is True
-    assert google["oauth_experimental"] is False
-    antigravity = next(s for s in statuses if s["provider"] == "google-antigravity")
-    assert antigravity["oauth_enabled"] is True
-    assert antigravity["oauth_experimental"] is True
 
 
 def test_registry_resolve_api_key_env_fallback(monkeypatch, tmp_path):

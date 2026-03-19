@@ -3,6 +3,7 @@ Document parsing. Reuses the proven extraction logic from the legacy codebase.
 """
 
 import logging
+import re
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,39 @@ from ..agents.types import Document
 logger = logging.getLogger("protoneo.knowledge.parser")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt"}
+
+# Lines that are bare numbers (PDF line number artifacts from two-column layouts)
+_BARE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*$")
+
+
+def _strip_line_number_pollution(text: str) -> str:
+    """Remove leading/trailing runs of bare line numbers from PDF extraction.
+
+    Two-column ACM PDFs often have page line numbers extracted as content.
+    This strips consecutive bare-number lines from the start and end of the
+    document while preserving legitimate single-number content in the middle.
+    """
+    lines = text.split("\n")
+
+    # Strip leading bare-number lines
+    start = 0
+    while start < len(lines) and _BARE_NUMBER_RE.match(lines[start]):
+        start += 1
+
+    # Strip trailing bare-number lines
+    end = len(lines)
+    while end > start and _BARE_NUMBER_RE.match(lines[end - 1]):
+        end -= 1
+
+    if start > 0 or end < len(lines):
+        stripped_leading = start
+        stripped_trailing = len(lines) - end
+        logger.info(
+            "Stripped %d leading and %d trailing line-number lines from PDF text",
+            stripped_leading, stripped_trailing,
+        )
+
+    return "\n".join(lines[start:end])
 
 
 def _read_text_with_fallback(file_path: str) -> str:
@@ -95,6 +129,8 @@ def parse_file(file_path: str) -> Document:
     if suffix == ".pdf":
         markdown = _extract_pdf_docling(file_path)
         text = _extract_pdf(file_path)
+        # Fix 14: Strip line number pollution from two-column PDFs
+        text = _strip_line_number_pollution(text)
     else:
         text = _read_text_with_fallback(file_path)
 

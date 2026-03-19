@@ -269,15 +269,21 @@ async def resolve_coreferences(
             merged_count += 1
             logger.info("Merged '%s' into '%s'", remove_label, keep_label)
 
-    # Deduplicate edges after merges (same src+tgt+type)
+    # Fix 10: Deduplicate edges and remove self-loops after merges
     seen_edges = set()
     deduped_edges = []
+    self_loops_removed = 0
     for e in paper_graph.edges:
+        if e.source_id == e.target_id:
+            self_loops_removed += 1
+            continue
         key = (e.source_id, e.target_id, e.edge_type)
         if key not in seen_edges:
             deduped_edges.append(e)
             seen_edges.add(key)
     paper_graph.edges = deduped_edges
+    if self_loops_removed:
+        logger.info("Removed %d self-loop edges after co-ref merge", self_loops_removed)
 
     # Process aliases (create ALIAS_OF edges, do NOT merge)
     label_to_node = {n.label.lower(): n for n in paper_graph.nodes}

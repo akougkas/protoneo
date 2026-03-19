@@ -30,3 +30,5 @@ Prioritize, in order:
 - SC papers should advance the state of the art in a way that matters to practitioners, not just academics.
 - Incremental improvements over existing systems are acceptable if the engineering is excellent and the evaluation is thorough.
 - Cross-cutting contributions (e.g., connecting ML with traditional HPC) should be evaluated on technical merit, not just novelty of the combination.
+
+**Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

@@ -12,7 +12,7 @@ composition:
     novelty:
       path: "prompts/hpdc26/novelty.md"
       phase: independent_review
-      default_model_hint: "gemini/gemini-3.1-pro-preview"
+      default_model_hint: "anthropic/claude-sonnet-4-6"
     clarity:
       path: "prompts/hpdc26/clarity.md"
       phase: independent_review

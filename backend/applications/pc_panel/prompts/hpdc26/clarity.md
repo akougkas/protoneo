@@ -62,3 +62,5 @@ In `revision_actions`, prioritize:
 - terminology cleanup;
 - result presentation improvements;
 - limitations and artifact statements that need clearer placement.
+
+**Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

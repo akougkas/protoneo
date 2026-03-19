@@ -8,6 +8,7 @@ Three-check audit after extraction and co-reference resolution:
 Output: confidence scores per node/edge, list of issues.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -236,13 +237,22 @@ async def verify_graph(
     except Exception as e:
         logger.warning("Verification pass 1 (connectivity) failed: %s", e)
 
-    # ── Pass 2: Completeness ──
-    try:
-        # Refresh entity summary after pass 1 additions
-        entity_summary_2 = "\n".join(
-            f"- {n.label} ({n.node_type})"
-            for n in paper_graph.nodes if n.node_type not in _STRUCTURAL
-        )
+    # ── Passes 2 & 3 run concurrently ──
+    # Pass 2 (Completeness) adds new nodes; Pass 3 (Grounding) updates
+    # confidence scores on existing nodes. They operate on disjoint
+    # aspects of the graph so they can safely run in parallel.
+
+    # Refresh entity summaries after pass 1 additions (shared snapshot)
+    entity_summary_2 = "\n".join(
+        f"- {n.label} ({n.node_type})"
+        for n in paper_graph.nodes if n.node_type not in _STRUCTURAL
+    )
+    entity_details_3 = "\n".join(
+        f"- {n.label} ({n.node_type}): {n.description}"
+        for n in paper_graph.nodes if n.node_type not in _STRUCTURAL
+    )
+
+    async def _pass2_completeness() -> dict:
         prompt2 = _VERIFY_COMPLETENESS_PROMPT.format(
             entity_summary=entity_summary_2,
             paper_text=full_text,
@@ -257,36 +267,11 @@ async def verify_graph(
             temperature=0.1,
             max_tokens=8192,
         )
-        parsed2 = _parse_verification(response2.content)
+        return _parse_verification(response2.content)
 
-        label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
-        for concept in parsed2.get("missing_concepts", []):
-            name = concept.get("concept", "")
-            suggested_type = concept.get("suggested_type", "Concept")
-            section = concept.get("section", "")
-            if name and len(name) > 2 and name.lower() not in label_to_node:
-                paper_graph.add_node(
-                    label=name,
-                    node_type=suggested_type,
-                    description=f"Found by verification completeness pass",
-                    source_section=section,
-                    confidence=0.7,
-                )
-                result.entities_added += 1
-                result.missing_concepts.append(concept)
-
-        logger.info("Verification pass 2 (completeness): %d entities added", result.entities_added)
-    except Exception as e:
-        logger.warning("Verification pass 2 (completeness) failed: %s", e)
-
-    # ── Pass 3: Grounding ──
-    try:
-        entity_details = "\n".join(
-            f"- {n.label} ({n.node_type}): {n.description}"
-            for n in paper_graph.nodes if n.node_type not in _STRUCTURAL
-        )
+    async def _pass3_grounding() -> dict:
         prompt3 = _VERIFY_GROUNDING_PROMPT.format(
-            entity_details=entity_details,
+            entity_details=entity_details_3,
             paper_text=full_text,
         )
         response3 = await llm_client.complete(
@@ -299,23 +284,92 @@ async def verify_graph(
             temperature=0.1,
             max_tokens=8192,
         )
-        parsed3 = _parse_verification(response3.content)
+        return _parse_verification(response3.content)
 
-        result.grounding_issues = parsed3.get("grounding_issues", [])
-        label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
-        for issue in result.grounding_issues:
-            entity_name = issue.get("entity", "")
-            llm_conf = issue.get("confidence", 0.3)
-            node = label_to_node.get(entity_name.lower())
-            if node:
-                # Set confidence to the LLM's grounding score
-                node.confidence = max(0.1, min(float(llm_conf), node.confidence))
-                result.confidence_updates[node.id] = node.confidence
-                result.entities_flagged += 1
-
-        logger.info("Verification pass 3 (grounding): %d entities flagged", result.entities_flagged)
+    parsed2, parsed3 = None, None
+    try:
+        parsed2, parsed3 = await asyncio.gather(
+            _pass2_completeness(),
+            _pass3_grounding(),
+        )
     except Exception as e:
-        logger.warning("Verification pass 3 (grounding) failed: %s", e)
+        logger.warning("Verification passes 2/3 parallel execution failed: %s", e)
+
+    # ── Apply Pass 2 results (Completeness) ──
+    if parsed2 is not None:
+        try:
+            label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
+            section_name_to_id = {
+                n.label.lower(): n.id for n in paper_graph.nodes if n.node_type == "Section"
+            }
+            for concept in parsed2.get("missing_concepts", []):
+                if result.entities_added >= 15:
+                    logger.warning(
+                        "Completeness pass capped at 15 entities; %d remaining suggestions dropped",
+                        len(parsed2.get("missing_concepts", [])) - 15,
+                    )
+                    break
+                name = concept.get("concept", "")
+                suggested_type = concept.get("suggested_type", "Concept")
+                section = concept.get("section", "")
+                if name and len(name) > 2 and name.lower() not in label_to_node:
+                    new_node = paper_graph.add_node(
+                        label=name,
+                        node_type=suggested_type,
+                        description="Found by verification completeness pass",
+                        source_section=section,
+                        confidence=0.7,
+                    )
+                    label_to_node[name.lower()] = new_node
+                    linked = False
+                    if section:
+                        sec_id = section_name_to_id.get(section.lower())
+                        if not sec_id:
+                            for sec_label, sid in section_name_to_id.items():
+                                if section.lower() in sec_label or sec_label in section.lower():
+                                    sec_id = sid
+                                    break
+                        if sec_id:
+                            paper_graph.add_edge(
+                                source_id=new_node.id,
+                                target_id=sec_id,
+                                edge_type="APPEARS_IN",
+                                description=f"verification: found in {section}",
+                            )
+                            linked = True
+                            edges_added += 1
+                    if not linked:
+                        paper_graph.add_edge(
+                            source_id=new_node.id,
+                            target_id="paper-root",
+                            edge_type="PART_OF",
+                            description="verification: completeness addition",
+                        )
+                        edges_added += 1
+                    result.entities_added += 1
+                    result.missing_concepts.append(concept)
+
+            logger.info("Verification pass 2 (completeness): %d entities added", result.entities_added)
+        except Exception as e:
+            logger.warning("Verification pass 2 (completeness) result processing failed: %s", e)
+
+    # ── Apply Pass 3 results (Grounding) ──
+    if parsed3 is not None:
+        try:
+            result.grounding_issues = parsed3.get("grounding_issues", [])
+            label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
+            for issue in result.grounding_issues:
+                entity_name = issue.get("entity", "")
+                llm_conf = issue.get("confidence", 0.3)
+                node = label_to_node.get(entity_name.lower())
+                if node:
+                    node.confidence = max(0.1, min(float(llm_conf), node.confidence))
+                    result.confidence_updates[node.id] = node.confidence
+                    result.entities_flagged += 1
+
+            logger.info("Verification pass 3 (grounding): %d entities flagged", result.entities_flagged)
+        except Exception as e:
+            logger.warning("Verification pass 3 (grounding) result processing failed: %s", e)
 
     paper_graph.update_stats()
 
