@@ -239,23 +239,43 @@ class RoundRobinPattern:
         start = time.monotonic()
         result = PhaseResult(phase_name="round_robin", mode="round_robin")
 
-        # Build a summary of all prior outputs for the opening prompt
-        prior_outputs = []
-        for agent_id, outputs in context.agent_outputs.items():
-            for o in outputs:
-                prior_outputs.append(f"[{o.agent_role}]: {o.content}")
-        prior_text = "\n\n---\n\n".join(prior_outputs)
+        # Label prior outputs with naturalistic peer transcript framing.
+        def _label_prior_outputs(current_agent_id: str) -> str:
+            parts = []
+            for agent_id, outputs in context.agent_outputs.items():
+                for o in outputs:
+                    if agent_id == current_agent_id:
+                        header = f"--- [YOUR PRIOR ASSESSMENT as {o.agent_role}] ---"
+                    else:
+                        header = f"--- [BEGIN PEER TRANSCRIPT: Reviewer ({o.agent_role})] ---"
+                    footer = "--- [END PEER TRANSCRIPT] ---" if agent_id != current_agent_id else ""
+                    block = f"{header}\n{o.content}"
+                    if footer:
+                        block += f"\n{footer}"
+                    parts.append(block)
+            return "\n\n".join(parts)
+
+        # Fix 12: Track previous round output for duplicate detection
+        prev_round_outputs: dict[str, str] = {}
 
         for round_num in range(rules.max_rounds):
             if on_event:
                 on_event("round_start", {"round": round_num + 1})
 
             for agent in agents:
+                labeled_prior = _label_prior_outputs(agent.agent_id)
                 prompt = (
                     f"This is round {round_num + 1} of deliberation.\n\n"
-                    f"Prior reviews and discussion:\n{prior_text}\n\n"
-                    f"Please respond to the other reviewers' points. "
-                    f"Update your assessment if warranted."
+                    f"You are reading the reviews of your peers. Address them "
+                    f"naturally by their role in your response (e.g., 'I agree "
+                    f"with the Systems reviewer, but...').\n\n"
+                    f"Prior reviews and discussion:\n{labeled_prior}\n\n"
+                    f"You are the {agent.role}. Respond from your assigned "
+                    f"perspective and expertise. Your analysis should reflect "
+                    f"your unique vantage point.\n\n"
+                    f"Engage with the other reviewers' arguments. Concede points "
+                    f"where the evidence is convincing. Push back where you "
+                    f"disagree, citing specific manuscript evidence."
                 )
                 msg = Message(role="user", content=prompt)
 
@@ -359,6 +379,40 @@ class RoundRobinPattern:
         return result
 
 
+def _extract_merit_scores(phase: PhaseResult) -> list[float]:
+    """Parse numerical overall_merit scores from phase outputs.
+
+    Searches each output for JSON with an overall_merit.score field.
+    Returns a list of extracted scores (empty if parsing fails).
+    """
+    import json as _json
+    import re as _re
+
+    scores: list[float] = []
+    for output in phase.outputs:
+        text = output.content or ""
+        # Try to find overall_merit in JSON output
+        try:
+            # Strip markdown fences
+            cleaned = _re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+            cleaned = _re.sub(r"\n?\s*```\s*$", "", cleaned).strip()
+            parsed = _json.loads(cleaned)
+            if isinstance(parsed, dict):
+                merit = parsed.get("overall_merit", {})
+                if isinstance(merit, dict) and "score" in merit:
+                    scores.append(float(merit["score"]))
+                elif isinstance(merit, (int, float)):
+                    scores.append(float(merit))
+                continue
+        except (ValueError, _json.JSONDecodeError):
+            pass
+        # Fallback: search for the pattern in raw text
+        match = _re.search(r'"overall_merit"\s*:\s*\{[^}]*"score"\s*:\s*(\d+)', text)
+        if match:
+            scores.append(float(match.group(1)))
+    return scores
+
+
 class IndependentSynthesisPattern:
     """
     The primary pattern for the PC Paper Reviewer product.
@@ -419,15 +473,76 @@ class IndependentSynthesisPattern:
                     "message": f"{failed_count} reviewer(s) failed. Continuing with {len(phase1.outputs)} reviews.",
                 })
 
-        # Phase 2: Deliberation (round-robin)
+        # Phase 2: Deliberation (round-robin) with variance-triggered adjustment
+        # Only include reviewers that produced output in Phase 1.
         if rules.max_rounds > 0:
-            if on_event:
-                on_event("phase_start", {"phase": "deliberation"})
-            phase2 = await self._round_robin.execute(
-                reviewers, context, rules, on_event, stream=stream
-            )
-            phase2.phase_name = "deliberation"
-            phases.append(phase2)
+            failed_ids = {f["agent_id"] for f in phase1.failed_agents}
+            succeeded_ids = {o.agent_id for o in phase1.outputs}
+            deliberation_reviewers = [
+                r for r in reviewers
+                if r.agent_id not in failed_ids and r.agent_id in succeeded_ids
+            ]
+            if not deliberation_reviewers:
+                logger.error("No reviewers available for deliberation after Phase 1 failures.")
+            else:
+                if len(deliberation_reviewers) < len(reviewers):
+                    excluded = [r.agent_id for r in reviewers if r.agent_id not in succeeded_ids]
+                    logger.warning(
+                        "Excluding %d agent(s) from deliberation (no Phase 1 output): %s",
+                        len(excluded), excluded,
+                    )
+                    if on_event:
+                        on_event("phase_warning", {
+                            "phase": "deliberation",
+                            "message": f"Excluded agents with no Phase 1 output: {excluded}",
+                        })
+
+                # Variance-triggered round adjustment: parse merit scores from
+                # Phase 1 outputs and adapt deliberation depth accordingly.
+                effective_rounds = rules.max_rounds
+                merit_scores = _extract_merit_scores(phase1)
+                if len(merit_scores) >= 2:
+                    score_spread = max(merit_scores) - min(merit_scores)
+                    if score_spread <= 1.0:
+                        effective_rounds = min(1, rules.max_rounds)
+                        logger.info(
+                            "[Kernel] Consensus achieved (spread=%.1f, scores=%s). "
+                            "Running 1 synthesis round.",
+                            score_spread, merit_scores,
+                        )
+                        if on_event:
+                            on_event("consensus_detected", {
+                                "spread": score_spread,
+                                "scores": merit_scores,
+                                "effective_rounds": effective_rounds,
+                            })
+                    elif score_spread >= 2.0:
+                        effective_rounds = min(max(rules.max_rounds, 3), 4)
+                        logger.info(
+                            "[Kernel] Contested reviews (spread=%.1f, scores=%s). "
+                            "Deep deliberation: %d rounds.",
+                            score_spread, merit_scores, effective_rounds,
+                        )
+                        if on_event:
+                            on_event("contested_detected", {
+                                "spread": score_spread,
+                                "scores": merit_scores,
+                                "effective_rounds": effective_rounds,
+                            })
+
+                adjusted_rules = DeliberationRules(
+                    max_rounds=effective_rounds,
+                    timeout_seconds=rules.timeout_seconds,
+                    visibility=rules.visibility,
+                )
+
+                if on_event:
+                    on_event("phase_start", {"phase": "deliberation"})
+                phase2 = await self._round_robin.execute(
+                    deliberation_reviewers, context, adjusted_rules, on_event, stream=stream
+                )
+                phase2.phase_name = "deliberation"
+                phases.append(phase2)
 
         # Phase 3: Meta-review (synthesis)
         if on_event:

@@ -23,7 +23,7 @@ export function getModels() {
   return kernel.get('/api/models')
 }
 
-export function startPanelReview(file, conference = 'hpdc26', modelMap = {}, maxRounds = 2, userInstructions = '') {
+export function startPanelReview(file, conference = 'hpdc26', modelMap = {}, maxRounds = 3, userInstructions = '') {
   const form = new FormData()
   form.append('file', file)
   form.append('conference', conference)
@@ -246,7 +246,7 @@ export function exportGraph(sessionId) {
   })
 }
 
-export function reviewWithGraph(graphFile, conference = 'hpdc26', modelMap = {}, maxRounds = 2, userInstructions = '') {
+export function reviewWithGraph(graphFile, conference = 'hpdc26', modelMap = {}, maxRounds = 3, userInstructions = '') {
   const form = new FormData()
   form.append('graph_file', graphFile)
   form.append('conference', conference)
