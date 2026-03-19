@@ -26,6 +26,17 @@ class RevisionAction(BaseModel):
     why_it_matters: str = ""
 
 
+class ReviewerProvenance(BaseModel):
+    """Per-reviewer inference provenance for reproducibility."""
+
+    model_id: str = ""
+    temperature: float | None = None
+    top_p: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    prompt_pack_version: str = ""
+
+
 class IndividualReview(BaseModel):
     reviewer_role: str
     agent_id: str
@@ -42,6 +53,7 @@ class IndividualReview(BaseModel):
     revision_actions: list[Any] = Field(default_factory=list)
     citations: list[dict] = Field(default_factory=list)
     raw_content: str = ""
+    provenance: ReviewerProvenance = Field(default_factory=ReviewerProvenance)
 
 
 class DeliberationRound(BaseModel):
@@ -72,10 +84,11 @@ class ReviewPacket(BaseModel):
     reviews: list[IndividualReview] = Field(default_factory=list)
     deliberation: list[DeliberationRound] = Field(default_factory=list)
     meta_review: MetaReview = Field(default_factory=MetaReview)
-    pc_chair_review: str = ""
+    pc_chair_review: dict[str, Any] = Field(default_factory=dict)
     duration_seconds: float = 0.0
     total_cost: float = 0.0
     graph_summary: str = ""
     graph_node_count: int = 0
     graph_edge_count: int = 0
     graph_utilization: dict[str, Any] = Field(default_factory=dict)
+    provenance_metadata: dict[str, Any] = Field(default_factory=dict)

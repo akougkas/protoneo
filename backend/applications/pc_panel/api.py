@@ -44,6 +44,7 @@ from .pipeline import (
     get_session_ontologies,
 )
 from .preflight import run_preflight
+from .prompts import load_prompt_pack
 from .review import (
     build_agent_configs,
     build_deliberation_config,
@@ -52,6 +53,45 @@ from .review import (
 )
 
 logger = logging.getLogger("protoneo.pc_panel.api")
+
+
+def _extract_provenance_args(session) -> dict:
+    """Extract agent_configs and prompt_pack_version from a stored session."""
+    from protoneo.config.schema import AgentConfig as _AC
+    agent_configs = {}
+    for aid, cfg_dict in session.config.get("agents", {}).items():
+        if isinstance(cfg_dict, dict):
+            try:
+                agent_configs[aid] = _AC.model_validate(cfg_dict)
+            except Exception:
+                pass
+
+    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+    prompt_pack_version = ""
+    try:
+        pack = load_prompt_pack(conference_slug)
+        prompt_pack_version = pack.get("version", "")
+    except Exception:
+        pass
+
+    return {"agent_configs": agent_configs, "prompt_pack_version": prompt_pack_version}
+
+
+class _MinimalDoc:
+    """Lightweight document proxy for build_user_message() when
+    the full Document model is unavailable (e.g., launch-review
+    on a session that only has persisted text)."""
+
+    def __init__(self, text: str, markdown: str, filename: str):
+        self.text = text
+        self.markdown = markdown
+        self.filename = filename
+        self.chunks: list[str] = []
+
+
+def _is_completed(session) -> bool:
+    """Check if a session has completed, handling both enum and string status."""
+    return session.status in (SessionStatus.COMPLETED, SessionStatus.COMPLETED.value)
 
 
 async def _recover_stale_sessions(app: FastAPI) -> None:
@@ -1032,11 +1072,9 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             profile = ConferenceProfile(slug=conference_slug, name=conference_slug)
 
         paper_title = session.config.get("metadata", {}).get("paper_title", "")
-        packet = result_to_packet(result, profile, paper_title)
-
-        pc_chair_text = session.result.get("pc_chair_review", "")
-        if pc_chair_text:
-            packet.pc_chair_review = pc_chair_text
+        final_review = session.result.get("final_review", {})
+        prov_args = _extract_provenance_args(session)
+        packet = result_to_packet(result, profile, paper_title, final_review=final_review, **prov_args)
 
         if session.paper_graph:
             try:
@@ -1086,7 +1124,9 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             profile = ConferenceProfile(slug=conference_slug, name=conference_slug)
 
         paper_title = session.config.get("metadata", {}).get("paper_title", "")
-        packet = result_to_packet(result, profile, paper_title)
+        final_review = session.result.get("final_review", {})
+        prov_args = _extract_provenance_args(session)
+        packet = result_to_packet(result, profile, paper_title, final_review=final_review, **prov_args)
         md = packet_to_markdown(packet)
 
         return Response(
@@ -1128,7 +1168,9 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             profile = ConferenceProfile(slug=conference_slug, name=conference_slug)
 
         paper_title = session.config.get("metadata", {}).get("paper_title", "")
-        packet = result_to_packet(result, profile, paper_title)
+        final_review = session.result.get("final_review", {})
+        prov_args = _extract_provenance_args(session)
+        packet = result_to_packet(result, profile, paper_title, final_review=final_review, **prov_args)
         pdf_bytes = packet_to_pdf(packet)
 
         return Response(

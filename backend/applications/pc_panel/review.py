@@ -8,17 +8,18 @@ engine into a complete review workflow.
 import json
 import logging
 import re
-from pathlib import Path
+from typing import Any
 
 from protoneo.agents.types import Document
 from protoneo.config.schema import AgentConfig, DeliberationConfig, PhaseConfig
 from protoneo.deliberation.types import DeliberationResult
-from .conference import ConferenceProfile, load_profile
-from .prompts import assemble_system_prompt, load_prompt_pack
+from .conference import ConferenceProfile
+from .prompts import assemble_system_prompt
 from .schemas import (
     DeliberationRound,
     IndividualReview,
     MetaReview,
+    ReviewerProvenance,
     ReviewPacket,
 )
 
@@ -287,17 +288,33 @@ def build_user_message(document: Document, profile: ConferenceProfile) -> str:
         f"MANUSCRIPT\n"
         f"{'=' * 60}\n\n"
     )
-    return header + document.text
+    paper_content = document.markdown if document.markdown else document.text
+    return header + paper_content
 
 
-def parse_review_output(output, role: str) -> IndividualReview:
+def parse_review_output(
+    output,
+    role: str,
+    agent_config: AgentConfig | None = None,
+    prompt_pack_version: str = "",
+) -> IndividualReview:
     """Parse an agent output into a structured IndividualReview."""
     parsed = _extract_json(output.content)
     model = output.metadata.get("model", "")
 
+    # Build per-reviewer provenance from agent config
+    provenance = ReviewerProvenance(
+        model_id=model,
+        temperature=output.metadata.get("temperature") if agent_config is None else agent_config.temperature,
+        top_p=agent_config.top_p if agent_config else None,
+        presence_penalty=agent_config.presence_penalty if agent_config else None,
+        frequency_penalty=agent_config.frequency_penalty if agent_config else None,
+        prompt_pack_version=prompt_pack_version,
+    )
+
     if parsed:
         return IndividualReview(
-            reviewer_role=parsed.get("reviewer_role", role),
+            reviewer_role=role,
             agent_id=output.agent_id,
             model=model,
             summary=parsed.get("summary", ""),
@@ -377,6 +394,9 @@ def result_to_packet(
     result: DeliberationResult,
     profile: ConferenceProfile,
     paper_title: str = "",
+    final_review: dict | None = None,
+    agent_configs: dict[str, AgentConfig] | None = None,
+    prompt_pack_version: str = "",
 ) -> ReviewPacket:
     """Convert a DeliberationResult into a structured ReviewPacket."""
     reviews: list[IndividualReview] = []
@@ -397,7 +417,11 @@ def result_to_packet(
                     if r in output.agent_id:
                         role_guess = r
                         break
-                reviews.append(parse_review_output(output, role_guess))
+                reviews.append(parse_review_output(
+                    output, role_guess,
+                    agent_config=_agent_configs.get(role_guess),
+                    prompt_pack_version=prompt_pack_version,
+                ))
 
         elif phase.phase_name == "deliberation":
             current_round = 0
@@ -433,9 +457,21 @@ def result_to_packet(
             if phase.outputs:
                 meta = parse_meta_review(phase.outputs[0])
 
-    pc_chair_text = ""
-    if hasattr(result, "metadata") and isinstance(result.metadata, dict):
-        pc_chair_text = result.metadata.get("pc_chair_review", "")
+    # Build packet-level provenance for reproducibility
+    provenance: dict[str, Any] = {
+        "prompt_pack_version": prompt_pack_version,
+        "conference_slug": profile.slug,
+        "graph_pruning_threshold": profile.graph_pruning_threshold,
+        "agents": {},
+    }
+    for aid, cfg in _agent_configs.items():
+        provenance["agents"][aid] = {
+            "model_id": cfg.model,
+            "temperature": cfg.temperature,
+            "top_p": cfg.top_p,
+            "presence_penalty": cfg.presence_penalty,
+            "frequency_penalty": cfg.frequency_penalty,
+        }
 
     return ReviewPacket(
         session_id=result.session_id,
@@ -444,7 +480,8 @@ def result_to_packet(
         reviews=reviews,
         deliberation=deliberation_rounds,
         meta_review=meta,
-        pc_chair_review=pc_chair_text,
+        pc_chair_review=final_review or {},
         duration_seconds=result.duration_seconds,
         total_cost=result.total_cost,
+        provenance_metadata=provenance,
     )

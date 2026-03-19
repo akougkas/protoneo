@@ -239,7 +239,129 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
                 lines.append(reason)
             lines.append("")
 
+    # PC Chair Review
+    if packet.pc_chair_review:
+        lines.append("---")
+        lines.append("")
+        lines.append("## PC Chair Review")
+        lines.append("")
+
+        chair = packet.pc_chair_review
+        if chair.get("overall_merit"):
+            merit = chair["overall_merit"]
+            score = merit.get("score", "")
+            label = merit.get("label", "")
+            if score or label:
+                lines.append(f"**Overall Merit:** {score}/5 ({label})")
+                lines.append("")
+
+        if chair.get("reviewer_expertise"):
+            exp = chair["reviewer_expertise"]
+            score = exp.get("score", "")
+            label = exp.get("label", "")
+            if score or label:
+                lines.append(f"**Expertise:** {score} ({label})")
+                lines.append("")
+
+        if chair.get("paper_summary"):
+            lines.append("**Paper Summary:**")
+            lines.append("")
+            lines.append(chair["paper_summary"])
+            lines.append("")
+
+        if chair.get("strengths"):
+            lines.append("**Strengths:**")
+            lines.append("")
+            val = chair["strengths"]
+            if isinstance(val, list):
+                lines.append(_fmt_list(val))
+            else:
+                lines.append(str(val))
+            lines.append("")
+
+        if chair.get("weaknesses"):
+            lines.append("**Weaknesses:**")
+            lines.append("")
+            val = chair["weaknesses"]
+            if isinstance(val, list):
+                lines.append(_fmt_list(val))
+            else:
+                lines.append(str(val))
+            lines.append("")
+
+        if chair.get("comments_for_authors"):
+            lines.append("**Comments for Authors:**")
+            lines.append("")
+            lines.append(str(chair["comments_for_authors"]))
+            lines.append("")
+
+        if chair.get("questions_for_authors"):
+            lines.append("**Questions for Authors:**")
+            lines.append("")
+            val = chair["questions_for_authors"]
+            if isinstance(val, list):
+                lines.append(_fmt_list(val, ordered=True))
+            else:
+                lines.append(str(val))
+            lines.append("")
+
+        if chair.get("revision_actions"):
+            lines.append("**Revision Actions:**")
+            lines.append("")
+            lines.append(_fmt_list(chair["revision_actions"]))
+            lines.append("")
+
+        if chair.get("submission_readiness"):
+            sr = chair["submission_readiness"]
+            status = sr.get("status", "").replace("_", " ").title()
+            reason = sr.get("reason", "")
+            lines.append(f"**Submission Readiness:** {status}")
+            if reason:
+                lines.append(f"  {reason}")
+            lines.append("")
+
+        if chair.get("comments_for_pc"):
+            lines.append("**Comments for PC (internal):**")
+            lines.append("")
+            lines.append(str(chair["comments_for_pc"]))
+            lines.append("")
+
+    # System Provenance block for reproducibility
+    if packet.provenance_metadata:
+        prov = packet.provenance_metadata
+        lines.append("---")
+        lines.append("")
+        lines.append("## System Provenance")
+        lines.append("")
+        if prov.get("prompt_pack_version"):
+            lines.append(f"**Prompt Pack Version:** {prov['prompt_pack_version']}")
+        if prov.get("conference_slug"):
+            lines.append(f"**Conference Profile:** {prov['conference_slug']}")
+        if prov.get("graph_pruning_threshold") is not None:
+            lines.append(f"**Graph Pruning Threshold:** {prov['graph_pruning_threshold']}")
+        lines.append("")
+
+        agents_prov = prov.get("agents", {})
+        if agents_prov:
+            lines.append("| Role | Model | Temperature | Top-P | Presence | Frequency |")
+            lines.append("|------|-------|-------------|-------|----------|-----------|")
+            for role_id, info in agents_prov.items():
+                model = info.get("model_id", "")
+                temp = info.get("temperature")
+                tp = info.get("top_p")
+                pp = info.get("presence_penalty")
+                fp = info.get("frequency_penalty")
+                lines.append(
+                    f"| {role_id} | `{model}` | "
+                    f"{temp if temp is not None else '\u2014'} | "
+                    f"{tp if tp is not None else '\u2014'} | "
+                    f"{pp if pp is not None else '\u2014'} | "
+                    f"{fp if fp is not None else '\u2014'} |"
+                )
+            lines.append("")
+
     return "\n".join(lines)
+
 
 
 _PDF_CSS = """\
