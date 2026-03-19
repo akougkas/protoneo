@@ -33,8 +33,9 @@ def assemble_system_prompt(
     conference_slug: str,
     role: str,
     conference_context: str = "",
+    agent_focus: str = "",
 ) -> str:
-    """Build a complete system prompt: shared + role overlay + conference context."""
+    """Build a complete system prompt: shared + role overlay + focus anchor + conference context."""
     shared = load_shared_prompt(conference_slug)
     overlay = load_role_prompt(conference_slug, role)
 
@@ -43,6 +44,19 @@ def assemble_system_prompt(
         parts.append(shared)
     if overlay:
         parts.append(overlay)
+
+    # Epistemic anchor: inject domain expertise directive between role overlay
+    # and conference context so the agent evaluates through its focus lens.
+    if agent_focus:
+        parts.append(
+            "### CRITICAL EPISTEMIC DIRECTIVE\n\n"
+            f"Your specific domain expertise for this panel is: [{agent_focus}]. "
+            "You must aggressively anchor your technical audit, critique, and "
+            "Knowledge Graph traversal strictly on these concepts. If the paper's "
+            "core claims align with your focus, you are the primary authority; "
+            "delegate other domains to your co-reviewers."
+        )
+
     if conference_context:
         parts.append(f"## Conference Context\n\n{conference_context}")
 
