@@ -502,6 +502,25 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         },
     ),
     ModelPreset(
+        name="openai-only",
+        description="All reviewers on GPT-5.4 Mini, meta and chair on GPT-5.4 (no Anthropic)",
+        assignments={
+            # Graph pipeline: local
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "extraction": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "coref": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            # Reviews: OpenAI only
+            "technical": "openai/gpt-5.4-mini",
+            "systems": "openai/gpt-5.4-mini",
+            "novelty": "openai/gpt-5.4-mini",
+            "clarity": "openai/gpt-5.4-mini",
+            "skeptic": "openai/gpt-5.4-mini",
+            "meta_reviewer": "openai/gpt-5.4",
+            "meta": "openai/gpt-5.4",
+        },
+    ),
+    ModelPreset(
         name="full-local",
         description="All local, no cloud tokens used (for testing pipeline)",
         assignments={

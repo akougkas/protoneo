@@ -36,6 +36,7 @@ from .types import LLMResponse, ModelInfo, TokenUsage
 logger = logging.getLogger("protoneo.llm.client")
 
 litellm.suppress_debug_info = True
+litellm.drop_params = True
 
 _MAX_RETRIES = 3
 _BASE_DELAY = 2.0

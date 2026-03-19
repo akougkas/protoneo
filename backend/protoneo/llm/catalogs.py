@@ -44,6 +44,14 @@ OPENAI_SUBSCRIPTION_MODELS = [
         "provider_type": "subscription",
     },
     {
+        "id": "gpt-5.4-mini",
+        "name": "GPT-5.4 Mini",
+        "context_length": 272_000,
+        "reasoning": True,
+        "source": "openai",
+        "provider_type": "subscription",
+    },
+    {
         "id": "gpt-5.3-codex",
         "name": "GPT-5.3 Codex",
         "context_length": 272_000,
