@@ -502,6 +502,26 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         },
     ),
     ModelPreset(
+        name="nemotron-local",
+        description="Nemotron 30B MoE on Dynamo for all reviewers, Qwen distilled on Mini for meta",
+        assignments={
+            # Graph pipeline: nemotron on dynamo
+            "ontology": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "extraction": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "coref": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "verification": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            # Reviews: nemotron on dynamo (4 parallel via LM Studio)
+            "technical": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "systems": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "novelty": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "clarity": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            "skeptic": "lan-dynamo/nemotron-3-nano-30b-a3b",
+            # Meta + chair: qwen distilled on mini
+            "meta_reviewer": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "meta": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+        },
+    ),
+    ModelPreset(
         name="openai-only",
         description="All reviewers on GPT-5.4 Mini, meta and chair on GPT-5.4 (no Anthropic)",
         assignments={
