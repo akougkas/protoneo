@@ -101,7 +101,6 @@ class ProtoNeoConfig(BaseModel):
         for provider_name, env_vars in [
             ("anthropic", ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
             ("openai", ["OPENAI_API_KEY"]),
-            ("google", ["GOOGLE_API_KEY", "GEMINI_API_KEY"]),
         ]:
             key = None
             if oauth_registry:

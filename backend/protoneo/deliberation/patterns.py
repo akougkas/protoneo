@@ -9,7 +9,7 @@ phase, an optional round-robin phase, and a sequential synthesis phase.
 import asyncio
 import logging
 import time
-from typing import AsyncGenerator, Callable
+from typing import Callable
 
 from ..agents.base import BaseAgent
 from ..agents.types import AgentOutput, Message
@@ -144,20 +144,74 @@ class ParallelPattern:
         tasks = [run_agent(agent) for agent in agents]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Collect agents that need retry (exceptions or empty output)
+        retry_agents: list[BaseAgent] = []
+
         for i, r in enumerate(results):
             if isinstance(r, Exception):
                 agent = agents[i]
-                logger.error("Agent %s (%s) failed in parallel phase: %s", agent.agent_id, agent.role, r)
-                failed_agents.append({"agent_id": agent.agent_id, "role": agent.role, "error": str(r)})
+                logger.warning("Agent %s (%s) failed in parallel phase: %s (will retry)", agent.agent_id, agent.role, r)
+                retry_agents.append(agent)
                 if on_event:
-                    on_event("agent_error", {"agent_id": agent.agent_id, "role": agent.role, "error": str(r)})
+                    on_event("agent_warning", {"agent_id": agent.agent_id, "role": agent.role, "message": f"Failed: {r}. Retrying..."})
                 continue
             response, output = r
+            # Fix 1: Check for empty content after thinking-strip
+            if not output.content or not output.content.strip():
+                agent = agents[i]
+                logger.warning(
+                    "Agent %s (%s) returned empty output, scheduling retry",
+                    agent.agent_id, agent.role,
+                )
+                retry_agents.append(agent)
+                if on_event:
+                    on_event("agent_warning", {
+                        "agent_id": agent.agent_id, "role": agent.role,
+                        "message": "Empty output, retrying...",
+                    })
+                continue
             context.add_message(response)
             context.add_output(output)
             result.messages.append(response)
             result.outputs.append(output)
 
+        # Retry failed/empty agents once (sequentially to avoid contention)
+        for agent in retry_agents:
+            logger.info("Retrying agent %s (%s)", agent.agent_id, agent.role)
+            if on_event:
+                on_event("agent_retry", {"agent_id": agent.agent_id, "role": agent.role})
+            try:
+                response, output = await run_agent(agent)
+                if output.content and output.content.strip():
+                    context.add_message(response)
+                    context.add_output(output)
+                    result.messages.append(response)
+                    result.outputs.append(output)
+                    logger.info("Retry succeeded for agent %s", agent.agent_id)
+                else:
+                    logger.error("Agent %s still empty after retry", agent.agent_id)
+                    failed_agents.append({
+                        "agent_id": agent.agent_id, "role": agent.role,
+                        "error": "Empty output after retry",
+                    })
+                    if on_event:
+                        on_event("agent_error", {
+                            "agent_id": agent.agent_id, "role": agent.role,
+                            "error": "Empty output after retry",
+                        })
+            except Exception as retry_exc:
+                logger.error("Retry failed for agent %s: %s", agent.agent_id, retry_exc)
+                failed_agents.append({
+                    "agent_id": agent.agent_id, "role": agent.role,
+                    "error": str(retry_exc),
+                })
+                if on_event:
+                    on_event("agent_error", {
+                        "agent_id": agent.agent_id, "role": agent.role,
+                        "error": f"Retry failed: {retry_exc}",
+                    })
+
+        result.failed_agents = failed_agents
         result.duration_seconds = time.monotonic() - start
         if failed_agents:
             logger.warning(
@@ -224,21 +278,65 @@ class RoundRobinPattern:
                     else:
                         response = await agent.process(context, msg)
                 except Exception as exc:
-                    logger.error(
-                        "Agent %s (%s) failed in round %d: %s",
+                    logger.warning(
+                        "Agent %s (%s) failed in round %d: %s (retrying once)",
                         agent.agent_id, agent.role, round_num + 1, exc,
                     )
-                    if on_event:
-                        on_event("agent_error", {
+                    try:
+                        if stream and on_event:
+                            response = await agent.process_stream(
+                                context, msg,
+                                on_token=lambda chunk, aid=agent.agent_id, r=round_num + 1: on_event(
+                                    "token", {"agent_id": aid, "role": agent.role, "round": r, "chunk": chunk}
+                                ),
+                            )
+                        else:
+                            response = await agent.process(context, msg)
+                    except Exception as retry_exc:
+                        logger.error(
+                            "Agent %s (%s) retry failed in round %d: %s",
+                            agent.agent_id, agent.role, round_num + 1, retry_exc,
+                        )
+                        if on_event:
+                            on_event("agent_error", {
+                                "agent_id": agent.agent_id,
+                                "role": agent.role,
+                                "round": round_num + 1,
+                                "error": str(retry_exc),
+                            })
+                        result.failed_agents.append({
                             "agent_id": agent.agent_id,
                             "role": agent.role,
                             "round": round_num + 1,
-                            "error": str(exc),
+                            "error": str(retry_exc),
                         })
-                    continue
+                        continue
 
                 context.add_message(response)
                 result.messages.append(response)
+
+                # Fix 12: Detect near-duplicate outputs across agents in same round
+                content_trimmed = response.content.strip()
+                for other_aid, other_text in prev_round_outputs.items():
+                    if other_aid != agent.agent_id and other_text:
+                        # Simple character-level similarity check
+                        shorter = min(len(content_trimmed), len(other_text))
+                        if shorter > 100:
+                            common = sum(a == b for a, b in zip(content_trimmed, other_text))
+                            similarity = common / shorter
+                            if similarity > 0.90:
+                                logger.warning(
+                                    "Near-duplicate deliberation output: %s and %s "
+                                    "are %.0f%% similar in round %d",
+                                    agent.agent_id, other_aid, similarity * 100, round_num + 1,
+                                )
+                                if on_event:
+                                    on_event("duplicate_warning", {
+                                        "agents": [agent.agent_id, other_aid],
+                                        "similarity": round(similarity, 3),
+                                        "round": round_num + 1,
+                                    })
+                prev_round_outputs[agent.agent_id] = content_trimmed
 
                 output = AgentOutput(
                     agent_id=agent.agent_id,
@@ -248,8 +346,6 @@ class RoundRobinPattern:
                 )
                 context.add_output(output)
                 result.outputs.append(output)
-
-                prior_text += f"\n\n---\n\n[{agent.role} (round {round_num + 1})]: {response.content}"
 
                 if on_event:
                     on_event("agent_done", {
@@ -342,12 +438,29 @@ class IndependentSynthesisPattern:
         for phase in phases:
             for o in phase.outputs:
                 all_outputs.append(f"[{o.agent_role}]: {o.content}")
+
+        # Include the original paper context (graph summary, paper text) so
+        # the meta-reviewer can ground its synthesis in the source material,
+        # not just reviewer opinions.
+        original_context = user_message.content if user_message else ""
+        context_block = ""
+        if original_context:
+            # Extract the graph summary portion (after the manuscript)
+            graph_marker = "## Paper Knowledge Graph"
+            if graph_marker in original_context:
+                graph_idx = original_context.index(graph_marker)
+                context_block = (
+                    "\n\nThe following knowledge graph summary was provided to reviewers:\n\n"
+                    + original_context[graph_idx:]
+                )
+
         synthesis_prompt = Message(
             role="user",
             content=(
                 "Below are all reviewer outputs and deliberation messages. "
                 "Synthesize them into a final meta-review.\n\n"
                 + "\n\n---\n\n".join(all_outputs)
+                + context_block
             ),
         )
 

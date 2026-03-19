@@ -150,6 +150,15 @@ export function getActiveModelAssignments() {
   return kernel.get('/api/settings/active-models')
 }
 
+// Presets
+export function getPresets() {
+  return kernel.get('/api/presets')
+}
+
+export function activatePreset(name) {
+  return kernel.post(`/api/presets/${name}/activate`)
+}
+
 // Model discovery and benchmarking
 export function discoverModels() {
   return kernel.post('/api/models/discover')
@@ -209,6 +218,25 @@ export function listBatches(limit = 20) {
 
 export function launchReview(sessionId) {
   return kernel.post(`/api/sessions/${sessionId}/launch-review`)
+}
+
+// Post-review: refine field, score lightpass, persist edits
+export function refineField(sessionId, field, instruction, currentFields) {
+  return kernel.post(`/api/sessions/${sessionId}/refine-field`, {
+    field, instruction, current_fields: currentFields,
+  })
+}
+
+export function scoreLightpass(sessionId, newScore, newLabel, currentFields) {
+  return kernel.post(`/api/sessions/${sessionId}/score-lightpass`, {
+    new_score: newScore, new_label: newLabel, current_fields: currentFields,
+  })
+}
+
+export function updateFinalReview(sessionId, finalReview) {
+  return kernel.post(`/api/sessions/${sessionId}/update-final-review`, {
+    final_review: finalReview,
+  })
 }
 
 // Graph export/import

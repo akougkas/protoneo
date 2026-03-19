@@ -160,6 +160,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         model_map_json: str = Form("{}"),
         max_rounds: int = Form(2),
         user_instructions: str = Form(""),
+        skip_graph: bool = Form(False),
     ):
         """Create and start a full PC Panel review session."""
         _session_manager = get_session_manager()
@@ -232,6 +233,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             session.session_id, doc, profile, model_map,
             agent_configs, bus, ctl,
             delib_config=delib_config, graph_only=False,
+            skip_graph=skip_graph,
         ))
         ctl.set_task(task)
 
@@ -307,67 +309,70 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         await _batch_manager.update(batch)
 
         # Launch background task for each paper (parsing + pipeline).
-        # Reuses the bus already in _event_buses (created above) so
-        # WebSocket subscribers see events from the very start.
+        # Limit to 2 concurrent pipelines since each pipeline already runs
+        # 4-way parallel extraction internally (2 pipelines = 8 LLM calls).
+        _batch_semaphore = asyncio.Semaphore(2)
+
         async def _run_one(sid: str, fpath: Path, fname: str) -> None:
-            bus = _event_buses.get(sid)
-            if not bus:
-                bus = SessionEventBus()
-                _event_buses[sid] = bus
+            async with _batch_semaphore:
+                bus = _event_buses.get(sid)
+                if not bus:
+                    bus = SessionEventBus()
+                    _event_buses[sid] = bus
 
-            # Mark session running and emit parse start immediately
-            session = await _session_manager.get(sid)
-            if session:
-                session.status = SessionStatus.RUNNING
-                import time as _time
-                session.pipeline_steps["parse"] = StepState(
-                    status="running", started_at=_time.monotonic(),
-                ).model_dump()
-                await _session_manager.update(session)
-
-            bus.emit("step_started", {
-                "stage": "pre_review", "step": "parse",
-                "message": f"Parsing {fname}...",
-            })
-
-            # Yield control so the event loop can process the bus event
-            # and send it to any WebSocket subscribers before blocking
-            await asyncio.sleep(0)
-
-            try:
-                # Run CPU-bound parsing in a thread so it doesn't
-                # block the event loop (Docling takes 1-2 minutes)
-                loop = asyncio.get_running_loop()
-                doc = await loop.run_in_executor(
-                    None, parse_file, str(fpath)
-                )
-                doc = chunk_document(doc)
-            except Exception as e:
-                fpath.unlink(missing_ok=True)
-                logger.warning("Failed to parse %s: %s", fname, e)
+                # Mark session running and emit parse start immediately
                 session = await _session_manager.get(sid)
                 if session:
-                    session.status = SessionStatus.FAILED
-                    session.error = f"Parse failed: {e}"
+                    session.status = SessionStatus.RUNNING
+                    import time as _time
+                    session.pipeline_steps["parse"] = StepState(
+                        status="running", started_at=_time.monotonic(),
+                    ).model_dump()
                     await _session_manager.update(session)
-                bus.emit("error", {"detail": f"Parse failed: {e}"})
-                return
 
-            session = await _session_manager.get(sid)
-            if session:
-                ctx = _session_manager.get_context(sid)
-                ctx.add_document(doc)
-                session.document_ids.append(doc.document_id)
-                await _session_manager.update(session)
+                bus.emit("step_started", {
+                    "stage": "pre_review", "step": "parse",
+                    "message": f"Parsing {fname}...",
+                })
 
-            ctl = PipelineControl()
-            _pipeline_controls[sid] = ctl
+                # Yield control so the event loop can process the bus event
+                # and send it to any WebSocket subscribers before blocking
+                await asyncio.sleep(0)
 
-            task = asyncio.create_task(_run_graph_pipeline(
-                sid, doc, profile, model_map,
-                agent_configs, bus, ctl, graph_only=True,
-            ))
-            ctl.set_task(task)
+                try:
+                    # Run CPU-bound parsing in a thread so it doesn't
+                    # block the event loop (Docling takes 1-2 minutes)
+                    loop = asyncio.get_running_loop()
+                    doc = await loop.run_in_executor(
+                        None, parse_file, str(fpath)
+                    )
+                    doc = chunk_document(doc)
+                except Exception as e:
+                    fpath.unlink(missing_ok=True)
+                    logger.warning("Failed to parse %s: %s", fname, e)
+                    session = await _session_manager.get(sid)
+                    if session:
+                        session.status = SessionStatus.FAILED
+                        session.error = f"Parse failed: {e}"
+                        await _session_manager.update(session)
+                    bus.emit("error", {"detail": f"Parse failed: {e}"})
+                    return
+
+                session = await _session_manager.get(sid)
+                if session:
+                    ctx = _session_manager.get_context(sid)
+                    ctx.add_document(doc)
+                    session.document_ids.append(doc.document_id)
+                    await _session_manager.update(session)
+
+                ctl = PipelineControl()
+                _pipeline_controls[sid] = ctl
+
+                task = asyncio.create_task(_run_graph_pipeline(
+                    sid, doc, profile, model_map,
+                    agent_configs, bus, ctl, graph_only=True,
+                ))
+                ctl.set_task(task)
 
         for sid, fpath, fname in pending:
             asyncio.create_task(_run_one(sid, fpath, fname))
@@ -527,13 +532,8 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         ctx = _session_manager.get_context(session_id)
         doc_text = session.paper_text or (ctx.documents[0].text if ctx.documents else "")
 
-        class _MinimalDoc:
-            def __init__(self, text, filename):
-                self.text = text
-                self.filename = filename
-                self.chunks = []
-
-        doc_proxy = _MinimalDoc(doc_text, session.config.get("metadata", {}).get("filename", "paper.pdf"))
+        doc_markdown = session.paper_markdown or ""
+        doc_proxy = _MinimalDoc(doc_text, doc_markdown, session.config.get("metadata", {}).get("filename", "paper.pdf"))
         user_message = build_user_message(doc_proxy, profile)
         enriched_message = user_message + pg.summary
 
@@ -595,6 +595,208 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             "stage": "review",
         }
 
+    # ── Post-Review: Refine, Score Lightpass, Persist ──
+
+    _FIELD_LABELS = {
+        "paper_summary": "Paper Summary",
+        "strengths": "Strengths",
+        "weaknesses": "Weaknesses",
+        "comments_for_authors": "Comments for Authors",
+        "comments_for_pc": "Comments for PC",
+    }
+
+    def _build_review_context(session) -> str:
+        """Assemble full context from paper, graph, and reviewer outputs."""
+        parts = []
+        paper_md = session.paper_markdown or session.paper_text
+        if paper_md:
+            parts.append(f"## Paper Content\n\n{paper_md}")
+        if session.paper_graph:
+            gs = session.paper_graph.get("summary", "")
+            if gs:
+                parts.append(f"## Knowledge Graph Summary\n\n{gs}")
+        phases = session.result.get("phases", [])
+        rp = []
+        for phase in phases:
+            for output in phase.get("outputs", []):
+                role = output.get("agent_role", "reviewer")
+                content = output.get("content", "")
+                if content:
+                    rp.append(f"### {role}\n{content}")
+        if rp:
+            parts.append("## Review Committee Outputs\n\n" + "\n\n---\n\n".join(rp))
+        return "\n\n".join(parts)
+
+    def _resolve_chat_model(session) -> str:
+        """Pick the model for post-review interactions from session config."""
+        agent_cfgs = session.config.get("agents", {})
+        meta_cfg = agent_cfgs.get("meta", {})
+        if isinstance(meta_cfg, dict) and meta_cfg.get("model"):
+            return meta_cfg["model"]
+        for cfg in agent_cfgs.values():
+            if isinstance(cfg, dict) and cfg.get("model"):
+                return cfg["model"]
+        return ""
+
+    class RefineFieldRequest(BaseModel):
+        field: str
+        instruction: str
+        current_fields: dict[str, Any] = Field(default_factory=dict)
+
+    @app.post("/api/sessions/{session_id}/refine-field")
+    async def refine_field(session_id: str, body: RefineFieldRequest):
+        """Stream a refined version of one review field via WebSocket."""
+        _session_manager = get_session_manager()
+        _llm_client = get_llm_client()
+        _event_buses = get_event_buses()
+
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not session.result:
+            raise HTTPException(status_code=409, detail="No review results")
+
+        context = _build_review_context(session)
+        chat_model = _resolve_chat_model(session)
+
+        label = _FIELD_LABELS.get(body.field, body.field)
+        current = body.current_fields.get(body.field, "")
+
+        system_prompt = (
+            "You are the PC Chair for HPDC 2026. You are editing one field "
+            "of the unified final review. Output ONLY the revised text for "
+            "this field. No JSON wrapper, no field label, just plain text.\n\n"
+            + context
+        )
+        user_msg = (
+            f'Revise the "{label}" field.\n\n'
+            f"Current content:\n{current}\n\n"
+            f"Instruction: {body.instruction}\n\n"
+            "Current review state for consistency:\n"
+            + "\n".join(
+                f"[{k}]: {v}" for k, v in body.current_fields.items()
+                if isinstance(v, str) and k != body.field
+            )
+        )
+
+        bus = _event_buses.get(session_id)
+        if not bus:
+            bus = SessionEventBus()
+            _event_buses[session_id] = bus
+
+        bus.emit("refine_start", {"field": body.field, "model": chat_model})
+
+        async def _stream():
+            try:
+                response = ""
+                async for chunk in _llm_client.stream(
+                    model=chat_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    session_id=session_id,
+                ):
+                    response += chunk
+                    bus.emit("refine_token", {"field": body.field, "chunk": chunk})
+                bus.emit("refine_done", {
+                    "field": body.field, "content": response.strip(),
+                    "model": chat_model,
+                })
+            except Exception as e:
+                logger.error("Refine failed for %s/%s: %s", session_id, body.field, e)
+                bus.emit("refine_error", {"field": body.field, "detail": str(e)})
+
+        asyncio.create_task(_stream())
+        return {"status": "streaming", "field": body.field, "model": chat_model}
+
+    class ScoreLightpassRequest(BaseModel):
+        new_score: int
+        new_label: str
+        current_fields: dict[str, Any] = Field(default_factory=dict)
+
+    @app.post("/api/sessions/{session_id}/score-lightpass")
+    async def score_lightpass(session_id: str, body: ScoreLightpassRequest):
+        """Suggest field edits after a score change. Returns suggestions dict."""
+        _session_manager = get_session_manager()
+        _llm_client = get_llm_client()
+
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not session.result:
+            raise HTTPException(status_code=409, detail="No review results")
+
+        context = _build_review_context(session)
+        chat_model = _resolve_chat_model(session)
+
+        system_prompt = (
+            "You are the PC Chair for HPDC 2026. The reviewer changed the "
+            "overall merit score. Review the text fields and suggest minimal "
+            "edits so the tone and substance align with the new score. "
+            "Only change fields where the current text contradicts the new score.\n\n"
+            + context
+        )
+
+        fields_text = "\n\n".join(
+            f"### {k}\n{v}" for k, v in body.current_fields.items()
+            if isinstance(v, str) and v
+        )
+        user_msg = (
+            f"The overall merit score is now {body.new_score} ({body.new_label}).\n\n"
+            f"Current review fields:\n{fields_text}\n\n"
+            "Return a JSON object mapping field names to their suggested new content. "
+            "Only include fields that need changes. If nothing needs changing, "
+            'return {}. Output ONLY the JSON object.'
+        )
+
+        try:
+            response = ""
+            async for chunk in _llm_client.stream(
+                model=chat_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                session_id=session_id,
+            ):
+                response += chunk
+
+            import re as _re
+            suggestions = {}
+            match = _re.search(r"\{[\s\S]*\}", response)
+            if match:
+                try:
+                    suggestions = json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+
+            return {"suggestions": suggestions, "model": chat_model}
+
+        except Exception as e:
+            logger.error("Score lightpass failed for %s: %s", session_id, e)
+            raise HTTPException(status_code=500, detail=f"Lightpass failed: {e}")
+
+    class UpdateFinalReviewRequest(BaseModel):
+        final_review: dict[str, Any]
+
+    @app.post("/api/sessions/{session_id}/update-final-review")
+    async def update_final_review(session_id: str, body: UpdateFinalReviewRequest):
+        """Persist manual edits to the final review fields."""
+        _session_manager = get_session_manager()
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not session.result:
+            raise HTTPException(status_code=409, detail="No review results")
+
+        session.result["final_review"] = body.final_review
+        session.result["pc_chair_review"] = body.final_review.get(
+            "comments_for_authors", ""
+        )
+        await _session_manager.update(session)
+        return {"status": "saved"}
+
     # ── Graph Export/Import ─────────────────────────────
 
     @app.get("/api/sessions/{session_id}/graph/export")
@@ -612,6 +814,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             "paper_title": session.config.get("metadata", {}).get("paper_title", ""),
             "conference": session.config.get("metadata", {}).get("conference", ""),
             "graph": session.paper_graph,
+            "paper_markdown": session.paper_markdown or session.paper_text,
         }
 
         filename = f"graph-{session_id[:8]}.json"
@@ -648,9 +851,11 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         if "graph" in graph_data and "schema_version" in graph_data:
             paper_graph_dict = graph_data["graph"]
             paper_title = graph_data.get("paper_title", "")
+            imported_paper_markdown = graph_data.get("paper_markdown", "")
         else:
             paper_graph_dict = graph_data
             paper_title = ""
+            imported_paper_markdown = ""
 
         try:
             pg = PaperGraph.model_validate(paper_graph_dict)
@@ -683,13 +888,23 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             },
         })
         session.paper_graph = paper_graph_dict
+        session.paper_markdown = imported_paper_markdown
+        session.paper_text = imported_paper_markdown
         session.graph_source = "imported"
         if not pg.summary:
             pg.summary = pg.to_reviewer_summary()
             session.paper_graph = pg.model_dump(mode="json")
         await _session_manager.update(session)
 
-        enriched_message = pg.summary
+        # Build enriched message with paper content (not just graph summary)
+        if imported_paper_markdown:
+            enriched_message = (
+                f"{'=' * 60}\nMANUSCRIPT\n{'=' * 60}\n\n"
+                + imported_paper_markdown
+                + "\n\n" + pg.summary
+            )
+        else:
+            enriched_message = pg.summary
 
         bus = SessionEventBus()
         _event_buses[session.session_id] = bus
@@ -794,7 +1009,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if session.status != SessionStatus.COMPLETED.value and session.status != "completed":
+        if not _is_completed(session):
             raise HTTPException(
                 status_code=409,
                 detail=f"Session not yet completed (status: {session.status})",
@@ -836,7 +1051,9 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             except Exception:
                 pass
 
-        return packet.model_dump(mode="json")
+        data = packet.model_dump(mode="json")
+        data["final_review"] = session.result.get("final_review", {})
+        return data
 
     @app.get("/api/sessions/{session_id}/review-packet.md")
     async def get_review_packet_md(session_id: str):
@@ -846,7 +1063,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if session.status != SessionStatus.COMPLETED.value and session.status != "completed":
+        if not _is_completed(session):
             raise HTTPException(
                 status_code=409,
                 detail=f"Session not yet completed (status: {session.status})",
@@ -888,7 +1105,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if session.status != SessionStatus.COMPLETED.value and session.status != "completed":
+        if not _is_completed(session):
             raise HTTPException(
                 status_code=409,
                 detail=f"Session not yet completed (status: {session.status})",

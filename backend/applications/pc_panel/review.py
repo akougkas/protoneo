@@ -75,10 +75,25 @@ def _resolve_default_models(roles: list[str] | None = None) -> dict[str, str]:
         return {}
 
 
+def strip_json_fences(text: str) -> str:
+    """Strip markdown code fences from JSON output.
+
+    Handles ```json ... ```, ``` ... ```, and leading/trailing whitespace.
+    """
+    stripped = text.strip()
+    # Remove opening fence
+    stripped = re.sub(r"^```(?:json)?\s*\n?", "", stripped)
+    # Remove closing fence
+    stripped = re.sub(r"\n?\s*```\s*$", "", stripped)
+    return stripped.strip()
+
+
 def _extract_json(text: str) -> dict | None:
     """Try to extract a JSON object from LLM output."""
+    # Fix 5: Always strip fences before attempting parse
+    cleaned = strip_json_fences(text)
     try:
-        return json.loads(text)
+        return json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
         pass
 
@@ -89,17 +104,17 @@ def _extract_json(text: str) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    brace_start = text.find("{")
+    brace_start = cleaned.find("{")
     if brace_start >= 0:
         depth = 0
-        for i in range(brace_start, len(text)):
-            if text[i] == "{":
+        for i in range(brace_start, len(cleaned)):
+            if cleaned[i] == "{":
                 depth += 1
-            elif text[i] == "}":
+            elif cleaned[i] == "}":
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(text[brace_start : i + 1])
+                        return json.loads(cleaned[brace_start : i + 1])
                     except (json.JSONDecodeError, TypeError):
                         break
     return None
@@ -270,6 +285,7 @@ def parse_review_output(output, role: str) -> IndividualReview:
             revision_actions=parsed.get("revision_actions", []),
             citations=parsed.get("citations", []),
             raw_content=output.content,
+            provenance=provenance,
         )
 
     return IndividualReview(
@@ -278,7 +294,23 @@ def parse_review_output(output, role: str) -> IndividualReview:
         model=model,
         comments_for_authors=output.content,
         raw_content=output.content,
+        provenance=provenance,
     )
+
+
+def _validate_score_distribution(scores: dict, max_score: int = 5) -> dict:
+    """Validate and clean score_distribution from meta-review.
+
+    Clamps scores to the valid merit scale range and strips unknown reviewer keys.
+    """
+    if not isinstance(scores, dict):
+        return {}
+    cleaned = {}
+    for key, val in scores.items():
+        if isinstance(val, (int, float)):
+            clamped = max(1, min(int(val), max_score))
+            cleaned[key] = clamped
+    return cleaned
 
 
 def parse_meta_review(output) -> MetaReview:
@@ -286,9 +318,12 @@ def parse_meta_review(output) -> MetaReview:
     parsed = _extract_json(output.content)
 
     if parsed:
+        # Fix 13: Validate score_distribution to prevent hallucinated values
+        raw_scores = parsed.get("score_distribution", {})
+        validated_scores = _validate_score_distribution(raw_scores)
         return MetaReview(
             panel_summary=parsed.get("panel_summary", ""),
-            score_distribution=parsed.get("score_distribution", {}),
+            score_distribution=validated_scores,
             consensus=parsed.get("consensus", {}),
             agreements=parsed.get("agreements", []),
             disagreements=parsed.get("disagreements", []),
@@ -321,6 +356,8 @@ def result_to_packet(
 
     # Derive role keys from the profile so any conference works
     role_keys = _reviewer_roles_from_profile(profile, include_optional=True)
+
+    _agent_configs = agent_configs or {}
 
     for phase in result.phases:
         if phase.phase_name == "independent_review":

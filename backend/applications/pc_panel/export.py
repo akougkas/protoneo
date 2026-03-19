@@ -73,6 +73,23 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
             lines.append(line)
             lines.append("")
 
+    if meta.score_distribution:
+        lines.append("**Score Distribution:**")
+        lines.append("")
+        lines.append("| Reviewer | Score |")
+        lines.append("|----------|-------|")
+        for reviewer, score in meta.score_distribution.items():
+            lines.append(f"| {reviewer} | {score}/5 |")
+        lines.append("")
+
+    # Knowledge Graph
+    if packet.graph_node_count or packet.graph_summary:
+        lines.append(f"**Knowledge Graph:** {packet.graph_node_count} nodes, {packet.graph_edge_count} edges")
+        if packet.graph_utilization and packet.graph_utilization.get("overall_ratio") is not None:
+            ratio = packet.graph_utilization["overall_ratio"]
+            lines.append(f" | Utilization: {ratio:.0%}")
+        lines.append("")
+
     # Individual reviews
     lines.append("---")
     lines.append("")
@@ -137,6 +154,22 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
             lines.append("**Revision Actions:**")
             lines.append("")
             lines.append(_fmt_list(review.revision_actions))
+            lines.append("")
+
+        if review.citations:
+            lines.append("**Citations:**")
+            lines.append("")
+            for cit in review.citations:
+                claim = cit.get("claim", "")
+                section = cit.get("section", "")
+                page = cit.get("page", "")
+                ref = []
+                if section:
+                    ref.append(section)
+                if page:
+                    ref.append(f"p.{page}")
+                loc = ", ".join(ref)
+                lines.append(f"- {claim}" + (f" ({loc})" if loc else ""))
             lines.append("")
 
         lines.append("")
