@@ -29,12 +29,26 @@ logger = logging.getLogger("protoneo.pc_panel.review")
 # Roles not listed here fall through to the first available model.
 # Uses generic provider names only (no site-specific node names).
 _ROLE_PROVIDER_PREFS: dict[str, list[str]] = {
-    "technical": ["anthropic", "google-antigravity", "openai"],
-    "systems": ["anthropic", "google-antigravity", "openai"],
-    "novelty": ["google-antigravity", "google", "openai", "anthropic"],
-    "clarity": ["openai", "anthropic", "google-antigravity"],
-    "skeptic": ["google-antigravity", "anthropic", "openai"],
-    "meta": ["anthropic", "openai", "google-antigravity"],
+    "technical": ["anthropic", "openai"],
+    "systems": ["anthropic", "openai"],
+    "novelty": ["openai", "anthropic"],
+    "clarity": ["openai", "anthropic"],
+    "skeptic": ["anthropic", "openai"],
+    "meta": ["anthropic", "openai"],
+}
+
+# Per-role inference parameter defaults.
+# Analytical roles (skeptic, artifact, systems, technical) get low temperature
+# for deterministic, grounded verification. Creative roles (novelty, clarity,
+# meta) get higher temperature for lateral synthesis.
+_ROLE_INFERENCE_PREFS: dict[str, dict[str, float]] = {
+    "technical": {"temperature": 0.15, "top_p": 0.85},
+    "systems": {"temperature": 0.15, "top_p": 0.85},
+    "skeptic": {"temperature": 0.15, "top_p": 0.85},
+    "artifact": {"temperature": 0.15, "top_p": 0.85},
+    "novelty": {"temperature": 0.85, "top_p": 0.95, "presence_penalty": 0.2},
+    "clarity": {"temperature": 0.85, "top_p": 0.95, "presence_penalty": 0.2},
+    "meta": {"temperature": 0.85, "top_p": 0.95, "presence_penalty": 0.2},
 }
 
 
@@ -176,33 +190,48 @@ def build_agent_configs(
     configs: dict[str, AgentConfig] = {}
 
     for role in reviewer_roles:
-        prompt = assemble_system_prompt(conference_slug, role, conference_context)
         agent_def = profile.panel_agents.get(
             role, profile.optional_agents.get(role)
         )
         focus = ", ".join(agent_def.focus) if agent_def else role
+        prompt = assemble_system_prompt(
+            conference_slug, role, conference_context, agent_focus=focus,
+        )
+        inference = _ROLE_INFERENCE_PREFS.get(role, {})
         configs[role] = AgentConfig(
             role=agent_def.role if agent_def else role.replace("_", " ").title() + " Reviewer",
             model=models.get(role, models.get("technical", "")),
             system_prompt=prompt,
             focus=focus,
             max_tokens=16384,
+            temperature=inference.get("temperature"),
+            top_p=inference.get("top_p"),
+            presence_penalty=inference.get("presence_penalty"),
+            frequency_penalty=inference.get("frequency_penalty"),
         )
 
     # Meta-reviewer is always present.
     # Frontend sends model_map with key "meta_reviewer" (profile agent ID),
     # while internal config uses key "meta". Check both.
-    meta_prompt = assemble_system_prompt(conference_slug, "meta", conference_context)
     meta_def = profile.panel_agents.get("meta_reviewer")
+    meta_focus_text = meta_def.focus[0] if meta_def and meta_def.focus else "synthesis, consensus analysis, final recommendation"
+    meta_prompt = assemble_system_prompt(
+        conference_slug, "meta", conference_context, agent_focus=meta_focus_text,
+    )
     meta_model = (models.get("meta_reviewer")
                   or models.get("meta")
                   or models.get("technical", ""))
+    meta_inference = _ROLE_INFERENCE_PREFS.get("meta", {})
     configs["meta"] = AgentConfig(
         role=meta_def.role if meta_def else "Meta-Reviewer",
         model=meta_model,
         system_prompt=meta_prompt,
-        focus=meta_def.focus[0] if meta_def and meta_def.focus else "synthesis, consensus analysis, final recommendation",
+        focus=meta_focus_text,
         max_tokens=16384,
+        temperature=meta_inference.get("temperature"),
+        top_p=meta_inference.get("top_p"),
+        presence_penalty=meta_inference.get("presence_penalty"),
+        frequency_penalty=meta_inference.get("frequency_penalty"),
     )
 
     return configs

@@ -33,6 +33,10 @@ class BaseAgent:
         agent_id: str | None = None,
         focus: str = "",
         max_tokens: int = 4096,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
     ):
         self._agent_id = agent_id or f"{role.lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
         self._role = role
@@ -41,6 +45,10 @@ class BaseAgent:
         self._llm_client = llm_client
         self._focus = focus
         self._max_tokens = max_tokens
+        self._temperature = temperature
+        self._top_p = top_p
+        self._presence_penalty = presence_penalty
+        self._frequency_penalty = frequency_penalty
 
     @property
     def agent_id(self) -> str:
@@ -57,6 +65,19 @@ class BaseAgent:
     @property
     def system_prompt(self) -> str:
         return self._system_prompt
+
+    def _inference_kwargs(self) -> dict[str, Any]:
+        """Build per-agent inference overrides for LLM calls."""
+        kw: dict[str, Any] = {}
+        if self._temperature is not None:
+            kw["temperature"] = self._temperature
+        if self._top_p is not None:
+            kw["top_p"] = self._top_p
+        if self._presence_penalty is not None:
+            kw["presence_penalty"] = self._presence_penalty
+        if self._frequency_penalty is not None:
+            kw["frequency_penalty"] = self._frequency_penalty
+        return kw
 
     def _build_messages(
         self,
@@ -109,12 +130,15 @@ class BaseAgent:
         sid = session_id or context.session_id
         msgs = self._build_messages(context, message, include_history=include_history)
 
+        # Merge per-agent inference params; caller kwargs take precedence
+        call_kwargs = {**self._inference_kwargs(), **kwargs}
+
         response = await self._llm_client.complete(
             model=self._model,
             messages=msgs,
             session_id=sid,
-            max_tokens=kwargs.pop("max_tokens", self._max_tokens),
-            **kwargs,
+            max_tokens=call_kwargs.pop("max_tokens", self._max_tokens),
+            **call_kwargs,
         )
 
         return Message(
@@ -124,6 +148,7 @@ class BaseAgent:
             metadata={
                 "model": self._model,
                 "usage": response.usage.model_dump(),
+                "temperature": call_kwargs.get("temperature", self._temperature),
             },
         )
 
@@ -145,13 +170,16 @@ class BaseAgent:
         sid = session_id or context.session_id
         msgs = self._build_messages(context, message, include_history=include_history)
 
+        # Merge per-agent inference params; caller kwargs take precedence
+        call_kwargs = {**self._inference_kwargs(), **kwargs}
+
         chunks: list[str] = []
         async for chunk in self._llm_client.stream(
             model=self._model,
             messages=msgs,
             session_id=sid,
-            max_tokens=kwargs.pop("max_tokens", self._max_tokens),
-            **kwargs,
+            max_tokens=call_kwargs.pop("max_tokens", self._max_tokens),
+            **call_kwargs,
         ):
             chunks.append(chunk)
             if on_token:
@@ -168,6 +196,7 @@ class BaseAgent:
             metadata={
                 "model": self._model,
                 "streamed": True,
+                "temperature": call_kwargs.get("temperature", self._temperature),
             },
         )
 

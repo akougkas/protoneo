@@ -33,6 +33,10 @@ class AgentConfig(BaseModel):
     focus: str = ""
     max_tokens: int = 4096
     grounding: list[dict[str, Any]] = Field(default_factory=list)
+    temperature: float | None = None
+    top_p: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
 
 
 class PhaseConfig(BaseModel):

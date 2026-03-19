@@ -49,6 +49,10 @@ class DeliberationEngine:
             llm_client=self.llm_client,
             focus=config.focus,
             max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            presence_penalty=config.presence_penalty,
+            frequency_penalty=config.frequency_penalty,
         )
 
     async def run(
