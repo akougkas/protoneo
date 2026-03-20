@@ -224,8 +224,12 @@ class ParallelPattern:
 
 class RoundRobinPattern:
     """
-    Agents take turns responding, each seeing all prior messages.
-    Continues until max_rounds is reached.
+    Agents take turns responding in deliberation rounds.
+
+    Each agent receives a self-contained prompt with the paper context,
+    all peer reviews (labeled by role), and prior deliberation turns.
+    History is NOT inherited from the session context to avoid
+    duplicate, unlabeled review content that biases toward agreement.
     """
 
     async def execute(
@@ -235,27 +239,104 @@ class RoundRobinPattern:
         rules: DeliberationRules,
         on_event: EventCallback = None,
         stream: bool = False,
+        paper_context: str = "",
     ) -> PhaseResult:
         start = time.monotonic()
         result = PhaseResult(phase_name="round_robin", mode="round_robin")
 
-        # Label prior outputs with naturalistic peer transcript framing.
-        def _label_prior_outputs(current_agent_id: str) -> str:
-            parts = []
-            for agent_id, outputs in context.agent_outputs.items():
-                for o in outputs:
-                    if agent_id == current_agent_id:
-                        header = f"--- [YOUR PRIOR ASSESSMENT as {o.agent_role}] ---"
-                    else:
-                        header = f"--- [BEGIN PEER TRANSCRIPT: Reviewer ({o.agent_role})] ---"
-                    footer = "--- [END PEER TRANSCRIPT] ---" if agent_id != current_agent_id else ""
-                    block = f"{header}\n{o.content}"
-                    if footer:
-                        block += f"\n{footer}"
-                    parts.append(block)
-            return "\n\n".join(parts)
+        # Separate Phase 1 independent reviews from deliberation outputs.
+        # Independent reviews are the first output per agent_id.
+        independent_reviews: dict[str, AgentOutput] = {}
+        for agent_id, outputs in context.agent_outputs.items():
+            if outputs:
+                independent_reviews[agent_id] = outputs[0]
 
-        # Fix 12: Track previous round output for duplicate detection
+        # Track deliberation turns separately (accumulated across rounds).
+        deliberation_turns: list[AgentOutput] = []
+
+        def _build_deliberation_prompt(
+            current_agent_id: str,
+            current_role: str,
+            round_num: int,
+        ) -> str:
+            """Build a self-contained deliberation prompt.
+
+            Contains: paper context (truncated), all independent reviews
+            labeled by role, prior deliberation turns, and instructions
+            to engage with specific peer arguments.
+            """
+            sections = []
+
+            # 1. Paper context (graph summary only to save tokens;
+            #    the full paper is already in the agent's system prompt
+            #    context from Phase 1).
+            if paper_context:
+                graph_marker = "## Paper Knowledge Graph"
+                if graph_marker in paper_context:
+                    graph_idx = paper_context.index(graph_marker)
+                    sections.append(
+                        "## Manuscript Context\n\n"
+                        "The full paper was provided in your initial review. "
+                        "Below is the knowledge graph summary for reference "
+                        "when citing specific evidence.\n\n"
+                        + paper_context[graph_idx:]
+                    )
+
+            # 2. All independent reviews, clearly labeled
+            sections.append("## Independent Reviews from the Panel")
+            for agent_id, review in independent_reviews.items():
+                if agent_id == current_agent_id:
+                    label = f"YOUR INDEPENDENT REVIEW ({review.agent_role})"
+                else:
+                    label = f"PEER REVIEW: {review.agent_role}"
+                sections.append(
+                    f"--- [{label}] ---\n"
+                    f"{review.content}\n"
+                    f"--- [END {label.split(':')[0].strip()}] ---"
+                )
+
+            # 3. Prior deliberation turns (if round > 1)
+            if deliberation_turns:
+                sections.append("## Prior Deliberation Exchanges")
+                for turn in deliberation_turns:
+                    round_n = turn.metadata.get("round", "?")
+                    sections.append(
+                        f"--- [Round {round_n}: {turn.agent_role}] ---\n"
+                        f"{turn.content}\n"
+                        f"--- [END Round {round_n}] ---"
+                    )
+
+            # 4. Deliberation instructions
+            peer_roles = [
+                r.agent_role for aid, r in independent_reviews.items()
+                if aid != current_agent_id
+            ]
+            peer_list = ", ".join(peer_roles) if peer_roles else "your co-reviewers"
+
+            sections.append(
+                f"## Deliberation Task (Round {round_num + 1})\n\n"
+                f"You are the **{current_role}**. The other panel members "
+                f"are: {peer_list}.\n\n"
+                f"You have read all independent reviews above. Now engage "
+                f"in deliberation:\n\n"
+                f"1. **Identify disagreements.** Where do you and your peers "
+                f"differ on merit scores, severity ratings, or factual claims? "
+                f"Name the specific reviewer and the specific point.\n\n"
+                f"2. **Argue or concede.** For each disagreement, either "
+                f"defend your position with manuscript evidence (section, "
+                f"figure, table) or concede if the peer's evidence is stronger.\n\n"
+                f"3. **Update your assessment.** State your updated merit "
+                f"score. If it changed from your independent review, explain "
+                f"exactly what convinced you.\n\n"
+                f"4. **Flag unresolved issues.** Identify points that need "
+                f"further discussion or that the meta-reviewer should weigh in on.\n\n"
+                f"Return your deliberation response as a JSON object matching "
+                f"the same output contract as your independent review."
+            )
+
+            return "\n\n".join(sections)
+
+        # Track previous round output for duplicate detection
         prev_round_outputs: dict[str, str] = {}
 
         for round_num in range(rules.max_rounds):
@@ -263,19 +344,8 @@ class RoundRobinPattern:
                 on_event("round_start", {"round": round_num + 1})
 
             for agent in agents:
-                labeled_prior = _label_prior_outputs(agent.agent_id)
-                prompt = (
-                    f"This is round {round_num + 1} of deliberation.\n\n"
-                    f"You are reading the reviews of your peers. Address them "
-                    f"naturally by their role in your response (e.g., 'I agree "
-                    f"with the Systems reviewer, but...').\n\n"
-                    f"Prior reviews and discussion:\n{labeled_prior}\n\n"
-                    f"You are the {agent.role}. Respond from your assigned "
-                    f"perspective and expertise. Your analysis should reflect "
-                    f"your unique vantage point.\n\n"
-                    f"Engage with the other reviewers' arguments. Concede points "
-                    f"where the evidence is convincing. Push back where you "
-                    f"disagree, citing specific manuscript evidence."
+                prompt = _build_deliberation_prompt(
+                    agent.agent_id, agent.role, round_num,
                 )
                 msg = Message(role="user", content=prompt)
 
@@ -290,13 +360,15 @@ class RoundRobinPattern:
                 try:
                     if stream and on_event:
                         response = await agent.process_stream(
-                            context, msg,
+                            context, msg, include_history=False,
                             on_token=lambda chunk, aid=agent.agent_id, r=round_num + 1: on_event(
                                 "token", {"agent_id": aid, "role": agent.role, "round": r, "chunk": chunk}
                             ),
                         )
                     else:
-                        response = await agent.process(context, msg)
+                        response = await agent.process(
+                            context, msg, include_history=False,
+                        )
                 except Exception as exc:
                     logger.warning(
                         "Agent %s (%s) failed in round %d: %s (retrying once)",
@@ -305,13 +377,15 @@ class RoundRobinPattern:
                     try:
                         if stream and on_event:
                             response = await agent.process_stream(
-                                context, msg,
+                                context, msg, include_history=False,
                                 on_token=lambda chunk, aid=agent.agent_id, r=round_num + 1: on_event(
                                     "token", {"agent_id": aid, "role": agent.role, "round": r, "chunk": chunk}
                                 ),
                             )
                         else:
-                            response = await agent.process(context, msg)
+                            response = await agent.process(
+                                context, msg, include_history=False,
+                            )
                     except Exception as retry_exc:
                         logger.error(
                             "Agent %s (%s) retry failed in round %d: %s",
@@ -335,11 +409,10 @@ class RoundRobinPattern:
                 context.add_message(response)
                 result.messages.append(response)
 
-                # Fix 12: Detect near-duplicate outputs across agents in same round
+                # Detect near-duplicate outputs across agents in same round
                 content_trimmed = response.content.strip()
                 for other_aid, other_text in prev_round_outputs.items():
                     if other_aid != agent.agent_id and other_text:
-                        # Simple character-level similarity check
                         shorter = min(len(content_trimmed), len(other_text))
                         if shorter > 100:
                             common = sum(a == b for a, b in zip(content_trimmed, other_text))
@@ -366,6 +439,7 @@ class RoundRobinPattern:
                 )
                 context.add_output(output)
                 result.outputs.append(output)
+                deliberation_turns.append(output)
 
                 if on_event:
                     on_event("agent_done", {
@@ -539,7 +613,9 @@ class IndependentSynthesisPattern:
                 if on_event:
                     on_event("phase_start", {"phase": "deliberation"})
                 phase2 = await self._round_robin.execute(
-                    deliberation_reviewers, context, adjusted_rules, on_event, stream=stream
+                    deliberation_reviewers, context, adjusted_rules, on_event,
+                    stream=stream,
+                    paper_context=user_message.content if user_message else "",
                 )
                 phase2.phase_name = "deliberation"
                 phases.append(phase2)

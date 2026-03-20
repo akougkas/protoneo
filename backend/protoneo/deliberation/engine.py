@@ -229,7 +229,10 @@ class DeliberationEngine:
 
         pattern = RoundRobinPattern()
         stream = on_event is not None
-        phase_result = await pattern.execute(ordered, context, rules, on_event, stream=stream)
+        phase_result = await pattern.execute(
+            ordered, context, rules, on_event, stream=stream,
+            paper_context=user_message.content if user_message else "",
+        )
 
         return DeliberationResult(
             session_id=context.session_id,
