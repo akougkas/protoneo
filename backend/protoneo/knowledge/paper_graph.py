@@ -196,22 +196,38 @@ class PaperGraph(BaseModel):
         return None
 
     def get_accumulated_context(self) -> str:
-        """Compact summary of all entities for section-aware extraction context.
+        """Rich summary of all entities and relationships for section-aware extraction.
 
-        Returns one line per entity: "entity_name (entity_type): description"
-        Includes all semantic entities so later sections can cross-reference
-        anything extracted from earlier sections. Skips structural nodes
-        (Paper, Section, Diagram, Table) to avoid noise.
+        Returns entities with full descriptions and their key relationships so
+        later sections understand the scientific meaning of earlier extractions.
+        Skips structural nodes (Paper, Section, Diagram, Table).
         """
         _STRUCTURAL = {"Paper", "Section", "Diagram", "Table"}
-        lines = []
+        node_map = {n.id: n for n in self.nodes}
+
+        entity_lines = []
         for n in self.nodes:
             if n.node_type in _STRUCTURAL:
                 continue
-            desc = n.description[:60] if n.description else ""
-            line = f"- {n.label} ({n.node_type}): {desc}"
-            lines.append(line)
-        return "\n".join(lines)
+            desc = n.description if n.description else ""
+            entity_lines.append(f"- {n.label} ({n.node_type}): {desc}")
+
+        rel_lines = []
+        for e in self.edges:
+            if e.edge_type in ("APPEARS_IN", "HAS_SECTION", "CONTAINS"):
+                continue
+            src = node_map.get(e.source_id)
+            tgt = node_map.get(e.target_id)
+            if src and tgt and src.node_type not in _STRUCTURAL and tgt.node_type not in _STRUCTURAL:
+                desc = f" ({e.description})" if e.description else ""
+                rel_lines.append(f"- {src.label} --[{e.edge_type}]--> {tgt.label}{desc}")
+
+        parts = []
+        if entity_lines:
+            parts.append("Entities:\n" + "\n".join(entity_lines))
+        if rel_lines:
+            parts.append("Relationships:\n" + "\n".join(rel_lines))
+        return "\n\n".join(parts)
 
     def update_stats(self) -> None:
         """Recompute node/edge counts by type."""

@@ -36,6 +36,50 @@ logger = logging.getLogger("protoneo.knowledge.graph_extractor")
 EventCallback = Callable[[str, dict], None] | None
 
 
+# ── Label normalization ────────────────────────────────────
+
+def _normalize_label(label: str) -> str:
+    """Normalize entity labels for consistent dedup.
+
+    Splits CamelCase into words, normalizes whitespace and casing.
+    Examples:
+        "StandardBaseline" -> "Standard Baseline"
+        "HARDataset"       -> "HAR Dataset"
+        "Standard Baselines" -> "Standard Baselines"  (no change, already spaced)
+        "WISDM_Dataset"    -> "WISDM Dataset"
+        "F1ScoreMetric"    -> "F1 Score Metric"
+    """
+    if not label or len(label) <= 2:
+        return label
+    # Replace underscores with spaces
+    s = label.replace("_", " ")
+    # Split CamelCase: insert space before uppercase letters that follow
+    # a lowercase letter or precede a lowercase letter after a run of uppercase.
+    # "StandardBaseline" -> "Standard Baseline"
+    # "HARDataset" -> "HAR Dataset"
+    # "F1ScoreMetric" -> "F1 Score Metric"
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', s)       # camelCase boundary
+    s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', s)    # ACRONYMWord boundary
+    # Collapse multiple spaces
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _normalize_label_for_dedup(label: str) -> str:
+    """Produce a canonical key for dedup: normalized, lowercased, no plural 's'."""
+    n = _normalize_label(label).lower()
+    # Strip trailing 's' for basic singular/plural matching
+    # but only if the word is > 3 chars (don't strip from "bus", "gas")
+    words = n.split()
+    normalized_words = []
+    for w in words:
+        if len(w) > 3 and w.endswith('s') and not w.endswith('ss'):
+            normalized_words.append(w[:-1])
+        else:
+            normalized_words.append(w)
+    return ' '.join(normalized_words)
+
+
 class GraphEntity(BaseModel):
     name: str
     type: str
@@ -72,13 +116,13 @@ RULES:
 1. Extract ONLY what is explicitly stated in this section text.
 2. Every entity MUST have at least one relationship. No isolated entities.
 3. PRIORITIZE relationships. A graph with 5 entities and 8 relationships is better than 15 entities and 3 relationships.
-4. When this section mentions an entity from a previous section, create a cross-reference relationship to it (use the exact name from the "Previously extracted" list above).
+4. Cross-reference entities from previous sections by exact name.
 5. Use specific entity types from the ontology. Use "Concept" only as a last resort.
-6. Entity names: use the paper's own terminology, under 6 words.
+6. Entity names: use the paper's own terminology, under 6 words. Use readable multi-word names with spaces, not CamelCase.
 7. For quantitative results, include the value in the description (e.g., "3.76x speedup over dense baseline").
-8. If the text contains markdown tables, extract the key data points as entities with relationships.
-9. If the text contains equations or formulas, extract the named equation and what it computes.
-10. If the text contains figure/table captions, extract what the figure/table shows.
+8. If an entity is an abbreviation, include the full form in the description.
+9. If the text contains markdown tables, extract the key data points as entities with relationships.
+10. If the text contains equations or formulas, extract the named equation and what it computes.
 
 Respond with ONLY this JSON, nothing else:
 {{"entities": [{{"name": "...", "type": "...", "description": "one sentence with key details"}}], "relationships": [{{"source": "entity name", "target": "entity name", "type": "EDGE_TYPE", "description": "brief context"}}]}}
@@ -120,6 +164,10 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
     """Parse LLM output into an ExtractedGraph, handling various formats."""
     if not raw or not raw.strip():
         return ExtractedGraph()
+
+    # Strip reasoning tags (Nemotron-Cascade, Qwen-thinking, DeepSeek-R1)
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    raw = re.sub(r"</?output>", "", raw).strip()
 
     # Try direct JSON parse
     try:
@@ -241,14 +289,50 @@ def _validate_against_ontology(graph: ExtractedGraph, ontology: PaperOntology) -
     return ExtractedGraph(entities=coerced_entities, relationships=coerced_rels)
 
 
+def _normalize_entities(graph: ExtractedGraph) -> ExtractedGraph:
+    """Post-process extracted graph: normalize labels, deduplicate by canonical key."""
+    # Build canonical name map: dedup_key -> first seen entity
+    canonical: dict[str, GraphEntity] = {}
+    name_remap: dict[str, str] = {}  # original name -> canonical display name
+
+    for e in graph.entities:
+        display = _normalize_label(e.name)
+        key = _normalize_label_for_dedup(e.name)
+        if key in canonical:
+            # Keep the entity with the longer description
+            existing = canonical[key]
+            if len(e.description) > len(existing.description):
+                existing.description = e.description
+            name_remap[e.name] = existing.name
+        else:
+            canonical[key] = GraphEntity(name=display, type=e.type, description=e.description)
+            name_remap[e.name] = display
+
+    # Remap relationship endpoints to canonical names
+    normalized_rels = []
+    seen_rels: set[tuple[str, str, str]] = set()
+    for r in graph.relationships:
+        src = name_remap.get(r.source, _normalize_label(r.source))
+        tgt = name_remap.get(r.target, _normalize_label(r.target))
+        key = (src.lower(), tgt.lower(), r.type)
+        if key not in seen_rels:
+            normalized_rels.append(GraphRelationship(
+                source=src, target=tgt, type=r.type, description=r.description,
+            ))
+            seen_rels.add(key)
+
+    return ExtractedGraph(entities=list(canonical.values()), relationships=normalized_rels)
+
+
 def _merge_into(base: ExtractedGraph, new: ExtractedGraph) -> ExtractedGraph:
     """Merge new entities/relationships into existing graph, deduplicating."""
-    seen_entities = {e.name.lower() for e in base.entities}
+    seen_entities = {_normalize_label_for_dedup(e.name) for e in base.entities}
     merged_entities = list(base.entities)
     for e in new.entities:
-        if e.name.lower() not in seen_entities:
+        key = _normalize_label_for_dedup(e.name)
+        if key not in seen_entities:
             merged_entities.append(e)
-            seen_entities.add(e.name.lower())
+            seen_entities.add(key)
 
     seen_rels = {(r.source.lower(), r.target.lower(), r.type) for r in base.relationships}
     merged_rels = list(base.relationships)
@@ -332,6 +416,87 @@ def _chunk_text(text: str, chunk_size: int = 4000, overlap: int = 200) -> list[s
         chunks.append(text[start:end])
         start = end - overlap
     return chunks
+
+
+async def _llm_section_split(
+    text: str,
+    llm_client: LLMClient,
+    model: str,
+    session_id: str | None,
+) -> list[tuple[str, str]]:
+    """Use the LLM to identify section boundaries in unstructured paper text.
+
+    Called when the text has no markdown headers (e.g., raw PyMuPDF output).
+    Returns (section_name, section_body) tuples covering the full paper.
+    """
+    response = await llm_client.complete(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You identify section boundaries in academic paper text. Output JSON only."},
+            {"role": "user", "content": (
+                "Identify ALL section and subsection boundaries in this paper. "
+                "Section numbers often appear on a separate line from their titles. "
+                "Return a JSON array: [{\"number\": \"1\", \"title\": \"Introduction\", "
+                "\"start_phrase\": \"unique phrase from first line of section body\"}]\n\n"
+                "Include Abstract, Introduction, every numbered section/subsection, "
+                "Related Work, Conclusion. Do NOT include References.\n\n"
+                f"{text}"
+            )},
+        ],
+        session_id=session_id,
+        temperature=0.1,
+        max_tokens=4096,
+    )
+
+    # Parse the section list
+    try:
+        raw = response.content
+        # Strip thinking tags if present
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        # Find JSON array
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start >= 0 and end > start:
+            section_list = json.loads(raw[start:end + 1])
+        else:
+            return []
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Failed to parse LLM section boundaries")
+        return []
+
+    if not section_list:
+        return []
+
+    # Match start_phrases to positions in the text
+    text_lower = text.lower()
+    boundaries: list[tuple[str, int]] = []
+    for sec in section_list:
+        title = sec.get("title", "")
+        number = sec.get("number", "")
+        phrase = sec.get("start_phrase", "")
+        name = f"{number} {title}".strip() if number else title
+
+        pos = -1
+        if phrase:
+            pos = text_lower.find(phrase.lower()[:80])
+        if pos < 0 and title:
+            pos = text_lower.find(title.lower())
+        if pos >= 0:
+            boundaries.append((name, pos))
+
+    if not boundaries:
+        return []
+
+    # Sort by position and split text
+    boundaries.sort(key=lambda x: x[1])
+    sections: list[tuple[str, str]] = []
+    for i, (name, start_pos) in enumerate(boundaries):
+        end_pos = boundaries[i + 1][1] if i + 1 < len(boundaries) else len(text)
+        body = text[start_pos:end_pos].strip()
+        if body:
+            sections.append((name, body))
+
+    return sections
 
 
 # ── Main extraction function ──────────────────────────────
@@ -420,6 +585,16 @@ async def extract_paper_graph(
         else:
             section_texts = extract_section_texts(text)
         sections = [(name, body) for name, body in section_texts.items() if body.strip()]
+
+        # If section detection found only 1 section (unstructured text from PyMuPDF),
+        # use the LLM to identify section boundaries before extraction.
+        if len(sections) <= 1 and len(text) > 5000:
+            logger.info("No section structure found, using LLM to identify sections...")
+            llm_sections = await _llm_section_split(text, llm_client, model, session_id)
+            if len(llm_sections) > 1:
+                sections = llm_sections
+                logger.info("LLM identified %d sections", len(sections))
+
         total_sections = len(sections)
 
         # Skip References section from extraction (it's bibliographic, not semantic)
@@ -474,6 +649,7 @@ async def extract_paper_graph(
                     max_tokens=8192,
                 )
                 result = _parse_extraction(response.content)
+                result = _normalize_entities(result)
                 if ontology:
                     result = _validate_against_ontology(result, ontology)
                 return section_name, result

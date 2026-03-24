@@ -108,11 +108,32 @@ def _is_acronym_match(short: str, long: str) -> bool:
     return initials == short or initials.startswith(short)
 
 
+def _split_camel(label: str) -> set[str]:
+    """Tokenize a label by splitting on spaces, underscores, and CamelCase boundaries.
+
+    'StandardBaseline' -> {'standard', 'baseline'}
+    'HAR dataset'      -> {'har', 'dataset'}
+    'HARDataset'       -> {'har', 'dataset'}
+    'WISDM_Dataset'    -> {'wisdm', 'dataset'}
+    """
+    import re as _re
+    # Replace underscores with spaces
+    s = label.replace("_", " ")
+    # Split CamelCase
+    s = _re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', s)
+    s = _re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', s)
+    return {w.lower() for w in s.split() if w}
+
+
 def _find_candidate_pairs(entities: list) -> list[tuple[str, str]]:
-    """Fast pre-pass: find entity pairs with high token overlap or acronym matches."""
+    """Fast pre-pass: find entity pairs with high token overlap or acronym matches.
+
+    Uses CamelCase-aware tokenization so 'StandardBaseline' and 'Standard Baseline'
+    produce the same token set {'standard', 'baseline'}.
+    """
     pairs = []
     seen = set()
-    names = [(n.label, set(n.label.lower().split())) for n in entities]
+    names = [(n.label, _split_camel(n.label)) for n in entities]
 
     for i in range(len(names)):
         for j in range(i + 1, len(names)):

@@ -212,7 +212,7 @@ async def verify_graph(
             ],
             session_id=session_id,
             temperature=0.1,
-            max_tokens=8192,
+            max_tokens=4096,
         )
         parsed1 = _parse_verification(response1.content)
 
@@ -265,7 +265,7 @@ async def verify_graph(
             ],
             session_id=session_id,
             temperature=0.1,
-            max_tokens=8192,
+            max_tokens=4096,
         )
         return _parse_verification(response2.content)
 
@@ -282,7 +282,7 @@ async def verify_graph(
             ],
             session_id=session_id,
             temperature=0.1,
-            max_tokens=8192,
+            max_tokens=4096,
         )
         return _parse_verification(response3.content)
 

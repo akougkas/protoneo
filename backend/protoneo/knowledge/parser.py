@@ -89,34 +89,108 @@ def _extract_pdf(file_path: str) -> str:
     return "\n\n".join(parts)
 
 
-def _extract_pdf_docling(file_path: str) -> str:
-    """Extract structured markdown from a PDF using Docling.
+def _extract_pdf_pdf2md(file_path: str, output_dir: str | None = None) -> tuple[str, str]:
+    """Extract structured markdown from a PDF using the pdf2md CLI tool.
 
-    Produces markdown with section hierarchy, figure captions, tables,
-    and equations preserved. Returns empty string on failure so the
-    caller can fall back to PyMuPDF plain text.
+    Calls pdf2md as a subprocess with the local AI pipeline (Nemotron for
+    text reasoning, Qwen3-VL for figure descriptions). Falls back to plain
+    PyMuPDF extraction on failure.
+
+    Returns (markdown, figures_dir_path). The markdown includes proper section
+    headers, linked citations, reflowed paragraphs, and VLM figure descriptions.
     """
+    import os
+    import subprocess
+
+    pdf_path = Path(file_path)
+    if output_dir:
+        out_dir = Path(output_dir)
+    else:
+        # Store pdf2md output alongside session data so figures persist
+        sessions_dir = Path(__file__).resolve().parents[2] / "data" / "sessions" / "pdf2md"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = sessions_dir
+
+    # Build environment for pdf2md's local AI endpoints.
+    # Pull from ProtoNeo settings (LAN endpoints) when available,
+    # fall back to hardcoded defaults for the homelab.
+    env = os.environ.copy()
     try:
-        from docling.document_converter import DocumentConverter
+        from ..llm.settings import load_settings, endpoint_map
+        settings = load_settings()
+        endpoints = endpoint_map(settings)
+        dynamo = endpoints.get("lan-dynamo")
+        if dynamo:
+            env.setdefault("LM_STUDIO_HOST", dynamo.url)
+    except Exception:
+        pass
+    env.setdefault("LM_STUDIO_HOST", "http://192.168.86.143:1234/v1")
+    env.setdefault("PDF2MD_TEXT_MODEL", "nemotron-cascade-2-30b-a3b-i1")
+    env.setdefault("PDF2MD_VLM_HOST", "http://192.168.86.141:8080/v1")
+    env.setdefault("PDF2MD_VLM_MODEL", "Qwen3-VL-30B-A3B-Thinking-Q5_K_XL")
 
-        converter = DocumentConverter()
-        result = converter.convert(file_path)
-        md = result.document.export_to_markdown()
-        if md and len(md.strip()) > 100:
+    # Find pdf2md executable
+    pdf2md_repo = Path.home() / "tools" / "paper-to-md"
+    cmd = [
+        str(pdf2md_repo / ".venv" / "bin" / "pdf2md"),
+        "convert",
+        str(pdf_path),
+        str(out_dir),
+        "--depth", "high",
+        "--local",
+        "--keep-raw",
+    ]
+
+    logger.info("Running pdf2md: %s", " ".join(cmd[:6]))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            env=env,
+            cwd=str(pdf2md_repo),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+
+        if result.returncode != 0:
+            logger.warning("pdf2md failed (exit %d): %s", result.returncode, result.stderr[:500])
+            return "", ""
+
+        # Find the output markdown
+        stem = pdf_path.stem
+        md_path = out_dir / stem / f"{stem}.md"
+        if md_path.exists():
+            md = md_path.read_text(encoding="utf-8")
+            figures_dir = str(out_dir / stem / "img")
             logger.info(
-                "Docling produced %d chars of markdown from %s",
-                len(md), Path(file_path).name,
+                "pdf2md produced %d chars of markdown from %s",
+                len(md), pdf_path.name,
             )
-            return md
-    except ImportError:
-        logger.info("Docling not available, skipping markdown extraction")
+            return md, figures_dir
+
+        logger.warning("pdf2md output not found at %s", md_path)
+        return "", ""
+
+    except subprocess.TimeoutExpired:
+        logger.warning("pdf2md timed out after 600s for %s", pdf_path.name)
+        return "", ""
+    except FileNotFoundError:
+        logger.info("pdf2md not installed at %s", pdf2md_repo)
+        return "", ""
     except Exception as e:
-        logger.warning("Docling extraction failed for %s: %s", file_path, e)
-    return ""
+        logger.warning("pdf2md failed for %s: %s", pdf_path.name, e)
+        return "", ""
 
 
-def parse_file(file_path: str) -> Document:
-    """Parse a single file into a Document."""
+def parse_file(file_path: str, fast: bool = False) -> Document:
+    """Parse a single file into a Document.
+
+    When fast=True, skip AI extraction and use PyMuPDF only (~2-5 seconds).
+    When fast=False (default), try pdf2md first for structured markdown with
+    AI-powered cleanup, figure descriptions, and section detection.
+    Falls back to plain PyMuPDF text if pdf2md is unavailable.
+    """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -127,9 +201,35 @@ def parse_file(file_path: str) -> Document:
 
     markdown = ""
     if suffix == ".pdf":
-        markdown = _extract_pdf_docling(file_path)
+        # Check for pre-built markdown from pdf2md batch runs.
+        # The PDF may be uploaded to a temp dir, so check both:
+        #   1. Sibling: same directory as PDF (reviews-pending/paperN/paperN.md)
+        #   2. Known location: reviews-pending/paperN/paperN.md by extracting paper ID from filename
+        stem = path.stem  # e.g., "uuid_hpdc26-paper251" or "hpdc26-paper251"
+        # Extract paper ID: find "paperNNN" anywhere in the filename
+        import re as _re
+        paper_match = _re.search(r"(paper\d+)", stem)
+        paper_id = paper_match.group(1) if paper_match else ""
+
+        prebuilt_md = None
+        if paper_id:
+            # Check sibling first
+            sibling_md = path.parent / f"{paper_id}.md"
+            if sibling_md.exists() and sibling_md.stat().st_size > 1000:
+                prebuilt_md = sibling_md
+            else:
+                # Check reviews-pending/ directory
+                reviews_dir = Path(__file__).resolve().parents[3] / "reviews-pending" / paper_id
+                candidate = reviews_dir / f"{paper_id}.md"
+                if candidate.exists() and candidate.stat().st_size > 1000:
+                    prebuilt_md = candidate
+
+        if prebuilt_md:
+            markdown = _read_text_with_fallback(str(prebuilt_md))
+            logger.info("Using pre-built markdown: %s (%d chars)", prebuilt_md, len(markdown))
+        elif not fast:
+            markdown, _figures_dir = _extract_pdf_pdf2md(file_path)
         text = _extract_pdf(file_path)
-        # Fix 14: Strip line number pollution from two-column PDFs
         text = _strip_line_number_pollution(text)
     else:
         text = _read_text_with_fallback(file_path)
