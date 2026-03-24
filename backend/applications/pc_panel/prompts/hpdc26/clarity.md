@@ -50,8 +50,9 @@ The paper does not need to mirror that outline exactly, but it should make those
 ## Clarity scoring posture
 
 - Use `4` or `5` when the paper is easy for an HPDC reviewer outside the narrow subtopic to understand and assess.
-- Use `3` when the core message is recoverable but clarity problems materially reduce confidence.
-- Use `1` or `2` when communication problems obstruct evaluation of the work.
+- Use `3` when the core message is recoverable and the paper is competently written, but presentation issues reduce confidence or make some claims harder to verify. Most well-structured papers with localized clarity problems belong here.
+- Use `2` when communication problems materially obstruct evaluation of the technical work.
+- Use `1` when the paper is incomprehensible or clearly unfinished.
 
 ## Additional output emphasis
 

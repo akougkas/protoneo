@@ -7,7 +7,9 @@ phase, an optional round-robin phase, and a sequential synthesis phase.
 """
 
 import asyncio
+import json
 import logging
+import re
 import time
 from typing import Callable
 
@@ -306,33 +308,110 @@ class RoundRobinPattern:
                         f"--- [END Round {round_n}] ---"
                     )
 
-            # 4. Deliberation instructions
+            # 4. Score diversity check
+            _tmp_phase = PhaseResult(
+                phase_name="_diversity_check", mode="parallel",
+                outputs=list(independent_reviews.values()),
+            )
+            extracted_scores = _extract_merit_scores(_tmp_phase)
+            unique_scores = set(extracted_scores)
+            if len(extracted_scores) >= 3 and len(unique_scores) == 1:
+                unanimous_score = int(unique_scores.pop())
+                sections.append(
+                    f"## Score Diversity Alert\n\n"
+                    f"**All {len(extracted_scores)} reviewers independently "
+                    f"assigned the same merit score ({unanimous_score}).** "
+                    f"Unanimous agreement before deliberation is statistically "
+                    f"unusual and may indicate anchoring bias rather than genuine "
+                    f"consensus. Before confirming your score, actively consider "
+                    f"whether the paper deserves a score one point higher or lower "
+                    f"than the current unanimous value. Identify the strongest "
+                    f"argument for each direction."
+                )
+
+            # 5. Deliberation instructions
             peer_roles = [
                 r.agent_role for aid, r in independent_reviews.items()
                 if aid != current_agent_id
             ]
             peer_list = ", ".join(peer_roles) if peer_roles else "your co-reviewers"
 
-            sections.append(
-                f"## Deliberation Task (Round {round_num + 1})\n\n"
-                f"You are the **{current_role}**. The other panel members "
-                f"are: {peer_list}.\n\n"
-                f"You have read all independent reviews above. Now engage "
-                f"in deliberation:\n\n"
-                f"1. **Identify disagreements.** Where do you and your peers "
-                f"differ on merit scores, severity ratings, or factual claims? "
-                f"Name the specific reviewer and the specific point.\n\n"
-                f"2. **Argue or concede.** For each disagreement, either "
-                f"defend your position with manuscript evidence (section, "
-                f"figure, table) or concede if the peer's evidence is stronger.\n\n"
-                f"3. **Update your assessment.** State your updated merit "
-                f"score. If it changed from your independent review, explain "
-                f"exactly what convinced you.\n\n"
-                f"4. **Flag unresolved issues.** Identify points that need "
-                f"further discussion or that the meta-reviewer should weigh in on.\n\n"
-                f"Return your deliberation response as a JSON object matching "
-                f"the same output contract as your independent review."
-            )
+            if round_num == 0:
+                delib_instructions = (
+                    f"## Deliberation Task (Round {round_num + 1})\n\n"
+                    f"You are the **{current_role}**. The other panel members "
+                    f"are: {peer_list}.\n\n"
+                    f"This is a committee discussion, not a poll. Your job is "
+                    f"to help the panel reach a well-reasoned collective judgment "
+                    f"by contributing your unique perspective and engaging seriously "
+                    f"with your peers' reasoning.\n\n"
+                    f"### What to do\n\n"
+                    f"**1. Respond to specific peers by name.** Do not just restate "
+                    f"your own review. Address what other reviewers said. When the "
+                    f"Technical Reviewer flags a methodology gap, the Novelty Reviewer "
+                    f"should weigh in on whether that gap also affects the novelty "
+                    f"claim. When the Skeptic raises a concern, others should either "
+                    f"supply manuscript evidence that mitigates it or explain why it "
+                    f"matters more (or less) than the Skeptic claims.\n\n"
+                    f"**2. Build arguments together.** The best committee discussions "
+                    f"produce insights no single reviewer had alone. Connect "
+                    f"observations across reviews: if two reviewers noticed related "
+                    f"problems from different angles, synthesize them into a stronger "
+                    f"joint observation. If a strength identified by one reviewer "
+                    f"partly mitigates a weakness flagged by another, say so explicitly.\n\n"
+                    f"**3. Contribute new observations.** Reading your peers' reviews "
+                    f"may prompt you to notice something you missed, or to re-examine "
+                    f"a section of the paper you initially skimmed. If a peer's "
+                    f"criticism sends you back to the manuscript and you find "
+                    f"supporting or contradicting evidence, report it.\n\n"
+                    f"**4. Disagree constructively when warranted.** If you believe "
+                    f"a peer is wrong, say so with evidence. Do not flatten your "
+                    f"assessment to match the group. A split panel with clearly "
+                    f"articulated reasons is more useful to the meta-reviewer than "
+                    f"artificial unanimity.\n\n"
+                    f"**5. Identify the key decision points.** What are the 2-3 "
+                    f"questions whose answers determine whether this paper should "
+                    f"be accepted? Frame them clearly for the meta-reviewer.\n\n"
+                    f"**6. Update your score if warranted.** If your peers' arguments "
+                    f"genuinely changed your assessment, update your merit score and "
+                    f"explain what convinced you. If not, hold your ground and "
+                    f"explain why.\n\n"
+                    f"### What NOT to do\n\n"
+                    f"- Do not simply say \"I agree with the Technical Reviewer.\" "
+                    f"Explain what you agree with and why it matters from your "
+                    f"perspective.\n"
+                    f"- Do not restate your entire independent review. Focus on "
+                    f"what changed, what was reinforced, and what new insights "
+                    f"emerged from reading your peers.\n"
+                    f"- Do not default to the lowest score in the panel. Convergence "
+                    f"toward rejection is not rigor.\n\n"
+                    f"Return your deliberation response as a JSON object matching "
+                    f"the same output contract as your independent review."
+                )
+            else:
+                delib_instructions = (
+                    f"## Deliberation Task (Round {round_num + 1})\n\n"
+                    f"You are the **{current_role}**. This is round "
+                    f"{round_num + 1} of deliberation.\n\n"
+                    f"Review the prior deliberation exchanges above. At this "
+                    f"stage, focus on:\n\n"
+                    f"1. **Resolving open questions** from the previous round. "
+                    f"If a peer asked you to check something in the manuscript, "
+                    f"report what you found.\n\n"
+                    f"2. **Narrowing the key decision points.** The meta-reviewer "
+                    f"needs to know: what are the 1-2 issues the committee "
+                    f"considers most important, and where does the panel stand "
+                    f"on each?\n\n"
+                    f"3. **Finalizing your score.** State your final merit score "
+                    f"with a one-sentence rationale that references the "
+                    f"deliberation, not just your original review.\n\n"
+                    f"Keep this response focused and concise. The meta-reviewer "
+                    f"will read everything.\n\n"
+                    f"Return your response as a JSON object matching "
+                    f"the same output contract as your independent review."
+                )
+
+            sections.append(delib_instructions)
 
             return "\n\n".join(sections)
 

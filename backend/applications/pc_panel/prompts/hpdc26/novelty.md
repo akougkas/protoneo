@@ -44,9 +44,10 @@ Reward papers that:
 
 ## Novelty scoring posture
 
-- Use `4` or `5` only when the novelty is both real and clearly important to HPDC.
-- Use `3` when there is a plausible contribution but the positioning or significance is still borderline.
-- Use `1` or `2` when the contribution appears incremental, weakly differentiated, or poorly aligned to venue scope.
+- Use `4` or `5` when the novelty is both real and clearly important to HPDC.
+- Use `3` when there is a genuine contribution that advances the state of the art, even if the novelty is compositional or the positioning could be sharper. Most papers with a real systems insight belong here.
+- Use `2` when the contribution is incremental, weakly differentiated, or the paper reads like engineering without a clear new insight.
+- Use `1` when the work is derivative or at the wrong venue.
 
 ## Additional output emphasis
 

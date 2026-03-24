@@ -52,7 +52,7 @@ review_form:
     labels:
       1: Reject
       2: Weak reject
-      3: Weak accept
+      3: Borderline
       4: Accept
       5: Strong accept
   reviewer_expertise:

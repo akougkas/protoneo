@@ -49,9 +49,10 @@ Use the HPDC suggested expectations for evaluating introductions and experiments
 
 ## Technical scoring posture
 
-- Use `4` or `5` only when the paper is technically solid and the evidence clearly supports the headline claims.
-- Use `3` when the contribution seems meaningful but there are real technical concerns that still appear fixable or debatable.
-- Use `1` or `2` when the main claims depend on missing evidence, unfair comparisons, weak methodology, or poor venue fit.
+- Use `4` or `5` when the paper is technically solid and the evidence clearly supports the headline claims.
+- Use `3` when the contribution is meaningful and the methodology is sound in its core approach, but real technical concerns exist that are debatable or fixable in revision. Most competent HPDC submissions with a genuine systems contribution belong here.
+- Use `2` when the main claims depend on missing evidence, unfair comparisons, or weak methodology that would require major rework.
+- Use `1` when the work has fundamental flaws or is at the wrong venue.
 
 ## Additional output emphasis
 
