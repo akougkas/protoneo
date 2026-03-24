@@ -5,10 +5,9 @@ Routes through LiteLLM for local/homelab/OpenRouter endpoints, and makes
 direct HTTP calls for subscription providers whose OAuth tokens require
 provider-specific API endpoints and auth headers:
 
-- Anthropic (Claude Max): LiteLLM with api_key='' and Bearer via extra_headers
 - OpenAI (ChatGPT Plus): Direct HTTP to chatgpt.com/backend-api (Codex Responses API)
 
-These direct paths replicate the exact same HTTP calls that pi-ai makes.
+Anthropic provider has been disabled.
 """
 
 import asyncio
@@ -47,9 +46,9 @@ _RETRYABLE_EXCEPTIONS = (
     APIConnectionError,
 )
 
-# Anthropic OAuth identity (matching pi-ai exactly)
-_ANTHROPIC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-_ANTHROPIC_BETA = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+# DISABLED: Anthropic provider removed from ProtoNeo
+# _ANTHROPIC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
+# _ANTHROPIC_BETA = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
 
 # OpenAI Codex (ChatGPT subscription) endpoint
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api"
@@ -57,7 +56,8 @@ _CODEX_JWT_CLAIM = "https://api.openai.com/auth"
 
 
 def _is_anthropic_oauth(provider: str, api_key: str) -> bool:
-    return provider == "anthropic" and api_key.startswith("sk-ant-oat")
+    # DISABLED: Anthropic provider removed. Always returns False.
+    return False  # provider == "anthropic" and api_key.startswith("sk-ant-oat")
 
 
 def _is_openai_oauth(provider: str, api_key: str) -> bool:
@@ -88,8 +88,8 @@ class LLMClient:
     Multi-provider LLM client.
 
     Routes through LiteLLM for providers that use standard API key auth.
-    Makes direct HTTP calls for subscription providers (Anthropic OAuth,
-    OpenAI ChatGPT) that require non-standard endpoints and auth mechanisms.
+    Makes direct HTTP calls for subscription providers (OpenAI ChatGPT)
+    that require non-standard endpoints and auth mechanisms.
     """
 
     def __init__(
@@ -228,23 +228,22 @@ class LLMClient:
         provider = info.provider
         api_key = await self._resolve_api_key_async(provider)
         if api_key:
-            if _is_anthropic_oauth(provider, api_key):
-                # Anthropic OAuth: set api_key empty so LiteLLM doesn't send
-                # x-api-key header, then inject Bearer via extra_headers.
-                kwargs["api_key"] = ""
-                kwargs["extra_headers"] = {
-                    "Authorization": f"Bearer {api_key}",
-                    "anthropic-beta": _ANTHROPIC_BETA,
-                    "user-agent": "claude-cli/2.1.75",
-                    "x-app": "cli",
-                    "x-api-key": "",
-                }
-                # Mandatory system prompt for OAuth tokens
-                msgs = kwargs["messages"]
-                if msgs and msgs[0].get("role") == "system":
-                    msgs[0] = {**msgs[0], "content": _ANTHROPIC_SYSTEM_PREFIX + "\n\n" + msgs[0]["content"]}
-                else:
-                    msgs.insert(0, {"role": "system", "content": _ANTHROPIC_SYSTEM_PREFIX})
+            if False:  # DISABLED: Anthropic OAuth routing removed
+                # if _is_anthropic_oauth(provider, api_key):
+                #     kwargs["api_key"] = ""
+                #     kwargs["extra_headers"] = {
+                #         "Authorization": f"Bearer {api_key}",
+                #         "anthropic-beta": _ANTHROPIC_BETA,
+                #         "user-agent": "claude-cli/2.1.75",
+                #         "x-app": "cli",
+                #         "x-api-key": "",
+                #     }
+                #     msgs = kwargs["messages"]
+                #     if msgs and msgs[0].get("role") == "system":
+                #         msgs[0] = {**msgs[0], "content": _ANTHROPIC_SYSTEM_PREFIX + "\n\n" + msgs[0]["content"]}
+                #     else:
+                #         msgs.insert(0, {"role": "system", "content": _ANTHROPIC_SYSTEM_PREFIX})
+                pass
             else:
                 kwargs["api_key"] = api_key
         elif info.api_base:

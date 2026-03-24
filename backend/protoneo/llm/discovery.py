@@ -417,9 +417,10 @@ async def discover_all(
         tasks["openrouter"] = discover_openrouter(openrouter_key, free_only=openrouter_free_only)
 
     # Subscriptions discovered from the provider-authenticated runtime paths
-    anthropic = provider_credentials.get("anthropic", {})
-    if anthropic.get("api_key"):
-        tasks["anthropic"] = discover_anthropic(anthropic["api_key"], anthropic)
+    # DISABLED: Anthropic provider removed from ProtoNeo
+    # anthropic = provider_credentials.get("anthropic", {})
+    # if anthropic.get("api_key"):
+    #     tasks["anthropic"] = discover_anthropic(anthropic["api_key"], anthropic)
     openai_creds = provider_credentials.get("openai", {})
     if openai_creds.get("api_key"):
         tasks["openai"] = discover_openai(openai_creds["api_key"], openai_creds)

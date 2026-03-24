@@ -58,6 +58,14 @@ backend/data/
 # Planning artifacts
 PLAN.md
 
+# Session prompts and review notes (dev-only)
+NEXT_SESSION_REVIEWS.md
+SESSION_PROMPTS.md
+PIPELINE-FIXES.md
+
+# Review data (PDFs, markdowns, graphs, session artifacts)
+reviews-pending/
+
 # Lock files (use npm)
 bun.lock
 frontend/bun.lock

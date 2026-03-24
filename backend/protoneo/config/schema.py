@@ -103,7 +103,7 @@ class ProtoNeoConfig(BaseModel):
             oauth_registry = None
 
         for provider_name, env_vars in [
-            ("anthropic", ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
+            # ("anthropic", ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),  # DISABLED
             ("openai", ["OPENAI_API_KEY"]),
         ]:
             key = None

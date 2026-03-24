@@ -4,24 +4,12 @@ Fetches the same data source that pi-ai uses at build time (models.dev/api.json)
 but queries it at runtime. Results are cached to disk so we only hit the API once
 per session (or when explicitly refreshed).
 
-This is the discovery source for subscription providers (Anthropic, OpenAI)
+This is the discovery source for subscription providers (OpenAI)
 whose OAuth tokens cannot enumerate models via /v1/models.
+Anthropic provider has been disabled.
 
 models.dev JSON structure:
     {
-        "anthropic": {
-            "id": "anthropic", "name": "Anthropic", ...
-            "models": {
-                "claude-opus-4-6": {
-                    "id": "claude-opus-4-6",
-                    "name": "Claude Opus 4.6",
-                    "reasoning": true,
-                    "limit": {"context": 1000000, "output": 128000},
-                    "cost": {"input": 5, "output": 25, ...},
-                    ...
-                }, ...
-            }
-        },
         "openai": { ... },
         ...
     }
@@ -44,7 +32,7 @@ _CACHE_TTL = 3600 * 6  # 6 hours
 
 # Chat model prefixes per provider (filter out embedding, tts, image models)
 _CHAT_PREFIXES = {
-    "anthropic": ("claude-",),
+    # "anthropic": ("claude-",),  # DISABLED: Anthropic provider removed
     "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
 }
 

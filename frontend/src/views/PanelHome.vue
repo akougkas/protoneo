@@ -68,6 +68,10 @@
               @click="uploadMode = 'batch'"
             >Batch Graphs</button>
             <button
+              :class="['mode-btn', { active: uploadMode === 'batch-review' }]"
+              @click="uploadMode = 'batch-review'"
+            >Batch Review</button>
+            <button
               :class="['mode-btn', { active: uploadMode === 'import' }]"
               @click="uploadMode = 'import'"
             >Import Graph</button>
@@ -126,6 +130,38 @@
             <template v-else>
               <div class="drop-prompt">Drop multiple PDFs or click to browse</div>
               <div class="drop-hint">Build knowledge graphs overnight, review next morning</div>
+            </template>
+          </div>
+          <div
+            v-if="uploadMode === 'batch-review'"
+            :class="['drop-zone batch-zone', { active: dragOver, hasFile: batchReviewFiles.length > 0 }]"
+            @dragover.prevent="dragOver = true"
+            @dragleave="dragOver = false"
+            @drop.prevent="onBatchReviewDrop"
+            @click="$refs.batchReviewInput.click()"
+          >
+            <input
+              ref="batchReviewInput"
+              type="file"
+              accept=".pdf"
+              multiple
+              style="display: none"
+              @change="onBatchReviewSelect"
+            />
+            <template v-if="batchReviewFiles.length > 0">
+              <div class="batch-file-list">
+                <div v-for="(f, i) in batchReviewFiles" :key="i" class="batch-file-item">
+                  <span class="file-icon small">PDF</span>
+                  <span class="file-name">{{ f.name }}</span>
+                  <span class="file-size">{{ formatSize(f.size) }}</span>
+                  <button class="remove-btn" @click.stop="batchReviewFiles.splice(i, 1)">&times;</button>
+                </div>
+              </div>
+              <div class="batch-count">{{ batchReviewFiles.length }} file(s) selected</div>
+            </template>
+            <template v-else>
+              <div class="drop-prompt">Drop multiple PDFs or click to browse</div>
+              <div class="drop-hint">Full review per paper, processed one at a time</div>
             </template>
           </div>
           <div
@@ -362,6 +398,15 @@ Examples:
             {{ launching ? 'Building graphs...' : `Build ${batchFiles.length} Graph${batchFiles.length !== 1 ? 's' : ''}` }}
           </button>
         </template>
+        <template v-if="uploadMode === 'batch-review'">
+          <button
+            :class="['action-btn launch-btn', { ready: batchReviewFiles.length > 0 && selectedConference }]"
+            :disabled="batchReviewFiles.length === 0 || !selectedConference || launching"
+            @click="launchBatchReview"
+          >
+            {{ launching ? 'Starting reviews...' : `Review ${batchReviewFiles.length} Paper${batchReviewFiles.length !== 1 ? 's' : ''}` }}
+          </button>
+        </template>
         <template v-if="uploadMode === 'import'">
           <button
             :class="['action-btn launch-btn', { ready: !!importFile && selectedConference }]"
@@ -434,7 +479,7 @@ Examples:
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getConferences, getConference, getModels, startPanelReview, runPreflight, listSessions, getSettings, getActiveModelAssignments, startBatch, reviewWithGraph, listBatches, getPresets, activatePreset } from '../api/kernel.js'
+import { getConferences, getConference, getModels, startPanelReview, runPreflight, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, reviewWithGraph, listBatches, getPresets, activatePreset } from '../api/kernel.js'
 
 const router = useRouter()
 
@@ -466,8 +511,9 @@ const launchError = ref('')
 const preflight = ref(null)
 const showFullAbstract = ref(false)
 const userInstructions = ref('')
-const uploadMode = ref('single')  // 'single', 'batch', 'import'
+const uploadMode = ref('single')  // 'single', 'batch', 'batch-review', 'import'
 const batchFiles = ref([])
+const batchReviewFiles = ref([])
 const importFile = ref(null)
 const importGraphStats = ref(null)
 const recentBatches = ref([])
@@ -515,8 +561,8 @@ const graphSteps = [
 ]
 
 // Graph pipeline steps use local models only. Subscription tokens
-// (Anthropic, OpenAI) are reserved for review roles.
-const _SUBSCRIPTION_PROVIDERS = new Set(['anthropic', 'openai'])
+// (OpenAI) are reserved for review roles.
+const _SUBSCRIPTION_PROVIDERS = new Set(['openai'])  // anthropic removed
 const localModels = computed(() =>
   availableModels.value.filter(m => !_SUBSCRIPTION_PROVIDERS.has(m.provider))
 )
@@ -586,6 +632,7 @@ const completedSessions = computed(() => recentSessions.value.filter(s => s.stat
 const canLaunch = computed(() => {
   if (uploadMode.value === 'single') return selectedConference.value && selectedFile.value
   if (uploadMode.value === 'batch') return selectedConference.value && batchFiles.value.length > 0
+  if (uploadMode.value === 'batch-review') return selectedConference.value && batchReviewFiles.value.length > 0
   if (uploadMode.value === 'import') return selectedConference.value && importFile.value
   return false
 })
@@ -869,6 +916,17 @@ function onBatchSelect(e) {
   batchFiles.value.push(...files)
 }
 
+function onBatchReviewDrop(e) {
+  dragOver.value = false
+  const files = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf')
+  batchReviewFiles.value.push(...files)
+}
+
+function onBatchReviewSelect(e) {
+  const files = Array.from(e.target.files).filter(f => f.type === 'application/pdf')
+  batchReviewFiles.value.push(...files)
+}
+
 function onImportDrop(e) {
   dragOver.value = false
   const file = e.dataTransfer.files[0]
@@ -915,6 +973,33 @@ async function launchBatch() {
     router.push({ name: 'BatchDashboard', params: { batchId: res.data.batch_id } })
   } catch (e) {
     launchError.value = e.response?.data?.detail || e.message || 'Failed to start batch'
+  } finally {
+    launching.value = false
+  }
+}
+
+async function launchBatchReview() {
+  if (batchReviewFiles.value.length === 0) return
+  launching.value = true
+  launchError.value = ''
+  try {
+    const enabledMap = {}
+    for (const pa of panelAgents.value) {
+      if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
+    }
+    for (const step of graphSteps) {
+      if (modelMap[step.id]) enabledMap[step.id] = normalizeModelId(modelMap[step.id])
+    }
+    const res = await startBatchReview(
+      batchReviewFiles.value,
+      selectedConference.value,
+      enabledMap,
+      2,
+      userInstructions.value
+    )
+    router.push({ name: 'BatchDashboard', params: { batchId: res.data.batch_id } })
+  } catch (e) {
+    launchError.value = e.response?.data?.detail || e.message || 'Failed to start batch review'
   } finally {
     launching.value = false
   }

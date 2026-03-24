@@ -14,7 +14,7 @@ import os
 from typing import Any
 
 from .oauth_base import OAuthProvider, load_credentials
-from .anthropic_oauth import AnthropicOAuth
+# from .anthropic_oauth import AnthropicOAuth  # DISABLED: Anthropic provider removed
 from .openai_oauth import OpenAIOAuth
 
 logger = logging.getLogger("protoneo.llm.providers.registry")
@@ -41,7 +41,7 @@ class ProviderRegistry:
 
     def __init__(self):
         self._providers: dict[str, OAuthProvider] = {
-            "anthropic": AnthropicOAuth(),
+            # "anthropic": AnthropicOAuth(),  # DISABLED: Anthropic provider removed
             "openai": OpenAIOAuth(),
         }
 
@@ -165,7 +165,7 @@ class ProviderRegistry:
     @staticmethod
     def _env_key(provider_name: str) -> str | None:
         env_map = {
-            "anthropic": ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            # "anthropic": ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],  # DISABLED
             "openai": ["OPENAI_API_KEY"],
         }
         for env_var in env_map.get(provider_name, []):

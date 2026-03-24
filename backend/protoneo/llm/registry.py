@@ -25,8 +25,8 @@ _TAG_CAPABILITIES = {
     "reasoning": ModelCapability.EXTENDED_THINKING,
 }
 
-_VISION_HINTS = ("vision", "vl", "gpt-4.1", "claude", "ocr")
-_FUNCTION_CALLING_PROVIDERS = {"anthropic", "openai", "openrouter"}
+_VISION_HINTS = ("vision", "vl", "gpt-4.1", "ocr")  # "claude" removed
+_FUNCTION_CALLING_PROVIDERS = {"openai", "openrouter"}  # anthropic removed
 
 
 def _provider_prefixed_model_id(provider: str, model_id: str) -> str:
@@ -165,8 +165,8 @@ class CapabilityRegistry:
             return f"{prefix}/{raw_model_id}"
         if provider == "openrouter":
             return f"openrouter/{raw_model_id}"
-        if provider == "anthropic":
-            return f"anthropic/{raw_model_id}"
+        # if provider == "anthropic":  # DISABLED: Anthropic provider removed
+        #     return f"anthropic/{raw_model_id}"
         if provider == "openai":
             return raw_model_id
         return None

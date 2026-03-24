@@ -192,7 +192,7 @@
         <div class="tier-label-row">
           <span class="tier-dot subscription"></span>
           <h3 class="tier-name">Subscriptions</h3>
-          <span class="tier-hint">OAuth login to Claude Max, ChatGPT, Gemini</span>
+          <span class="tier-hint">OAuth login to ChatGPT, Gemini</span>
         </div>
         <div class="provider-grid">
           <div v-for="p in subscriptionProviders" :key="p.provider" :class="['provider-card', { connected: p.logged_in || p.has_credentials, disabled: !isProviderEnabled(p.provider) }]">
@@ -230,7 +230,7 @@
               <div class="manual-model-row">
                 <input
                   class="manual-model-input"
-                  :placeholder="p.provider === 'openai' ? 'e.g. gpt-4.1' : 'e.g. claude-sonnet-4-6'"
+                  :placeholder="'e.g. gpt-4.1'"
                   :value="settings.active_models[p.provider] || ''"
                   @change="setActiveModel(p.provider, $event.target.value.trim())"
                   @keydown.enter="setActiveModel(p.provider, $event.target.value.trim())"
@@ -252,9 +252,9 @@
 
             <!-- Login flow -->
             <div v-if="pendingLogin === p.provider" class="pc-login-progress">
-              <div v-if="p.provider !== 'anthropic'" class="pc-waiting"><span class="waiting-dot"></span> Waiting for browser login...</div>
-              <div v-if="p.provider === 'anthropic' || showManualPaste" class="pc-paste">
-                <label class="paste-label">{{ p.provider === 'anthropic' ? 'Paste the code#state:' : 'Paste redirect URL:' }}</label>
+              <div class="pc-waiting"><span class="waiting-dot"></span> Waiting for browser login...</div>
+              <div v-if="showManualPaste" class="pc-paste">
+                <label class="paste-label">Paste redirect URL:</label>
                 <div class="paste-row">
                   <input v-model="pasteCode" class="paste-input" @keydown.enter="submitPasteCode(p.provider)" />
                   <button class="paste-btn" @click="submitPasteCode(p.provider)" :disabled="!pasteCode">Submit</button>
@@ -419,7 +419,7 @@ let loginState = ''
 
 // Computed
 const subscriptionProviders = computed(() =>
-  providers.value.filter(p => ['anthropic', 'openai'].includes(p.provider))
+  providers.value.filter(p => ['openai'].includes(p.provider))  // anthropic removed
 )
 const openrouterAvailable = computed(() => providers.value.find(p => p.provider === 'openrouter')?.has_credentials ?? false)
 const openrouterModelCount = computed(() => discovery.value.openrouter?.models?.length || 0)
@@ -476,7 +476,7 @@ const activeModelCount = computed(() => {
     if (node.online && isProviderEnabled(node.id)) count += node.models?.length || 0
   }
   if (isProviderEnabled('openrouter') && discovery.value.openrouter?.models) count += discovery.value.openrouter.models.length
-  for (const prov of ['anthropic', 'openai']) {
+  for (const prov of ['openai']) {  // anthropic removed
     if (isProviderEnabled(prov) && discovery.value[prov]?.models) count += discovery.value[prov].models.length
   }
   return count

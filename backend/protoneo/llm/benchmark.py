@@ -693,7 +693,7 @@ async def benchmark_model(
 
     # Cloud providers (subscription APIs) don't need warmup. Models are
     # always loaded. Local providers need warmup to load weights into VRAM.
-    is_cloud = provider in ("anthropic", "openai")
+    is_cloud = provider in ("openai",)  # anthropic removed
     if not is_cloud:
         try:
             await llm_client.complete(

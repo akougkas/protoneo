@@ -5,33 +5,14 @@ matching what /model shows in Claude Code, Codex CLI, and Gemini CLI.
 No API models, no models.dev. Just the subscription models.
 """
 
-# Claude Max subscription models (from Claude Code /model)
-ANTHROPIC_SUBSCRIPTION_MODELS = [
-    {
-        "id": "claude-opus-4-6",
-        "name": "Claude Opus 4.6",
-        "context_length": 1_000_000,
-        "reasoning": True,
-        "source": "anthropic",
-        "provider_type": "subscription",
-    },
-    {
-        "id": "claude-sonnet-4-6",
-        "name": "Claude Sonnet 4.6",
-        "context_length": 200_000,
-        "reasoning": True,
-        "source": "anthropic",
-        "provider_type": "subscription",
-    },
-    {
-        "id": "claude-haiku-4-5",
-        "name": "Claude Haiku 4.5",
-        "context_length": 200_000,
-        "reasoning": False,
-        "source": "anthropic",
-        "provider_type": "subscription",
-    },
-]
+# DISABLED: Anthropic provider removed from ProtoNeo.
+# Claude Max subscription models preserved as reference only.
+# ANTHROPIC_SUBSCRIPTION_MODELS = [
+#     {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "context_length": 1_000_000, "reasoning": True, "source": "anthropic", "provider_type": "subscription"},
+#     {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "context_length": 200_000, "reasoning": True, "source": "anthropic", "provider_type": "subscription"},
+#     {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "context_length": 200_000, "reasoning": False, "source": "anthropic", "provider_type": "subscription"},
+# ]
+ANTHROPIC_SUBSCRIPTION_MODELS: list = []  # Empty: provider disabled
 
 # ChatGPT Plus/Pro subscription models (from Codex CLI /model)
 OPENAI_SUBSCRIPTION_MODELS = [
