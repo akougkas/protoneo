@@ -1,16 +1,34 @@
-"""Paper-specific ontology generation for academic review.
+"""Multi-step paper ontology workflow for academic review.
 
-Adapted from MiroFish's ontology generator. Instead of social media actors,
-this generates an ontology of reviewable concepts for a specific paper.
+Adapted from MiroFish's ontology-first pattern. Instead of social media actors,
+this generates a domain-specific schema of entity types and relationship types
+tailored to what reviewers need to evaluate in a specific academic submission.
 
-The ontology runs as Phase 0 before graph extraction. It analyzes the paper
-and produces a domain-specific schema of entity types and relationship types
-tailored to what reviewers need to evaluate in this particular submission.
+Architecture (inspired by ODKE+, OntoKGen, Ontogenia ESWC 2024):
+
+  Step 1: Domain Detection + Pattern Seeding (no LLM, fast)
+    Classify paper domain from abstract keywords, load seed pattern.
+
+  Step 2: Ontology Discovery (LLM, self-consistent)
+    Run N parallel generations, keep types appearing in >=2 of N samples.
+
+  Step 3: Ontology Grounding (LLM, focused)
+    Verify each candidate type has concrete examples in the paper.
+    Reject ungrounded types.
+
+  Step 4: Merge + Validate (no LLM)
+    Merge grounded types with base types, generate extraction prompt.
+
+The ontology runs as Phase 0 before graph extraction. It tells the extractor
+what entity types and relationships are relevant for this specific paper,
+producing a more focused and grounded knowledge graph.
 """
 
+import asyncio
 import json
 import logging
 import re
+from collections import Counter
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -223,132 +241,476 @@ _STRUCTURAL_EDGE_TYPES = [
 ]
 
 
-# ── LLM prompt for ontology generation ────────────────────
+# ══════════════════════════════════════════════════════════
+# Step 1: Domain Detection + Pattern Seeding
+# ══════════════════════════════════════════════════════════
 
-_ONTOLOGY_SYSTEM = """\
-You are an academic paper ontology designer for a peer review system. Your job
-is to analyze a research paper and design a domain-specific schema of entity
-types and relationship types that capture everything a reviewer needs to evaluate.
-
-The ontology must help reviewers assess:
-- What the paper contributes (novelty, significance)
-- How the contributions are implemented (methods, algorithms)
-- How they are evaluated (datasets, metrics, baselines)
-- What evidence supports the claims (results, figures, tables)
-- What limitations exist (gaps, threats to validity)
-"""
-
-_ONTOLOGY_USER = """\
-Analyze this research paper and design paper-SPECIFIC ontology types for reviewer evaluation.
-
-## Base types (already included, DO NOT duplicate these)
-
-The following entity types are automatically added to every paper ontology.
-Do NOT include any of these in your output:
-- Claim, Method, Dataset, Metric, Baseline, Result, Limitation
-- Concept (catch-all), Reference (cited works), Equation (labeled equations)
-
-The following edge types are also already included:
-- USES, EVALUATES_ON, COMPARED_AGAINST, ACHIEVES, EXTENDS, CITES, PART_OF, CONTRADICTS
-- HAS_SECTION, CONTAINS, APPEARS_IN, ALIAS_OF
-
-## Your task
-
-Design 3-5 entity types that are SPECIFIC to this paper and not covered by the base types above.
-These should capture domain-specific concepts that reviewers need to evaluate.
-
-Examples of good paper-specific types:
-- **HardwarePlatform**: GPUs, clusters, testbeds used in evaluation
-- **Algorithm**: specific pseudocode procedures or computational steps
-- **Model**: machine learning models, statistical models
-- **System**: software systems, frameworks, platforms
-- **Assumption**: stated or implicit assumptions
-- **Hyperparameter**: tuning choices (learning rate, batch size, etc.)
-- **Workload**: specific benchmark workloads or test configurations
-
-Also design 3-5 paper-specific edge types not already in the base set.
-
-### Output format (JSON):
-{
-  "entity_types": [
-    {
-      "name": "PascalCase name",
-      "description": "What this type represents and why reviewers care about it (max 100 chars)",
-      "attributes": [
-        {"name": "snake_case_name", "type": "text", "description": "what this attribute captures"}
-      ],
-      "examples": ["example from this paper", "another example"]
-    }
-  ],
-  "edge_types": [
-    {
-      "name": "UPPER_SNAKE_CASE",
-      "description": "What this relationship means (max 100 chars)",
-      "source_targets": [
-        {"source": "EntityType1", "target": "EntityType2"}
-      ]
-    }
-  ],
-  "analysis_summary": "2-3 sentence summary of the paper's domain and what reviewers should focus on",
-  "paper_domain": "the research area (e.g., 'distributed systems', 'computer vision', 'NLP')",
-  "key_contributions": ["contribution 1", "contribution 2", "contribution 3"]
+# Domain patterns: seed entity types for common research areas.
+# The LLM receives these as starting points, not constraints.
+_DOMAIN_PATTERNS: dict[str, list[dict[str, str]]] = {
+    "systems": [
+        {"name": "HardwarePlatform", "description": "Physical hardware (GPUs, clusters, FPGAs, wearables, sensors) used in experiments"},
+        {"name": "SystemConfiguration", "description": "Runtime parameters, deployment settings, or hardware configurations"},
+        {"name": "Workload", "description": "Specific benchmark workloads, traces, or test scenarios"},
+        {"name": "Optimization", "description": "A specific optimization technique (caching, prefetching, scheduling, pruning)"},
+    ],
+    "ml": [
+        {"name": "Model", "description": "A specific ML/DL model architecture (transformer, CNN, LSTM, etc.)"},
+        {"name": "Hyperparameter", "description": "Tuning choices that affect training/inference (learning rate, batch size, etc.)"},
+        {"name": "TrainingProcedure", "description": "Training protocol (pretraining, fine-tuning, distillation, augmentation)"},
+        {"name": "LossFunction", "description": "Objective function optimized during training"},
+    ],
+    "networking": [
+        {"name": "Protocol", "description": "Communication protocol or standard (TCP, RDMA, MPI, etc.)"},
+        {"name": "NetworkTopology", "description": "Network layout (fat-tree, dragonfly, torus) or configuration"},
+        {"name": "TrafficPattern", "description": "Communication pattern or workload (all-to-all, nearest-neighbor, etc.)"},
+    ],
+    "iot": [
+        {"name": "SensorType", "description": "Physical sensor hardware (accelerometer, gyroscope, magnetometer, etc.)"},
+        {"name": "EnergyModel", "description": "Power consumption model or energy budget constraint"},
+        {"name": "ActivityContext", "description": "User activity or environmental context that drives system behavior"},
+        {"name": "DevicePlatform", "description": "Wearable or IoT device (smartwatch, sensor node, edge gateway)"},
+    ],
+    "storage": [
+        {"name": "StorageSystem", "description": "File system, object store, or storage backend"},
+        {"name": "IOPattern", "description": "I/O access pattern (sequential, random, strided, etc.)"},
+        {"name": "DataFormat", "description": "Data representation format (HDF5, Parquet, compressed, etc.)"},
+    ],
+    "theory": [
+        {"name": "Theorem", "description": "A formal theorem, lemma, or proposition with proof"},
+        {"name": "Assumption", "description": "Stated or implicit assumption required for results to hold"},
+        {"name": "Bound", "description": "Theoretical bound (upper, lower, approximation ratio)"},
+    ],
 }
 
-Design 3-5 paper-specific entity types. Base types (Claim, Method, Dataset, Metric, Baseline, \
-Result, Limitation, Concept, Reference, Equation) are added automatically.
-Each entity type needs 2-3 attributes.
+# Keywords that map to domain patterns
+_DOMAIN_KEYWORDS: dict[str, list[str]] = {
+    "systems": ["hpc", "parallel", "distributed", "cluster", "gpu", "accelerat", "kernel", "runtime", "scheduler", "fpga"],
+    "ml": ["neural", "deep learning", "transformer", "training", "fine-tun", "pretrain", "classification", "regression", "reinforcement"],
+    "networking": ["network", "protocol", "bandwidth", "latency", "tcp", "rdma", "mpi", "routing", "congestion"],
+    "iot": ["iot", "sensor", "wearable", "energy efficien", "battery", "edge computing", "sampling", "accelerometer", "gyroscope", "smart"],
+    "storage": ["storage", "file system", "i/o", "compression", "lossy", "hdf5", "checkpoint", "data reduction"],
+    "theory": ["theorem", "proof", "lemma", "bound", "complexity", "np-hard", "approximation", "convergence"],
+}
+
+
+def _detect_domain(abstract: str, sections: list[str]) -> tuple[str, list[dict[str, str]]]:
+    """Classify paper domain from abstract keywords and return seed pattern.
+
+    Returns (domain_name, seed_types). If no strong match, returns ("general", []).
+    """
+    text = (abstract + " " + " ".join(sections)).lower()
+    scores: Counter = Counter()
+
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        for kw in keywords:
+            count = text.count(kw)
+            if count > 0:
+                scores[domain] += count
+
+    if not scores:
+        return "general", []
+
+    # Take top domain, but only if it has >=3 keyword hits
+    best_domain, best_score = scores.most_common(1)[0]
+    if best_score < 3:
+        return "general", []
+
+    seed = _DOMAIN_PATTERNS.get(best_domain, [])
+    logger.info("Domain detected: %s (score=%d, seed types=%d)", best_domain, best_score, len(seed))
+    return best_domain, seed
+
+
+# ══════════════════════════════════════════════════════════
+# Step 2: Ontology Discovery (self-consistent parallel)
+# ══════════════════════════════════════════════════════════
+
+_DISCOVER_SYSTEM = """\
+You are an academic paper ontology designer. Analyze a research paper and design
+domain-specific entity types and edge types that capture what peer reviewers need
+to evaluate. Output ONLY valid JSON. You may reason in <think> tags first."""
+
+_DISCOVER_USER = """\
+Design 3-5 paper-SPECIFIC entity types for reviewer evaluation of this paper.
+
+## Base types (DO NOT duplicate)
+Entity: Claim, Method, Dataset, Metric, Baseline, Result, Limitation, Concept, Reference, Equation
+Edge: USES, EVALUATES_ON, COMPARED_AGAINST, ACHIEVES, EXTENDS, CITES, PART_OF, CONTRADICTS
+
+{seed_section}
+## Instructions
+
+Design types that capture domain concepts the base types miss. Each type needs:
+- A clear name (PascalCase, e.g., "SensorType" not "Sensor_Type")
+- A description of what it represents and why reviewers care
+- 2-3 concrete examples from THIS paper
+
+Also design 2-3 paper-specific edge types not in the base set.
+
+Output JSON:
+{{"entity_types": [{{"name": "...", "description": "...", "examples": ["from this paper"]}}], "edge_types": [{{"name": "UPPER_CASE", "description": "...", "source_targets": [{{"source": "Type1", "target": "Type2"}}]}}], "paper_domain": "...", "key_contributions": ["..."], "analysis_summary": "..."}}
+
+## Paper:
+
+{paper_text}"""
+
+
+def _build_focused_text(
+    metadata: Any | None,
+    markdown: str,
+    full_text: str,
+) -> str:
+    """Build a focused paper excerpt for ontology discovery.
+
+    Includes abstract, introduction, methodology, and evaluation excerpts.
+    Targets ~12K chars to fit comfortably in 30B model context while covering
+    all sections the ontology needs to see.
+    """
+    source = markdown if markdown else full_text
+    if not source:
+        return full_text[:15000] if full_text else ""
+
+    parts: list[str] = []
+    total = 0
+    budget = 14000
+
+    # Split markdown by ## headers
+    sections: list[tuple[str, str]] = []
+    current_heading = ""
+    current_body: list[str] = []
+    for line in source.split("\n"):
+        if line.startswith("## "):
+            if current_heading or current_body:
+                sections.append((current_heading, "\n".join(current_body)))
+            current_heading = line.lstrip("# ").strip()
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_heading or current_body:
+        sections.append((current_heading, "\n".join(current_body)))
+
+    # Priority allocation: Abstract full, Intro 3K, Method 4K, Eval 3K, rest 2K
+    priority = [
+        ({"abstract"}, 2000),
+        ({"introduction"}, 3000),
+        ({"methodology", "methods", "method", "approach", "design", "system",
+          "framework", "architecture", "proposed", "overview"}, 4000),
+        ({"evaluation", "experiments", "results", "experimental", "performance"}, 3000),
+    ]
+
+    used_headings: set[str] = set()
+    for target_keys, char_limit in priority:
+        for heading, body in sections:
+            bare = re.sub(r"^[\d.]+\s*", "", heading.lower()).strip()
+            if any(k in bare for k in target_keys) and heading not in used_headings:
+                excerpt = body[:char_limit]
+                parts.append(f"## {heading}\n{excerpt}")
+                total += len(excerpt)
+                used_headings.add(heading)
+                break
+
+    # Fill remaining budget with other sections (Related Work, Conclusion, etc.)
+    for heading, body in sections:
+        if heading not in used_headings and total < budget:
+            remaining = min(1500, budget - total)
+            if remaining > 200:
+                parts.append(f"## {heading}\n{body[:remaining]}")
+                total += min(len(body), remaining)
+                used_headings.add(heading)
+
+    result = "\n\n".join(parts)
+
+    # Fallback if sections parsing failed
+    if len(result) < 3000:
+        return source[:budget]
+
+    return result
+
+
+async def _discover_ontology_single(
+    paper_text: str,
+    seed_section: str,
+    llm_client: LLMClient,
+    model: str,
+    session_id: str | None,
+    temperature: float,
+) -> PaperOntology:
+    """Single ontology discovery call."""
+    user_content = _DISCOVER_USER.format(
+        seed_section=seed_section,
+        paper_text=paper_text,
+    )
+    response = await llm_client.complete(
+        model=model,
+        messages=[
+            {"role": "system", "content": _DISCOVER_SYSTEM},
+            {"role": "user", "content": user_content},
+        ],
+        session_id=session_id,
+        temperature=temperature,
+        max_tokens=4096,
+    )
+    return _parse_ontology(response.content)
+
+
+async def _discover_with_consistency(
+    paper_text: str,
+    seed_section: str,
+    llm_client: LLMClient,
+    model: str,
+    session_id: str | None,
+    n_samples: int = 3,
+) -> PaperOntology:
+    """Run N parallel ontology discoveries, keep types that appear in >=2 samples.
+
+    Self-consistency (RSC Digital Discovery 2026): types appearing across
+    multiple samples are well-grounded; singletons are likely hallucinated.
+    """
+    tasks = [
+        _discover_ontology_single(
+            paper_text, seed_section, llm_client, model, session_id,
+            temperature=0.4 + 0.1 * i,  # Vary temperature slightly
+        )
+        for i in range(n_samples)
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Collect all generated types across samples
+    entity_votes: Counter = Counter()
+    entity_map: dict[str, OntologyEntityType] = {}
+    edge_votes: Counter = Counter()
+    edge_map: dict[str, OntologyEdgeType] = {}
+    domains: list[str] = []
+    contributions: list[list[str]] = []
+    summaries: list[str] = []
+
+    successful = 0
+    for r in results:
+        if isinstance(r, Exception):
+            logger.warning("Ontology discovery sample failed: %s", r)
+            continue
+        if not r.entity_types and not r.edge_types:
+            logger.warning("Ontology discovery sample returned empty")
+            continue
+        successful += 1
+
+        for et in r.entity_types:
+            key = et.name.lower().replace(" ", "")
+            entity_votes[key] += 1
+            # Keep the version with the most examples
+            if key not in entity_map or len(et.examples) > len(entity_map[key].examples):
+                entity_map[key] = et
+
+        for rt in r.edge_types:
+            key = rt.name.upper()
+            edge_votes[key] += 1
+            if key not in edge_map or len(rt.description) > len(edge_map[key].description):
+                edge_map[key] = rt
+
+        if r.paper_domain:
+            domains.append(r.paper_domain)
+        if r.key_contributions:
+            contributions.append(r.key_contributions)
+        if r.analysis_summary:
+            summaries.append(r.analysis_summary)
+
+    if successful == 0:
+        logger.warning("All %d ontology discovery samples failed", n_samples)
+        return PaperOntology()
+
+    # Threshold: if all 3 succeed, require 2/3 majority.
+    # If only 1-2 succeed, accept any type that appeared (better than nothing).
+    threshold = 2 if successful >= 3 else 1
+
+    confirmed_entities = [
+        entity_map[key] for key, count in entity_votes.most_common()
+        if count >= threshold and key in entity_map
+    ]
+    confirmed_edges = [
+        edge_map[key] for key, count in edge_votes.most_common()
+        if count >= threshold and key in edge_map
+    ]
+
+    # Pick the most common domain
+    domain = Counter(domains).most_common(1)[0][0] if domains else ""
+    # Merge contributions from all samples, deduplicate
+    all_contribs = []
+    seen_contribs: set[str] = set()
+    for clist in contributions:
+        for c in clist:
+            c_lower = c.lower().strip()
+            if c_lower not in seen_contribs:
+                all_contribs.append(c)
+                seen_contribs.add(c_lower)
+    # Take the longest summary
+    summary = max(summaries, key=len) if summaries else ""
+
+    logger.info(
+        "Ontology discovery: %d/%d samples succeeded, %d entity types (of %d candidates), %d edge types confirmed",
+        successful, n_samples,
+        len(confirmed_entities), len(entity_map),
+        len(confirmed_edges),
+    )
+
+    return PaperOntology(
+        entity_types=confirmed_entities,
+        edge_types=confirmed_edges,
+        analysis_summary=summary,
+        paper_domain=domain,
+        key_contributions=all_contribs[:5],
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# Step 3: Ontology Grounding
+# ══════════════════════════════════════════════════════════
+
+_GROUND_SYSTEM = """\
+You verify whether proposed entity types are actually present in a research paper.
+For each type, find 2-3 concrete named examples from the paper text.
+If a type has fewer than 2 real examples, mark it as ungrounded.
+Output ONLY valid JSON. You may reason in <think> tags first."""
+
+_GROUND_USER = """\
+Verify these proposed entity types against the paper. For each type, find concrete
+named examples that actually appear in the text. If a type has <2 real examples,
+set "grounded": false.
+
+## Proposed types:
+{types_json}
 
 ## Paper text:
+{paper_text}
 
-"""
+Output JSON:
+{{"verified_types": [{{"name": "TypeName", "grounded": true, "examples": ["Example 1 from paper", "Example 2"], "description": "refined description based on actual examples"}}]}}"""
 
 
-def _parse_ontology(raw: str) -> PaperOntology:
-    """Parse LLM output into PaperOntology."""
+async def _ground_ontology(
+    ontology: PaperOntology,
+    paper_text: str,
+    llm_client: LLMClient,
+    model: str,
+    session_id: str | None,
+) -> PaperOntology:
+    """Verify each candidate type has concrete examples in the paper.
+
+    Rejects types the LLM cannot find at least 2 examples for.
+    This is the grounding step inspired by ODKE+ (Apple, 2025).
+    """
+    if not ontology.entity_types:
+        return ontology
+
+    types_json = json.dumps([
+        {"name": et.name, "description": et.description, "examples": et.examples[:3]}
+        for et in ontology.entity_types
+    ], indent=2)
+
+    user_content = _GROUND_USER.format(
+        types_json=types_json,
+        paper_text=paper_text[:12000],  # Focused excerpt
+    )
+
+    try:
+        response = await llm_client.complete(
+            model=model,
+            messages=[
+                {"role": "system", "content": _GROUND_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+            session_id=session_id,
+            temperature=0.15,
+            max_tokens=4096,
+        )
+
+        result = _parse_ontology_grounding(response.content)
+        if not result:
+            logger.warning("Grounding parse failed, keeping all candidate types")
+            return ontology
+
+        # Filter to grounded types only
+        grounded_names = {v["name"] for v in result if v.get("grounded", False)}
+        grounded_types = []
+        for et in ontology.entity_types:
+            if et.name in grounded_names:
+                # Update examples from grounding if available
+                verified = next((v for v in result if v["name"] == et.name), None)
+                if verified and verified.get("examples"):
+                    et.examples = verified["examples"][:5]
+                if verified and verified.get("description"):
+                    et.description = verified["description"]
+                grounded_types.append(et)
+
+        rejected = [et.name for et in ontology.entity_types if et.name not in grounded_names]
+        if rejected:
+            logger.info("Grounding rejected %d types: %s", len(rejected), rejected)
+
+        ontology.entity_types = grounded_types
+        logger.info("Grounding confirmed %d/%d types", len(grounded_types), len(grounded_names | set(rejected)))
+
+    except Exception as e:
+        logger.warning("Ontology grounding failed, keeping all candidate types: %s", e)
+
+    return ontology
+
+
+def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
+    """Parse the grounding verification response."""
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"</?output>", "", cleaned).strip()
+
     # Try direct JSON
     try:
-        data = json.loads(raw)
-        return PaperOntology(**data)
+        data = json.loads(cleaned)
+        if isinstance(data, dict) and "verified_types" in data:
+            return data["verified_types"]
+        if isinstance(data, list):
+            return data
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
     # Try code fence
-    fence = re.search(r"```(?:json)?\s*\n(.*?)```", raw, re.DOTALL)
+    fence = re.search(r"```(?:json)?\s*\n(.*?)```", cleaned, re.DOTALL)
     if fence:
         try:
             data = json.loads(fence.group(1))
-            return PaperOntology(**data)
+            if isinstance(data, dict) and "verified_types" in data:
+                return data["verified_types"]
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
-    # Try brace matching
-    start = raw.find("{")
+    # Brace matching for largest JSON
+    start = cleaned.find("{")
     if start >= 0:
         depth = 0
-        for i in range(start, len(raw)):
-            if raw[i] == "{":
+        for i in range(start, len(cleaned)):
+            if cleaned[i] == "{":
                 depth += 1
-            elif raw[i] == "}":
+            elif cleaned[i] == "}":
                 depth -= 1
                 if depth == 0:
                     try:
-                        data = json.loads(raw[start : i + 1])
-                        return PaperOntology(**data)
+                        data = json.loads(cleaned[start:i+1])
+                        if isinstance(data, dict) and "verified_types" in data:
+                            return data["verified_types"]
                     except (json.JSONDecodeError, TypeError, ValueError):
-                        break
+                        pass
+                    break
 
-    logger.warning("Failed to parse ontology output")
-    return PaperOntology()
+    return None
 
+
+# ══════════════════════════════════════════════════════════
+# Step 4: Merge + Validate
+# ══════════════════════════════════════════════════════════
 
 def _validate_ontology(ontology: PaperOntology) -> PaperOntology:
-    """Enforce constraints and merge base + fallback + structural types.
+    """Enforce constraints and merge base + LLM-generated + structural types.
 
     Keeps LLM-generated types that do not duplicate any base type name.
     Caps LLM-added entity types at 8 and LLM-added edge types at 8.
     Adds all base, fallback, and structural types automatically.
     """
-    # Truncate descriptions to 100 chars
     for et in ontology.entity_types:
         if len(et.description) > 100:
             et.description = et.description[:97] + "..."
@@ -357,21 +719,15 @@ def _validate_ontology(ontology: PaperOntology) -> PaperOntology:
         if len(rt.description) > 100:
             rt.description = rt.description[:97] + "..."
 
-    # Collect all base/fallback/structural entity type names
     reserved_entity_names = {
         et.name for et in _BASE_ENTITY_TYPES + _FALLBACK_ENTITY_TYPES + _STRUCTURAL_ENTITY_TYPES
     }
 
-    # Keep only LLM-generated types that do not duplicate reserved names
     llm_entity_types = [
         et for et in ontology.entity_types
         if et.name not in reserved_entity_names
-    ]
+    ][:8]
 
-    # Cap LLM-added types at 8
-    llm_entity_types = llm_entity_types[:8]
-
-    # Assemble final entity types: base + LLM-specific + fallback + structural
     ontology.entity_types = (
         list(_BASE_ENTITY_TYPES)
         + llm_entity_types
@@ -379,21 +735,15 @@ def _validate_ontology(ontology: PaperOntology) -> PaperOntology:
         + list(_STRUCTURAL_ENTITY_TYPES)
     )
 
-    # Collect all base/structural edge type names
     reserved_edge_names = {
         et.name for et in _BASE_EDGE_TYPES + _STRUCTURAL_EDGE_TYPES
     }
 
-    # Keep only LLM-generated edge types that do not duplicate reserved names
     llm_edge_types = [
         et for et in ontology.edge_types
         if et.name not in reserved_edge_names
-    ]
+    ][:8]
 
-    # Cap LLM-added edge types at 8
-    llm_edge_types = llm_edge_types[:8]
-
-    # Assemble final edge types: base + LLM-specific + structural
     ontology.edge_types = (
         list(_BASE_EDGE_TYPES)
         + llm_edge_types
@@ -403,10 +753,14 @@ def _validate_ontology(ontology: PaperOntology) -> PaperOntology:
     return ontology
 
 
+# ══════════════════════════════════════════════════════════
+# Ontology -> Extraction Prompt
+# ══════════════════════════════════════════════════════════
+
 def ontology_to_extraction_prompt(ontology: PaperOntology) -> str:
     """Convert a PaperOntology into a guided extraction prompt.
 
-    This bridges Phase 0 (ontology) to Phase 1 (extraction). The extraction
+    Bridges Phase 0 (ontology) to Phase 1 (extraction). The extraction
     LLM uses the ontology schema to know exactly what entity and relationship
     types to extract from the paper.
     """
@@ -434,113 +788,84 @@ def ontology_to_extraction_prompt(ontology: PaperOntology) -> str:
     )
 
 
-_REFINE_SYSTEM = """\
-You are a critical reviewer of ontology schemas for academic paper analysis.
-Your job is to challenge and refine an ontology, ensuring it captures everything
-a peer reviewer needs to evaluate the paper. Always respond with valid JSON only."""
+# ══════════════════════════════════════════════════════════
+# Parsing helpers
+# ══════════════════════════════════════════════════════════
 
-_REFINE_USER = """\
-Below is a draft ontology generated for an academic paper. Challenge and refine it:
+def _parse_ontology(raw: str) -> PaperOntology:
+    """Parse LLM output into PaperOntology.
 
-1. Are any entity types too vague or overlapping? Merge or sharpen them.
-2. Are any important domain-specific types missing? Add them.
-3. Do the edge types capture all key relationships a reviewer needs?
-4. Are the examples specific enough to guide extraction?
-
-## Draft Ontology:
-{draft_json}
-
-## Paper excerpt (for context):
-{paper_excerpt}
-
-Return the refined ontology in the same JSON format:
-{{"entity_types": [...], "edge_types": [...], "analysis_summary": "...", "paper_domain": "...", "key_contributions": [...]}}
-
-Keep 3-5 entity types and 3-5 edge types. Only return paper-specific types (base types like Claim, Method, Dataset are added automatically)."""
-
-
-def _build_condensed_text(
-    metadata: "PaperMetadata | None",
-    full_text: str,
-) -> str:
-    """Build a condensed paper excerpt for ontology Pass 1.
-
-    Includes the abstract, section headings, Introduction (first 3000 chars),
-    Methodology/Design section (first 5000 chars), and Evaluation section
-    (first 3000 chars). Falls back to the full text if section_texts is
-    empty or the condensed version is under 2000 chars.
+    Handles reasoning model output (Nemotron, Qwen-thinking) that wraps
+    JSON in <think>...</think> tags, code fences, or plain text preamble.
     """
-    if not metadata:
-        return ""
+    if not raw or not raw.strip():
+        logger.warning("Empty ontology response")
+        return PaperOntology()
 
-    # Pick the best available section texts (markdown preferred)
-    sec_texts = metadata.section_texts_md or metadata.section_texts
-    if not sec_texts:
-        return ""
+    # Strip reasoning tags
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"</?output>", "", cleaned).strip()
 
-    _INTRO_KEYS = {"introduction", "1 introduction", "i introduction", "1. introduction"}
-    _METHOD_KEYS = {
-        "methodology", "methods", "method", "approach", "design",
-        "implementation", "system design", "architecture", "overview",
-        "framework", "system", "proposed",
-    }
-    _EVAL_KEYS = {
-        "evaluation", "experiments", "results", "experimental evaluation",
-        "experimental results", "performance evaluation", "experimental setup",
-        "performance", "analysis",
-    }
+    # Try direct JSON
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return PaperOntology(**data)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
 
-    def _find_section(target_keys: set[str], max_chars: int) -> str:
-        for heading, body in sec_texts.items():
-            heading_lower = heading.lower().strip()
-            # Strip leading number/dot prefix for matching
-            bare = re.sub(r"^[\d.]+\s*", "", heading_lower).strip()
-            if bare in target_keys or heading_lower in target_keys:
-                return body[:max_chars]
-            # Partial match: check if any target key appears as a substring
-            for key in target_keys:
-                if key in bare:
-                    return body[:max_chars]
-        return ""
+    # Try code fence
+    fence = re.search(r"```(?:json)?\s*\n(.*?)```", cleaned, re.DOTALL)
+    if fence:
+        try:
+            data = json.loads(fence.group(1))
+            if isinstance(data, dict):
+                return PaperOntology(**data)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
 
-    parts: list[str] = []
+    # Brace matching for largest valid JSON with ontology keys
+    best_data = None
+    best_size = 0
+    pos = 0
+    while pos < len(cleaned):
+        start = cleaned.find("{", pos)
+        if start < 0:
+            break
+        depth = 0
+        for i in range(start, len(cleaned)):
+            if cleaned[i] == "{":
+                depth += 1
+            elif cleaned[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = cleaned[start : i + 1]
+                    try:
+                        data = json.loads(candidate)
+                        if isinstance(data, dict) and len(candidate) > best_size:
+                            if "entity_types" in data or "edge_types" in data or "paper_domain" in data:
+                                best_data = data
+                                best_size = len(candidate)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        pass
+                    pos = i + 1
+                    break
+        else:
+            break
 
-    # Abstract
-    if metadata.abstract:
-        parts.append(f"## Abstract\n{metadata.abstract}")
+    if best_data:
+        return PaperOntology(**best_data)
 
-    # Section headings
-    if metadata.sections:
-        parts.append(f"## Sections\n{', '.join(metadata.sections)}")
+    logger.warning(
+        "Failed to parse ontology output (%d chars). First 500: %s",
+        len(raw), raw[:500],
+    )
+    return PaperOntology()
 
-    # Introduction
-    intro = _find_section(_INTRO_KEYS, 3000)
-    if intro:
-        parts.append(f"## Introduction\n{intro}")
 
-    # Methodology / Design
-    method = _find_section(_METHOD_KEYS, 5000)
-    if method:
-        parts.append(f"## Methodology\n{method}")
-
-    # Evaluation
-    evaluation = _find_section(_EVAL_KEYS, 3000)
-    if evaluation:
-        parts.append(f"## Evaluation\n{evaluation}")
-
-    condensed = "\n\n".join(parts)
-
-    # If we only got the abstract and headings (no body sections matched),
-    # append the first 8000 chars of the full text as fallback material
-    if len(condensed) < 4000 and full_text:
-        condensed += f"\n\n## Paper Body (excerpt)\n{full_text[:8000]}"
-
-    # Fall back to full text if condensed version is still too thin
-    if len(condensed) < 2000:
-        return ""
-
-    return condensed
-
+# ══════════════════════════════════════════════════════════
+# Main entry point
+# ══════════════════════════════════════════════════════════
 
 async def generate_paper_ontology(
     text: str,
@@ -548,130 +873,95 @@ async def generate_paper_ontology(
     model: str = "",
     session_id: str | None = None,
     conference_context: str = "",
-    metadata: "PaperMetadata | None" = None,
+    metadata: Any | None = None,
     markdown: str = "",
 ) -> PaperOntology:
     """Generate a domain-specific ontology for an academic paper.
 
-    This is Phase 0 of the review pipeline. The ontology tells the graph
-    extractor what entity types and relationships are relevant for this
-    specific paper, similar to how MiroFish generates ontology before
-    building the knowledge graph.
-
-    Uses a two-pass approach: Pass 1 generates the initial ontology,
-    Pass 2 challenges and refines it with the same model.
-
-    When metadata is provided, the LLM receives the paper's structural
-    summary (title, sections, figure/table counts, reference count) which
-    produces significantly better ontology types than raw text alone.
+    Four-step workflow:
+      1. Domain detection + pattern seeding (no LLM)
+      2. Self-consistent parallel discovery (N=3 LLM calls)
+      3. Grounding verification (1 LLM call)
+      4. Merge with base types + validate
 
     Args:
-        text: Full paper text (no truncation applied).
-        llm_client: LLM client for the generation call.
+        text: Full paper text.
+        llm_client: LLM client for generation calls.
         model: Which model to use.
         session_id: Optional session ID for cost tracking.
-        conference_context: Optional venue context (e.g., "HPC conference").
+        conference_context: Optional venue context (e.g., "HPDC: HPC conference").
         metadata: Optional PaperMetadata for structural context.
-        markdown: Optional structured markdown from Docling.
+        markdown: Optional structured markdown.
 
     Returns:
-        PaperOntology with entity types, edge types, and analysis.
+        PaperOntology with grounded, self-consistent entity and edge types.
     """
-    # Prefer markdown over flat text when available
-    paper_text = markdown if markdown else text
-
-    # Build metadata preamble so the LLM knows the paper's structure
-    meta_preamble = ""
+    # ── Step 1: Domain Detection ──────────────────────────
+    abstract = ""
+    sections: list[str] = []
     if metadata:
-        meta_parts = []
-        if metadata.title:
-            meta_parts.append(f"Title: {metadata.title}")
-        if metadata.abstract:
-            meta_parts.append(f"Abstract: {metadata.abstract[:500]}")
-        if metadata.sections:
-            meta_parts.append(f"Sections ({len(metadata.sections)}): {', '.join(metadata.sections)}")
-        meta_parts.append(f"Figures: {metadata.figure_count}, Tables: {metadata.table_count}, References: {metadata.reference_count}")
-        meta_parts.append(f"Estimated words: {metadata.estimated_word_count}")
-        meta_preamble = "## Paper Structure (extracted from PDF)\n\n" + "\n".join(meta_parts) + "\n\n"
+        abstract = getattr(metadata, "abstract", "") or ""
+        sections = getattr(metadata, "sections", []) or []
 
-    # Build a condensed version of the paper for Pass 1 instead of sending
-    # the full 60-80k char document. The ontology generator only needs to
-    # understand the domain, contributions, and evaluation approach.
-    condensed_text = _build_condensed_text(metadata, paper_text)
-    pass1_text = condensed_text if condensed_text else paper_text
+    domain, seed_types = _detect_domain(abstract, sections)
 
-    user_content = meta_preamble + _ONTOLOGY_USER + pass1_text
-    if conference_context:
-        user_content += f"\n\n## Conference Context\n{conference_context}"
-
-    messages = [
-        {"role": "system", "content": _ONTOLOGY_SYSTEM},
-        {"role": "user", "content": user_content},
-    ]
-
-    # Pass 1: Generate initial ontology
-    response = await llm_client.complete(
-        model=model,
-        messages=messages,
-        session_id=session_id,
-        temperature=0.3,
-        max_tokens=16384,
-    )
-
-    draft_ontology = _parse_ontology(response.content)
-
-    # Pass 2: Challenge and refine with the same model
-    try:
-        draft_json = json.dumps({
-            "entity_types": [et.model_dump() for et in draft_ontology.entity_types],
-            "edge_types": [rt.model_dump() for rt in draft_ontology.edge_types],
-            "analysis_summary": draft_ontology.analysis_summary,
-            "paper_domain": draft_ontology.paper_domain,
-            "key_contributions": draft_ontology.key_contributions,
-        }, indent=2)
-
-        # Use a shorter paper excerpt for the refinement pass
-        paper_excerpt = paper_text[:8000]
-
-        refine_messages = [
-            {"role": "system", "content": _REFINE_SYSTEM},
-            {"role": "user", "content": _REFINE_USER.format(
-                draft_json=draft_json, paper_excerpt=paper_excerpt,
-            )},
-        ]
-
-        refine_response = await llm_client.complete(
-            model=model,
-            messages=refine_messages,
-            session_id=session_id,
-            temperature=0.2,
-            max_tokens=16384,
+    seed_section = ""
+    if seed_types:
+        seed_section = (
+            f"## Seed types for {domain} papers (refine or replace as needed)\n"
+            + "\n".join(f"- **{s['name']}**: {s['description']}" for s in seed_types)
+            + "\n\n"
         )
 
-        refined = _parse_ontology(refine_response.content)
-        if refined.entity_types or refined.edge_types:
-            # Merge refinements: prefer refined fields if non-empty
-            if refined.entity_types:
-                draft_ontology.entity_types = refined.entity_types
-            if refined.edge_types:
-                draft_ontology.edge_types = refined.edge_types
-            if refined.analysis_summary:
-                draft_ontology.analysis_summary = refined.analysis_summary
-            if refined.paper_domain:
-                draft_ontology.paper_domain = refined.paper_domain
-            if refined.key_contributions:
-                draft_ontology.key_contributions = refined.key_contributions
-            logger.info("Ontology refined in pass 2")
-    except Exception as e:
-        logger.warning("Ontology refinement pass failed, using pass 1 result: %s", e)
+    if conference_context:
+        seed_section += f"## Conference Context\n{conference_context}\n\n"
 
-    ontology = _validate_ontology(draft_ontology)
+    # ── Step 2: Self-Consistent Discovery ──────────────────
+    paper_text = _build_focused_text(metadata, markdown, text)
+    if not paper_text:
+        paper_text = (markdown or text)[:15000]
+
+    draft = await _discover_with_consistency(
+        paper_text=paper_text,
+        seed_section=seed_section,
+        llm_client=llm_client,
+        model=model,
+        session_id=session_id,
+        n_samples=3,
+    )
+
+    if not draft.entity_types and not draft.edge_types:
+        logger.warning("Ontology discovery produced no types, using base types only")
+        return _validate_ontology(PaperOntology(paper_domain=domain))
+
+    # ── Step 3: Grounding Verification ─────────────────────
+    grounded = await _ground_ontology(
+        ontology=draft,
+        paper_text=paper_text,
+        llm_client=llm_client,
+        model=model,
+        session_id=session_id,
+    )
+
+    # ── Step 4: Merge + Validate ───────────────────────────
+    ontology = _validate_ontology(grounded)
+
+    llm_types = [
+        et.name for et in ontology.entity_types
+        if et.name not in {t.name for t in _BASE_ENTITY_TYPES + _FALLBACK_ENTITY_TYPES + _STRUCTURAL_ENTITY_TYPES}
+    ]
+    llm_edges = [
+        et.name for et in ontology.edge_types
+        if et.name not in {t.name for t in _BASE_EDGE_TYPES + _STRUCTURAL_EDGE_TYPES}
+    ]
 
     logger.info(
-        "Generated ontology: %d entity types, %d edge types, domain=%s",
-        len(ontology.entity_types),
-        len(ontology.edge_types),
+        "Ontology complete: domain=%s, %d total entity types (%d paper-specific: %s), "
+        "%d total edge types (%d paper-specific: %s), %d contributions",
         ontology.paper_domain,
+        len(ontology.entity_types), len(llm_types), llm_types,
+        len(ontology.edge_types), len(llm_edges), llm_edges,
+        len(ontology.key_contributions),
     )
 
     return ontology
