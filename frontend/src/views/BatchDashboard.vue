@@ -22,6 +22,7 @@
       <div class="progress-text">
         {{ batch.completed || 0 }} / {{ batch.total || 0 }} graphs complete
         <span v-if="batch.failed"> &middot; {{ batch.failed }} failed</span>
+        <button v-if="batch.failed > 0 && batch.status !== 'running'" class="retry-failed-btn" @click="doRetryFailed">Retry Failed</button>
         <span v-if="batch.status === 'running'" class="elapsed"> &middot; {{ elapsedStr }}</span>
       </div>
     </div>
@@ -78,6 +79,11 @@
             @click="showReviewConfig(sess)"
           >Launch Review</button>
           <button
+            v-if="sess.status === 'failed' || sess.status === 'stopped'"
+            class="pc-btn retry-btn"
+            @click="doRetrySession(sess.session_id)"
+          >Retry</button>
+          <button
             v-if="sess.status === 'completed'"
             class="pc-btn export-btn"
             @click="doExportGraph(sess.session_id)"
@@ -125,7 +131,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getBatch, exportGraph, connectStream, getModels, getConferences, pipelineCancel } from '../api/kernel.js'
+import { getBatch, exportGraph, connectStream, getModels, getConferences, pipelineCancel, retrySession, retryFailedInBatch } from '../api/kernel.js'
 import kernel from '../api/kernel.js'
 
 const props = defineProps({ batchId: String })
@@ -324,6 +330,26 @@ async function doCancel(sid) {
     await pipelineCancel(sid)
     const sess = sessions.value.find(s => s.session_id === sid)
     if (sess) sess.status = 'stopped'
+    fetchBatch()
+  } catch (e) {
+    error.value = e.response?.data?.detail || e.message
+  }
+}
+
+async function doRetrySession(sid) {
+  try {
+    await retrySession(sid)
+    const sess = sessions.value.find(s => s.session_id === sid)
+    if (sess) sess.status = 'running'
+    fetchBatch()
+  } catch (e) {
+    error.value = e.response?.data?.detail || e.message
+  }
+}
+
+async function doRetryFailed() {
+  try {
+    await retryFailedInBatch(props.batchId)
     fetchBatch()
   } catch (e) {
     error.value = e.response?.data?.detail || e.message
@@ -594,6 +620,21 @@ onUnmounted(() => {
 
 .stop-btn { border-color: #c44; color: #c44; }
 .stop-btn:hover { background: #c44; color: #fff; border-color: #c44; }
+
+.retry-btn { border-color: #2563eb; color: #2563eb; }
+.retry-btn:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+.retry-failed-btn {
+  margin-left: 8px;
+  padding: 2px 10px;
+  font-size: 11px;
+  border: 1px solid #2563eb;
+  color: #2563eb;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.retry-failed-btn:hover { background: #eff6ff; }
 
 .export-btn { font-size: 10px; padding: 4px 8px; }
 

@@ -1,60 +1,116 @@
 # ProtoNeo
 
-Multi-agent deliberation kernel. Orchestrates LLM agents through structured deliberation patterns (parallel, sequential, round-robin, independent synthesis) with real-time WebSocket streaming, multi-provider routing, and session persistence.
+ProtoNeo is a multi-agent deliberation kernel for structured LLM workflows. It coordinates agent panels through patterns like parallel review, sequential refinement, round-robin challenge, and independent synthesis, with session persistence and real-time streaming.
 
-## PC Panel
+The main application in this repository is **PC Panel**: a pre-submission review tool for academic authors. You upload a manuscript PDF, choose a target venue, and receive a review packet shaped by that conference's criteria, reviewer roles, and scoring scale.
 
-Pre-submission review tool for academic authors. Upload a manuscript PDF, select a target conference, and receive a structured review packet from a simulated program committee. The value is straightforward: a better submission results from catching structural issues, missing baselines, weak scaling arguments, and scope misalignment before the real review process begins.
+## What PC Panel Does
 
-The pipeline builds a paper knowledge graph, runs parallel reviewer agents calibrated to the venue's criteria, orchestrates a multi-round deliberation where reviewers challenge and refine each other's assessments, and synthesizes a final review packet with scores, strengths, weaknesses, and a prioritized revision plan.
+- Builds a paper knowledge graph from the uploaded manuscript
+- Runs a conference-specific panel of reviewer agents in parallel
+- Orchestrates multi-round deliberation where reviewers challenge each other
+- Produces a final review packet with scores, strengths, weaknesses, and a prioritized revision plan
 
-Each conference profile defines its own agent panel, review scales, and evaluation criteria. HPDC uses a clarity reviewer; SC uses a systems reviewer. The profiles drive everything.
+Conference profiles drive the workflow. Different venues can define different reviewer roles, prompts, scales, and evaluation criteria.
 
-## Setup
+## Stack
+
+- Backend: FastAPI + WebSocket streaming
+- Frontend: Vue 3 + Vite + D3
+- Python environment: `uv`
+- LLM routing: local endpoints, API-key providers, and OAuth-backed subscriptions
+
+## Requirements
+
+- Python `>=3.12`
+- Node.js `>=18`
+- `uv`
+- At least one configured LLM provider
+
+## Quickstart
+
+1. Install dependencies:
 
 ```bash
-cd backend && uv sync
+npm install
 cd frontend && npm install
+cd ../backend && uv sync
+cd ..
 ```
 
-## Configuration
-
-ProtoNeo requires at least one LLM provider. Set up your `.env`:
+2. Create a local environment file:
 
 ```bash
 cp .env.example .env
-# Edit .env with your provider credentials
 ```
 
-On first launch, open the Settings page to:
-1. Connect providers (local LM Studio/Ollama, cloud API keys, or OAuth subscriptions)
-2. Run model discovery
-3. Select active models for each provider
+3. Edit `.env` with any provider credentials you want available at startup.
 
-No default models are configured. You choose what runs your reviews.
-
-## Running
+4. Start the backend:
 
 ```bash
-npm run kernel    # Backend on :5002
-npm run frontend  # Frontend on :3000
+npm run kernel
 ```
 
-## Testing
+5. In a second terminal, start the frontend:
+
+```bash
+npm run frontend
+```
+
+6. Open `http://localhost:3000`.
+
+## First Launch
+
+ProtoNeo does not ship with a default active model. After the UI opens:
+
+1. Go to **Settings**
+2. Connect or enable providers
+3. Run model discovery or refresh providers
+4. Select an active model for each provider you want to use
+
+Local providers such as LM Studio and Ollama are supported, along with API-key and subscription-backed providers.
+
+## Configuration
+
+ProtoNeo requires at least one model provider before reviews can run.
+
+Start from the example file:
+
+```bash
+cp .env.example .env
+```
+
+The example includes placeholders for:
+
+- OpenAI-compatible local endpoints
+- OpenRouter
+- Anthropic
+- OpenAI
+- Google / Gemini
+- Optional reviewer tooling such as Semantic Scholar, Brave, and SearxNG
+
+## Running Tests
 
 ```bash
 cd backend
-uv run pytest tests/ -q   # 192 tests
+uv run pytest tests/ -q
 ```
 
-## Structure
+## Project Layout
 
-```
+```text
 backend/
-  protoneo/          # Kernel: agents, deliberation, knowledge graph, LLM routing
+  protoneo/          # Kernel: agents, deliberation, API, knowledge graph, LLM routing
   applications/
     pc_panel/        # PC Panel: review orchestration, conference profiles, prompts
   tests/
 frontend/
-  src/               # Vue 3 + Vite + D3 knowledge graph visualization
+  src/               # Vue application and graph/review UI
 ```
+
+## Development Notes
+
+- Backend runs on `http://localhost:5002`
+- Frontend runs on `http://localhost:3000`
+- Frontend API requests proxy to the backend during local development

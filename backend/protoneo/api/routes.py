@@ -77,6 +77,7 @@ class PipelineControl:
 
     def __init__(self):
         self.auto_advance: bool = True
+        self.skip_gate: bool = False
         self.current_stage: str = ""
         self.current_step: str = ""
         self.completed_stages: list[str] = []
@@ -102,7 +103,13 @@ class PipelineControl:
         self.current_step = ""
 
     async def wait_for_gate(self) -> None:
-        """Block at the mandatory pre_review -> review gate."""
+        """Block at the mandatory pre_review -> review gate.
+
+        When skip_gate is True, the gate is skipped entirely so the
+        pipeline runs straight through without human interaction.
+        """
+        if self.skip_gate:
+            return
         self._gate.clear()
         self.paused = True
         await self._gate.wait()
@@ -147,6 +154,7 @@ class PipelineControl:
             "current_step": self.current_step,
             "completed_stages": self.completed_stages,
             "auto_advance": self.auto_advance,
+            "skip_gate": self.skip_gate,
             "paused": self.paused,
             "cancelled": self.cancelled,
         }

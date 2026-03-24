@@ -208,12 +208,32 @@ export function startBatch(files, conference = 'hpdc26', modelMap = {}) {
   })
 }
 
+export function startBatchReview(files, conference = 'hpdc26', modelMap = {}, maxRounds = 3, userInstructions = '') {
+  const form = new FormData()
+  files.forEach(f => form.append('files', f))
+  form.append('conference', conference)
+  form.append('model_map_json', JSON.stringify(modelMap))
+  form.append('max_rounds', maxRounds.toString())
+  if (userInstructions) form.append('user_instructions', userInstructions)
+  return kernel.post('/api/panel/batch-review', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
 export function getBatch(batchId) {
   return kernel.get(`/api/panel/batch/${batchId}`)
 }
 
 export function listBatches(limit = 20) {
   return kernel.get('/api/panel/batches', { params: { limit } })
+}
+
+export function retrySession(sessionId) {
+  return kernel.post(`/api/sessions/${sessionId}/retry`)
+}
+
+export function retryFailedInBatch(batchId) {
+  return kernel.post(`/api/panel/batch/${batchId}/retry-failed`)
 }
 
 export function launchReview(sessionId) {

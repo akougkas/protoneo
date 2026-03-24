@@ -541,7 +541,7 @@ async def _run_graph_pipeline(
         # Graph pipeline steps (ontology, extraction, coref, verification)
         # MUST use local models only. Subscription tokens (Anthropic, OpenAI)
         # are reserved for review roles to avoid rate limits and bans.
-        _SUBSCRIPTION_PROVIDERS = {"anthropic", "openai"}
+        _SUBSCRIPTION_PROVIDERS = {"openai"}  # anthropic removed
 
         def _is_subscription(model_id: str) -> bool:
             provider = model_id.split("/", 1)[0] if "/" in model_id else ""
@@ -818,6 +818,16 @@ async def _run_graph_pipeline(
             session.graph_after_step["summarize"] = paper_graph.snapshot()
             await _session_manager.update(session)
 
+            # Persist graph to disk so it survives backend restarts
+            try:
+                from pathlib import Path as _Path
+                graph_dir = _Path(_session_manager._storage_dir) / "graphs"
+                graph_dir.mkdir(parents=True, exist_ok=True)
+                graph_path = graph_dir / f"{sid}_graph.json"
+                graph_path.write_text(json.dumps(paper_graph.to_d3_format(), indent=2))
+            except Exception as _e:
+                logger.warning("Failed to persist graph to disk for %s: %s", sid, _e)
+
         ctl.stage_done("pre_review")
         bus.emit("stage_complete", {"stage": "pre_review"})
 
@@ -886,6 +896,11 @@ async def _run_graph_pipeline(
         bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
     except Exception as e:
         logger.error("Pipeline failed for session %s: %s", sid, e, exc_info=True)
+        session = await _session_manager.get(sid)
+        if session:
+            session.status = SessionStatus.FAILED
+            session.error = str(e)
+            await _session_manager.update(session)
         bus.emit("error", {"detail": str(e)})
     finally:
         _pipeline_controls.pop(sid, None)

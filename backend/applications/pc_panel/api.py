@@ -100,10 +100,15 @@ async def _recover_stale_sessions(app: FastAPI) -> None:
     When the backend restarts mid-pipeline, in-memory state
     (PipelineControl, SessionEventBus) is lost. These sessions can
     never resume, so mark them stopped to unblock the UI.
+
+    Also reload persisted graph data into _session_graphs so graph
+    visualization works after restart.
     """
     _session_manager = get_session_manager()
+    _session_graphs = get_session_graphs()
     sessions = await _session_manager.list_sessions(limit=100)
     recovered = 0
+    graphs_loaded = 0
     for s in sessions:
         status_val = s.status if isinstance(s.status, str) else s.status.value
         if status_val == "running":
@@ -111,8 +116,20 @@ async def _recover_stale_sessions(app: FastAPI) -> None:
             await _session_manager.update(s)
             recovered += 1
             logger.info("Recovered stale session %s (was running, now stopped)", s.session_id)
+
+        # Reload graph from session data into in-memory cache
+        if s.paper_graph and s.session_id not in _session_graphs:
+            try:
+                pg = PaperGraph.model_validate(s.paper_graph)
+                _session_graphs[s.session_id] = pg.to_d3_format()
+                graphs_loaded += 1
+            except Exception:
+                pass
+
     if recovered:
         logger.info("Recovered %d stale sessions on startup", recovered)
+    if graphs_loaded:
+        logger.info("Reloaded %d graphs into memory on startup", graphs_loaded)
 
 
 def register_pc_panel_routes(app: FastAPI) -> None:
@@ -181,7 +198,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         file_path.write_bytes(content)
 
         try:
-            doc = parse_file(str(file_path))
+            doc = parse_file(str(file_path), fast=True)
         except Exception as e:
             file_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {e}")
@@ -201,8 +218,14 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         max_rounds: int = Form(2),
         user_instructions: str = Form(""),
         skip_graph: bool = Form(False),
+        fast_parse: bool = Form(False),
     ):
-        """Create and start a full PC Panel review session."""
+        """Create and start a full PC Panel review session.
+
+        Returns immediately with session_id. PDF parsing (pdf2md) runs
+        in the background so the UI can navigate to the session page.
+        pdf2md uses local AI (Nemotron + VLM) for clean markdown extraction.
+        """
         _session_manager = get_session_manager()
         _event_buses = get_event_buses()
         _pipeline_controls = get_pipeline_controls()
@@ -225,14 +248,6 @@ def register_pc_panel_routes(app: FastAPI) -> None:
 
         content = await file.read()
         file_path.write_bytes(content)
-
-        try:
-            doc = parse_file(str(file_path))
-            from protoneo.knowledge.chunker import chunk_document
-            doc = chunk_document(doc)
-        except Exception as e:
-            file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {e}")
 
         agent_configs = build_agent_configs(
             profile=profile,
@@ -259,22 +274,61 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             }
         )
 
-        ctx = _session_manager.get_context(session.session_id)
-        ctx.add_document(doc)
-        session.document_ids.append(doc.document_id)
-        await _session_manager.update(session)
-
         bus = SessionEventBus()
         _event_buses[session.session_id] = bus
         ctl = PipelineControl()
         _pipeline_controls[session.session_id] = ctl
 
-        task = asyncio.create_task(_run_graph_pipeline(
-            session.session_id, doc, profile, model_map,
-            agent_configs, bus, ctl,
-            delib_config=delib_config, graph_only=False,
-            skip_graph=skip_graph,
-        ))
+        async def _parse_and_run(sid: str) -> None:
+            """Parse PDF in background, then run the full pipeline."""
+            import time as _time
+
+            session = await _session_manager.get(sid)
+            if session:
+                session.status = SessionStatus.RUNNING
+                session.pipeline_steps["parse"] = StepState(
+                    status="running", started_at=_time.monotonic(),
+                ).model_dump()
+                await _session_manager.update(session)
+
+            bus.emit("step_started", {
+                "stage": "pre_review", "step": "parse",
+                "message": f"Parsing {file.filename}...",
+            })
+            await asyncio.sleep(0)
+
+            try:
+                loop = asyncio.get_running_loop()
+                doc = await loop.run_in_executor(
+                    None, parse_file, str(file_path), fast_parse,
+                )
+                doc = chunk_document(doc)
+            except Exception as e:
+                file_path.unlink(missing_ok=True)
+                logger.warning("Failed to parse %s: %s", file.filename, e)
+                session = await _session_manager.get(sid)
+                if session:
+                    session.status = SessionStatus.FAILED
+                    session.error = f"Parse failed: {e}"
+                    await _session_manager.update(session)
+                bus.emit("error", {"detail": f"Parse failed: {e}"})
+                return
+
+            ctx = _session_manager.get_context(sid)
+            ctx.add_document(doc)
+            session = await _session_manager.get(sid)
+            if session:
+                session.document_ids.append(doc.document_id)
+                await _session_manager.update(session)
+
+            await _run_graph_pipeline(
+                sid, doc, profile, model_map,
+                agent_configs, bus, ctl,
+                delib_config=delib_config, graph_only=False,
+                skip_graph=skip_graph,
+            )
+
+        task = asyncio.create_task(_parse_and_run(session.session_id))
         ctl.set_task(task)
 
         return {
@@ -293,6 +347,7 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         files: list[UploadFile] = File(...),
         conference: str = Form("hpdc26"),
         model_map_json: str = Form("{}"),
+        fast_parse: bool = Form(True),
     ):
         """Upload N PDFs, create N sessions, build all graphs in parallel.
 
@@ -348,23 +403,28 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         batch.session_ids = session_ids
         await _batch_manager.update(batch)
 
-        # Launch background task for each paper (parsing + pipeline).
-        # Limit to 2 concurrent pipelines since each pipeline already runs
-        # 4-way parallel extraction internally (2 pipelines = 8 LLM calls).
-        _batch_semaphore = asyncio.Semaphore(2)
+        # Process papers sequentially in a single background task.
+        # Local LLMs cannot handle parallel pipelines (each pipeline
+        # already runs 4-way extraction internally).
+        batch_bus = SessionEventBus()
+        _event_buses[f"batch_{batch.batch_id}"] = batch_bus
 
-        async def _run_one(sid: str, fpath: Path, fname: str) -> None:
-            async with _batch_semaphore:
+        async def _run_batch_sequential() -> None:
+            import time as _time
+            for i, (sid, fpath, fname) in enumerate(pending):
                 bus = _event_buses.get(sid)
                 if not bus:
                     bus = SessionEventBus()
                     _event_buses[sid] = bus
 
-                # Mark session running and emit parse start immediately
+                batch_bus.emit("batch_progress", {
+                    "current": i + 1, "total": len(pending),
+                    "filename": fname, "session_id": sid,
+                })
+
                 session = await _session_manager.get(sid)
                 if session:
                     session.status = SessionStatus.RUNNING
-                    import time as _time
                     session.pipeline_steps["parse"] = StepState(
                         status="running", started_at=_time.monotonic(),
                     ).model_dump()
@@ -372,19 +432,14 @@ def register_pc_panel_routes(app: FastAPI) -> None:
 
                 bus.emit("step_started", {
                     "stage": "pre_review", "step": "parse",
-                    "message": f"Parsing {fname}...",
+                    "message": f"Parsing {fname} ({i + 1}/{len(pending)})...",
                 })
-
-                # Yield control so the event loop can process the bus event
-                # and send it to any WebSocket subscribers before blocking
                 await asyncio.sleep(0)
 
                 try:
-                    # Run CPU-bound parsing in a thread so it doesn't
-                    # block the event loop (Docling takes 1-2 minutes)
                     loop = asyncio.get_running_loop()
                     doc = await loop.run_in_executor(
-                        None, parse_file, str(fpath)
+                        None, parse_file, str(fpath), fast_parse,
                     )
                     doc = chunk_document(doc)
                 except Exception as e:
@@ -396,7 +451,10 @@ def register_pc_panel_routes(app: FastAPI) -> None:
                         session.error = f"Parse failed: {e}"
                         await _session_manager.update(session)
                     bus.emit("error", {"detail": f"Parse failed: {e}"})
-                    return
+                    batch_bus.emit("paper_failed", {
+                        "session_id": sid, "error": f"Parse failed: {e}",
+                    })
+                    continue
 
                 session = await _session_manager.get(sid)
                 if session:
@@ -408,14 +466,29 @@ def register_pc_panel_routes(app: FastAPI) -> None:
                 ctl = PipelineControl()
                 _pipeline_controls[sid] = ctl
 
-                task = asyncio.create_task(_run_graph_pipeline(
-                    sid, doc, profile, model_map,
-                    agent_configs, bus, ctl, graph_only=True,
-                ))
-                ctl.set_task(task)
+                try:
+                    await _run_graph_pipeline(
+                        sid, doc, profile, model_map,
+                        agent_configs, bus, ctl, graph_only=True,
+                    )
+                    batch_bus.emit("paper_complete", {
+                        "session_id": sid, "index": i + 1,
+                        "total": len(pending), "filename": fname,
+                    })
+                except Exception as e:
+                    logger.error("Pipeline failed for %s in batch: %s", fname, e)
+                    session = await _session_manager.get(sid)
+                    if session and session.status != SessionStatus.FAILED:
+                        session.status = SessionStatus.FAILED
+                        session.error = str(e)
+                        await _session_manager.update(session)
+                    batch_bus.emit("paper_failed", {
+                        "session_id": sid, "error": str(e),
+                    })
 
-        for sid, fpath, fname in pending:
-            asyncio.create_task(_run_one(sid, fpath, fname))
+            batch_bus.emit("batch_complete", {"total": len(pending)})
+
+        asyncio.create_task(_run_batch_sequential())
 
         return {
             "batch_id": batch.batch_id,
@@ -514,6 +587,361 @@ def register_pc_panel_routes(app: FastAPI) -> None:
             ]
         }
 
+    # ── Batch Review (Sequential Full Pipeline) ──────────
+
+    @app.post("/api/panel/batch-review")
+    async def start_batch_review(
+        files: list[UploadFile] = File(...),
+        conference: str = Form("hpdc26"),
+        model_map_json: str = Form("{}"),
+        max_rounds: int = Form(2),
+        user_instructions: str = Form(""),
+        fast_parse: bool = Form(False),
+    ):
+        """Upload N PDFs, process each sequentially through the full pipeline.
+
+        Unlike /api/panel/batch (graph-only), this runs graph + review for each
+        paper with auto-advancing gates. Returns immediately with batch_id.
+        """
+        _session_manager = get_session_manager()
+        _batch_manager = app.state.batch_manager
+        _event_buses = get_event_buses()
+        _pipeline_controls = get_pipeline_controls()
+
+        try:
+            profile = load_profile(conference)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Conference profile '{conference}' not found")
+
+        try:
+            model_map = json.loads(model_map_json) if model_map_json else {}
+        except json.JSONDecodeError:
+            model_map = {}
+
+        agent_configs = build_agent_configs(
+            profile=profile, conference_slug=conference,
+            model_map=model_map if model_map else None,
+            user_instructions=user_instructions,
+        )
+
+        upload_dir = _get_upload_dir()
+        batch = await _batch_manager.create(conference=conference)
+
+        pending: list[tuple[str, Path, str]] = []
+        session_ids = []
+        for file in files:
+            safe_name = f"{uuid.uuid4().hex}_{file.filename}"
+            file_path = upload_dir / safe_name
+            content = await file.read()
+            file_path.write_bytes(content)
+
+            reviewer_ids = [k for k in agent_configs if k != "meta"]
+            delib_config = build_deliberation_config(
+                reviewer_ids=reviewer_ids, max_rounds=max_rounds,
+            )
+
+            session = await _session_manager.create(config={
+                "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+                "deliberation": delib_config.model_dump(),
+                "metadata": {
+                    "type": "panel_review",
+                    "conference": conference,
+                    "filename": file.filename,
+                    "paper_title": "",
+                },
+            })
+            session.batch_id = batch.batch_id
+            await _session_manager.update(session)
+            session_ids.append(session.session_id)
+            pending.append((session.session_id, file_path, file.filename))
+
+        batch.session_ids = session_ids
+        await _batch_manager.update(batch)
+
+        batch_bus = SessionEventBus()
+        _event_buses[f"batch_{batch.batch_id}"] = batch_bus
+
+        async def _run_batch_review_sequential() -> None:
+            import time as _time
+            for i, (sid, fpath, fname) in enumerate(pending):
+                bus = _event_buses.get(sid)
+                if not bus:
+                    bus = SessionEventBus()
+                    _event_buses[sid] = bus
+
+                batch_bus.emit("batch_progress", {
+                    "current": i + 1, "total": len(pending),
+                    "filename": fname, "session_id": sid,
+                })
+
+                session = await _session_manager.get(sid)
+                if session:
+                    session.status = SessionStatus.RUNNING
+                    session.pipeline_steps["parse"] = StepState(
+                        status="running", started_at=_time.monotonic(),
+                    ).model_dump()
+                    await _session_manager.update(session)
+
+                bus.emit("step_started", {
+                    "stage": "pre_review", "step": "parse",
+                    "message": f"Parsing {fname} ({i + 1}/{len(pending)})...",
+                })
+                await asyncio.sleep(0)
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    doc = await loop.run_in_executor(
+                        None, parse_file, str(fpath), fast_parse,
+                    )
+                    doc = chunk_document(doc)
+                except Exception as e:
+                    fpath.unlink(missing_ok=True)
+                    logger.warning("Failed to parse %s: %s", fname, e)
+                    session = await _session_manager.get(sid)
+                    if session:
+                        session.status = SessionStatus.FAILED
+                        session.error = f"Parse failed: {e}"
+                        await _session_manager.update(session)
+                    bus.emit("error", {"detail": f"Parse failed: {e}"})
+                    batch_bus.emit("paper_failed", {
+                        "session_id": sid, "error": f"Parse failed: {e}",
+                    })
+                    continue
+
+                session = await _session_manager.get(sid)
+                if session:
+                    ctx = _session_manager.get_context(sid)
+                    ctx.add_document(doc)
+                    session.document_ids.append(doc.document_id)
+                    await _session_manager.update(session)
+
+                ctl = PipelineControl()
+                ctl.skip_gate = True
+                _pipeline_controls[sid] = ctl
+
+                reviewer_ids = [k for k in agent_configs if k != "meta"]
+                delib_config = build_deliberation_config(
+                    reviewer_ids=reviewer_ids, max_rounds=max_rounds,
+                )
+
+                try:
+                    # Run full pipeline (graph + review) with auto-advance gate
+                    await _run_graph_pipeline(
+                        sid, doc, profile, model_map,
+                        agent_configs, bus, ctl,
+                        delib_config=delib_config,
+                        graph_only=False,
+                    )
+                    batch_bus.emit("paper_complete", {
+                        "session_id": sid, "index": i + 1,
+                        "total": len(pending), "filename": fname,
+                    })
+                except Exception as e:
+                    logger.error("Full pipeline failed for %s in batch: %s", fname, e)
+                    session = await _session_manager.get(sid)
+                    if session and session.status != SessionStatus.FAILED:
+                        session.status = SessionStatus.FAILED
+                        session.error = str(e)
+                        await _session_manager.update(session)
+                    batch_bus.emit("paper_failed", {
+                        "session_id": sid, "error": str(e),
+                    })
+
+            batch_bus.emit("batch_complete", {"total": len(pending)})
+
+        asyncio.create_task(_run_batch_review_sequential())
+
+        return {
+            "batch_id": batch.batch_id,
+            "session_count": len(session_ids),
+            "session_ids": session_ids,
+            "conference": conference,
+            "status": "running",
+            "mode": "full_review",
+        }
+
+    # ── Retry Endpoints ───────────────────────────────────
+
+    @app.post("/api/sessions/{session_id}/retry")
+    async def retry_session(session_id: str):
+        """Retry a failed or stopped session from the last completed step."""
+        _session_manager = get_session_manager()
+        _event_buses = get_event_buses()
+        _pipeline_controls = get_pipeline_controls()
+
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        status_val = session.status if isinstance(session.status, str) else session.status.value
+        if status_val not in ("failed", "stopped"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Session is '{status_val}', only failed or stopped sessions can be retried",
+            )
+
+        conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+        try:
+            profile = load_profile(conference_slug)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Conference '{conference_slug}' not found")
+
+        agent_configs_raw = session.config.get("agents", {})
+        agent_configs = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
+        delib_config = DeliberationConfig(**session.config.get("deliberation", {}))
+
+        # Reconstruct document from persisted data
+        doc_text = session.paper_text
+        doc_md = session.paper_markdown or ""
+        filename = session.config.get("metadata", {}).get("filename", "paper.pdf")
+        if not doc_text:
+            raise HTTPException(status_code=400, detail="No paper text stored. Cannot retry.")
+
+        from protoneo.agents.types import Document as _Doc
+        doc = _Doc(
+            document_id=uuid.uuid4().hex,
+            filename=filename,
+            text=doc_text,
+            markdown=doc_md,
+        )
+
+        model_map_raw = {}
+        for step_key in ("ontology", "extraction", "coref", "verification"):
+            for step_data in session.pipeline_steps.values():
+                if isinstance(step_data, dict) and step_data.get("model_used"):
+                    model_map_raw.setdefault(step_key, step_data["model_used"])
+        for k, v in agent_configs_raw.items():
+            if isinstance(v, dict) and v.get("model"):
+                model_map_raw[k] = v["model"]
+
+        session.status = SessionStatus.RUNNING
+        session.error = None
+        await _session_manager.update(session)
+
+        bus = SessionEventBus()
+        _event_buses[session_id] = bus
+        ctl = PipelineControl()
+        _pipeline_controls[session_id] = ctl
+
+        task = asyncio.create_task(_run_graph_pipeline(
+            session_id, doc, profile, model_map_raw,
+            agent_configs, bus, ctl,
+            delib_config=delib_config,
+            graph_only=(session.current_stage == "pre_review"),
+        ))
+        ctl.set_task(task)
+
+        return {"session_id": session_id, "status": "running", "action": "retry"}
+
+    @app.post("/api/panel/batch/{batch_id}/retry-failed")
+    async def retry_failed_in_batch(batch_id: str):
+        """Retry all failed sessions in a batch sequentially."""
+        _session_manager = get_session_manager()
+        _batch_manager = app.state.batch_manager
+        _event_buses = get_event_buses()
+        _pipeline_controls = get_pipeline_controls()
+
+        batch = await _batch_manager.get(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+        failed_sids = []
+        for sid in batch.session_ids:
+            session = await _session_manager.get(sid)
+            if session:
+                status_val = session.status if isinstance(session.status, str) else session.status.value
+                if status_val in ("failed", "stopped"):
+                    failed_sids.append(sid)
+
+        if not failed_sids:
+            return {"batch_id": batch_id, "retried": 0, "message": "No failed sessions to retry"}
+
+        batch_bus = SessionEventBus()
+        _event_buses[f"batch_{batch_id}"] = batch_bus
+
+        async def _retry_failed_sequential() -> None:
+            for i, sid in enumerate(failed_sids):
+                batch_bus.emit("batch_progress", {
+                    "current": i + 1, "total": len(failed_sids),
+                    "session_id": sid, "action": "retry",
+                })
+
+                session = await _session_manager.get(sid)
+                if not session:
+                    continue
+
+                conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+                try:
+                    profile = load_profile(conference_slug)
+                except FileNotFoundError:
+                    continue
+
+                agent_configs_raw = session.config.get("agents", {})
+                ac = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
+                dc = DeliberationConfig(**session.config.get("deliberation", {}))
+
+                doc_text = session.paper_text
+                if not doc_text:
+                    continue
+
+                from protoneo.agents.types import Document as _Doc
+                doc = _Doc(
+                    document_id=uuid.uuid4().hex,
+                    filename=session.config.get("metadata", {}).get("filename", "paper.pdf"),
+                    text=doc_text,
+                    markdown=session.paper_markdown or "",
+                )
+
+                model_map_raw = {}
+                for k, v in agent_configs_raw.items():
+                    if isinstance(v, dict) and v.get("model"):
+                        model_map_raw[k] = v["model"]
+
+                session.status = SessionStatus.RUNNING
+                session.error = None
+                await _session_manager.update(session)
+
+                bus = _event_buses.get(sid)
+                if not bus:
+                    bus = SessionEventBus()
+                    _event_buses[sid] = bus
+
+                ctl = PipelineControl()
+                _pipeline_controls[sid] = ctl
+
+                try:
+                    await _run_graph_pipeline(
+                        sid, doc, profile, model_map_raw,
+                        ac, bus, ctl,
+                        delib_config=dc,
+                        graph_only=(session.current_stage == "pre_review"),
+                    )
+                    batch_bus.emit("paper_complete", {
+                        "session_id": sid, "index": i + 1,
+                        "total": len(failed_sids),
+                    })
+                except Exception as e:
+                    logger.error("Retry failed for %s: %s", sid, e)
+                    session = await _session_manager.get(sid)
+                    if session and session.status != SessionStatus.FAILED:
+                        session.status = SessionStatus.FAILED
+                        session.error = str(e)
+                        await _session_manager.update(session)
+                    batch_bus.emit("paper_failed", {
+                        "session_id": sid, "error": str(e),
+                    })
+
+            batch_bus.emit("batch_complete", {"total": len(failed_sids)})
+
+        asyncio.create_task(_retry_failed_sequential())
+
+        return {
+            "batch_id": batch_id,
+            "retried": len(failed_sids),
+            "session_ids": failed_sids,
+            "status": "running",
+        }
+
     # ── Launch Review on Existing Graph ─────────────────
 
     class LaunchReviewBody(BaseModel):
@@ -562,10 +990,15 @@ def register_pc_panel_routes(app: FastAPI) -> None:
         else:
             agent_configs_raw = session.config.get("agents", {})
             agent_configs = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
-        delib_config = DeliberationConfig(**session.config.get("deliberation", {}))
-        if not delib_config.max_rounds:
+        delib_raw = session.config.get("deliberation", {})
+        if delib_raw and delib_raw.get("phases"):
+            delib_config = DeliberationConfig(**delib_raw)
+        else:
             reviewer_ids = [k for k in agent_configs if k != "meta"]
-            delib_config = build_deliberation_config(reviewer_ids=reviewer_ids)
+            delib_config = build_deliberation_config(
+                reviewer_ids=reviewer_ids,
+                max_rounds=body.max_rounds if body and body.max_rounds else 2,
+            )
 
         pg = PaperGraph.model_validate(session.paper_graph)
 

@@ -148,7 +148,7 @@
     </div>
 
     <!-- Pipeline Control Bar -->
-    <div class="pipeline-control-bar" v-if="status !== 'completed' && status !== 'failed' && !showGate">
+    <div class="pipeline-control-bar" v-if="status !== 'completed' && !showGate">
       <div v-if="pipelineMessage" class="pipeline-indicator">
         <span class="pipeline-dot"></span>
         {{ pipelineMessage }}
@@ -158,6 +158,7 @@
         <button v-if="pipelinePaused && !showGate" class="ctl-btn resume" @click="resumePipelineAction" title="Resume auto-advance">Resume Auto</button>
         <button v-if="!pipelinePaused && status === 'running'" class="ctl-btn pause" @click="pausePipelineAction" title="Pause at next step">Pause</button>
         <button v-if="status === 'running'" class="ctl-btn cancel" @click="cancelPipelineAction" title="Cancel entire review">Cancel</button>
+        <button v-if="status === 'failed' || status === 'stopped'" class="ctl-btn retry" @click="retryPipeline" title="Retry from last checkpoint">Retry</button>
       </div>
     </div>
 
@@ -458,6 +459,26 @@ async function cancelPipelineAction() {
     addEvent('Review cancelled by PC chair')
   } catch (e) {
     error.value = 'Failed to cancel: ' + (e.message || 'unknown')
+  }
+}
+
+async function retryPipeline() {
+  try {
+    const { retrySession } = await import('../api/kernel.js')
+    await retrySession(props.sessionId)
+    status.value = 'running'
+    error.value = ''
+    addEvent('Retrying pipeline from last checkpoint...')
+    // Reconnect the WebSocket stream
+    const ws = connectStream(props.sessionId)
+    ws.onmessage = (msg) => {
+      try {
+        const evt = JSON.parse(msg.data)
+        handleStreamEvent(evt)
+      } catch {}
+    }
+  } catch (e) {
+    error.value = 'Retry failed: ' + (e.response?.data?.detail || e.message || 'unknown')
   }
 }
 
@@ -1204,6 +1225,17 @@ onUnmounted(() => {
 .ctl-btn.cancel:hover {
   border-color: #900;
   background: #fff5f5;
+}
+
+.ctl-btn.retry {
+  background: #fff;
+  color: #2563eb;
+  border-color: #ddd;
+}
+
+.ctl-btn.retry:hover {
+  border-color: #2563eb;
+  background: #eff6ff;
 }
 
 /* Deliberation chat */
