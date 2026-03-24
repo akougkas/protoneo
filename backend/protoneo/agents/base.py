@@ -100,6 +100,12 @@ class BaseAgent:
         if include_history and context.messages:
             for m in context.messages:
                 role = m.role if m.role in ("user", "assistant") else "assistant"
+                # Qwen jinja templates require the first non-system message to be
+                # a user message. If history starts with assistant, fold it into
+                # the upcoming user message instead of inserting it directly.
+                if len(msgs) == 1 and role == "assistant":
+                    # Will be prepended to user message below
+                    continue
                 if msgs and msgs[-1]["role"] == role:
                     msgs[-1]["content"] += "\n\n" + m.content
                 else:

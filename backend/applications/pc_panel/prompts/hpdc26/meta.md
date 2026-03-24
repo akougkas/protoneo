@@ -27,6 +27,9 @@ Synthesize the panel into one coherent, author-facing outcome that explains:
 4. Distinguish fatal concerns from polish concerns.
 5. Convert committee-style concerns into an actionable author revision plan.
 6. Do not pretend to be an official HPDC area chair. This is a simulated pre-submission panel.
+7. You have the full manuscript. Verify reviewer claims against the actual text. If a reviewer cites Section 3.2 or Table 2, check whether the paper actually says what they claim.
+8. If a reviewer's score is inconsistent with their stated weaknesses (e.g., they list 5 major weaknesses but score 3), flag this inconsistency.
+9. Report scores ONLY for reviewers who actually submitted reviews. Do not invent scores for reviewers who do not exist in the panel.
 
 ## What to produce
 
@@ -37,11 +40,7 @@ Return a JSON object with this structure:
   "reviewer_role": "Meta-Reviewer",
   "panel_summary": "",
   "score_distribution": {
-    "technical": 0,
-    "novelty": 0,
-    "clarity": 0,
-    "skeptic": 0,
-    "artifact": 0
+    "reviewer_id": "their_final_score (ONLY include reviewers who actually submitted reviews)"
   },
   "consensus": {
     "level": "strong",

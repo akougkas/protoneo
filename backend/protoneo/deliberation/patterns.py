@@ -630,26 +630,29 @@ class IndependentSynthesisPattern:
             for o in phase.outputs:
                 all_outputs.append(f"[{o.agent_role}]: {o.content}")
 
-        # Include the original paper context (graph summary, paper text) so
-        # the meta-reviewer can ground its synthesis in the source material,
-        # not just reviewer opinions.
+        # Include the FULL original paper context (manuscript + graph summary)
+        # so the meta-reviewer can fact-check reviewer claims against the source.
+        # Without the paper, the meta-reviewer can only parrot reviewer opinions
+        # and cannot detect hallucinated scores or fabricated claims.
         original_context = user_message.content if user_message else ""
         context_block = ""
         if original_context:
-            # Extract the graph summary portion (after the manuscript)
-            graph_marker = "## Paper Knowledge Graph"
-            if graph_marker in original_context:
-                graph_idx = original_context.index(graph_marker)
-                context_block = (
-                    "\n\nThe following knowledge graph summary was provided to reviewers:\n\n"
-                    + original_context[graph_idx:]
-                )
+            context_block = (
+                "\n\n" + "=" * 60
+                + "\nORIGINAL MANUSCRIPT AND GRAPH (for fact-checking reviewer claims)\n"
+                + "=" * 60 + "\n\n"
+                + original_context
+            )
 
         synthesis_prompt = Message(
             role="user",
             content=(
                 "Below are all reviewer outputs and deliberation messages. "
                 "Synthesize them into a final meta-review.\n\n"
+                "IMPORTANT: You have the full manuscript below. Verify reviewer claims "
+                "against the actual text. If a reviewer cites a section/figure/table, "
+                "check whether it says what they claim. Flag any reviewer who scores "
+                "inconsistently with their own stated weaknesses.\n\n"
                 + "\n\n---\n\n".join(all_outputs)
                 + context_block
             ),

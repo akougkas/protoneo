@@ -30,26 +30,28 @@ logger = logging.getLogger("protoneo.pc_panel.review")
 # Roles not listed here fall through to the first available model.
 # Uses generic provider names only (no site-specific node names).
 _ROLE_PROVIDER_PREFS: dict[str, list[str]] = {
-    "technical": ["anthropic", "openai"],
-    "systems": ["anthropic", "openai"],
-    "novelty": ["openai", "anthropic"],
-    "clarity": ["openai", "anthropic"],
-    "skeptic": ["anthropic", "openai"],
-    "meta": ["anthropic", "openai"],
+    "technical": ["openai"],
+    "systems": ["openai"],
+    "novelty": ["openai"],
+    "clarity": ["openai"],
+    "skeptic": ["openai"],
+    "meta": ["openai"],
+    # anthropic removed from all provider preferences
 }
 
 # Per-role inference parameter defaults.
-# Analytical roles (skeptic, artifact, systems, technical) get low temperature
-# for deterministic, grounded verification. Creative roles (novelty, clarity,
-# meta) get higher temperature for lateral synthesis.
+# All reviewers use low temperature for structured, grounded evaluation.
+# Local models (Nemotron, Qwen) are especially sensitive to high temperature,
+# producing verbose reasoning instead of structured JSON output.
+# Meta-reviewer gets slightly higher temperature for synthesis flexibility.
 _ROLE_INFERENCE_PREFS: dict[str, dict[str, float]] = {
-    "technical": {"temperature": 0.15, "top_p": 0.85},
-    "systems": {"temperature": 0.15, "top_p": 0.85},
+    "technical": {"temperature": 0.2, "top_p": 0.9},
+    "systems": {"temperature": 0.2, "top_p": 0.9},
     "skeptic": {"temperature": 0.15, "top_p": 0.85},
     "artifact": {"temperature": 0.15, "top_p": 0.85},
-    "novelty": {"temperature": 0.85, "top_p": 0.95, "presence_penalty": 0.2},
-    "clarity": {"temperature": 0.85, "top_p": 0.95, "presence_penalty": 0.2},
-    "meta": {"temperature": 0.85, "top_p": 0.95, "presence_penalty": 0.2},
+    "novelty": {"temperature": 0.3, "top_p": 0.9},
+    "clarity": {"temperature": 0.3, "top_p": 0.9},
+    "meta": {"temperature": 0.4, "top_p": 0.9},
 }
 
 
@@ -204,7 +206,7 @@ def build_agent_configs(
             model=models.get(role, models.get("technical", "")),
             system_prompt=prompt,
             focus=focus,
-            max_tokens=16384,
+            max_tokens=32768,
             temperature=inference.get("temperature"),
             top_p=inference.get("top_p"),
             presence_penalty=inference.get("presence_penalty"),
