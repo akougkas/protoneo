@@ -1,0 +1,23 @@
+# Paper Review domain configuration.
+# Structural types and summary settings for the kernel knowledge modules.
+
+name: academic_paper
+
+structural_node_types:
+  - Paper
+  - Section
+  - Diagram
+  - Table
+  - Reference
+  - Equation
+
+structural_edge_types_for_summary:
+  - HAS_SECTION
+  - CONTAINS
+  - APPEARS_IN
+
+summary_max_chars: 5200
+
+verify_system_prompt: >
+  You verify knowledge graphs extracted from academic papers.
+  Always respond with valid JSON only.

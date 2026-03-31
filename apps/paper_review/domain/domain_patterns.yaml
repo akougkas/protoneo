@@ -1,0 +1,119 @@
+# Domain detection patterns and keywords for academic paper review.
+# Used by the kernel's ontology discovery to seed domain-specific entity types.
+
+domain_patterns:
+  systems:
+    - name: HardwarePlatform
+      description: "Physical hardware (GPUs, clusters, FPGAs, wearables, sensors) used in experiments"
+    - name: SystemConfiguration
+      description: "Runtime parameters, deployment settings, or hardware configurations"
+    - name: Workload
+      description: "Specific benchmark workloads, traces, or test scenarios"
+    - name: Optimization
+      description: "A specific optimization technique (caching, prefetching, scheduling, pruning)"
+
+  ml:
+    - name: Model
+      description: "A specific ML/DL model architecture (transformer, CNN, LSTM, etc.)"
+    - name: Hyperparameter
+      description: "Tuning choices that affect training/inference (learning rate, batch size, etc.)"
+    - name: TrainingProcedure
+      description: "Training protocol (pretraining, fine-tuning, distillation, augmentation)"
+    - name: LossFunction
+      description: "Objective function optimized during training"
+
+  networking:
+    - name: Protocol
+      description: "Communication protocol or standard (TCP, RDMA, MPI, etc.)"
+    - name: NetworkTopology
+      description: "Network layout (fat-tree, dragonfly, torus) or configuration"
+    - name: TrafficPattern
+      description: "Communication pattern or workload (all-to-all, nearest-neighbor, etc.)"
+
+  iot:
+    - name: SensorType
+      description: "Physical sensor hardware (accelerometer, gyroscope, magnetometer, etc.)"
+    - name: EnergyModel
+      description: "Power consumption model or energy budget constraint"
+    - name: ActivityContext
+      description: "User activity or environmental context that drives system behavior"
+    - name: DevicePlatform
+      description: "Wearable or IoT device (smartwatch, sensor node, edge gateway)"
+
+  storage:
+    - name: StorageSystem
+      description: "File system, object store, or storage backend"
+    - name: IOPattern
+      description: "I/O access pattern (sequential, random, strided, etc.)"
+    - name: DataFormat
+      description: "Data representation format (HDF5, Parquet, compressed, etc.)"
+
+  theory:
+    - name: Theorem
+      description: "A formal theorem, lemma, or proposition with proof"
+    - name: Assumption
+      description: "Stated or implicit assumption required for results to hold"
+    - name: Bound
+      description: "Theoretical bound (upper, lower, approximation ratio)"
+
+domain_keywords:
+  systems:
+    - hpc
+    - parallel
+    - distributed
+    - cluster
+    - gpu
+    - accelerat
+    - kernel
+    - runtime
+    - scheduler
+    - fpga
+  ml:
+    - neural
+    - deep learning
+    - transformer
+    - training
+    - fine-tun
+    - pretrain
+    - classification
+    - regression
+    - reinforcement
+  networking:
+    - network
+    - protocol
+    - bandwidth
+    - latency
+    - tcp
+    - rdma
+    - mpi
+    - routing
+    - congestion
+  iot:
+    - iot
+    - sensor
+    - wearable
+    - energy efficien
+    - battery
+    - edge computing
+    - sampling
+    - accelerometer
+    - gyroscope
+    - smart
+  storage:
+    - storage
+    - file system
+    - i/o
+    - compression
+    - lossy
+    - hdf5
+    - checkpoint
+    - data reduction
+  theory:
+    - theorem
+    - proof
+    - lemma
+    - bound
+    - complexity
+    - np-hard
+    - approximation
+    - convergence

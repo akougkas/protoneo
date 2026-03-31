@@ -1,0 +1,245 @@
+# Paper Review domain seed types for ontology generation.
+# These are injected into the kernel's ontology module via DomainConfig.
+
+base_entity_types:
+  - name: Claim
+    description: "A testable assertion or contribution claim made by the authors"
+    attributes:
+      - name: stated_in_section
+        type: text
+        description: "Which section states this claim"
+      - name: evidence_strength
+        type: text
+        description: "How strongly the paper supports this claim"
+      - name: quantified
+        type: boolean
+        description: "Whether the claim includes quantitative evidence"
+    examples:
+      - "2.3x speedup over baseline"
+      - "first system to achieve X"
+
+  - name: Method
+    description: "An algorithm, technique, or approach proposed or used"
+    attributes:
+      - name: novelty_claim
+        type: text
+        description: "Whether the authors claim this method is novel"
+      - name: complexity
+        type: text
+        description: "Computational or algorithmic complexity if stated"
+    examples:
+      - "ScaleSort"
+      - "adaptive oversampling"
+      - "Hilbert curve pivot selection"
+
+  - name: Dataset
+    description: "A dataset or benchmark used for evaluation"
+    attributes:
+      - name: size
+        type: text
+        description: "Number of samples, records, or scale"
+      - name: domain
+        type: text
+        description: "Application domain of the dataset"
+      - name: availability
+        type: text
+        description: "Public, private, or restricted access"
+    examples:
+      - "ImageNet"
+      - "GLUE"
+      - "custom synthetic benchmark"
+
+  - name: Metric
+    description: "A quantitative measure used to evaluate results"
+    attributes:
+      - name: value
+        type: text
+        description: "The reported numeric value"
+      - name: unit
+        type: text
+        description: "Unit of measurement"
+      - name: comparison_baseline
+        type: text
+        description: "What the metric is compared against"
+    examples:
+      - "accuracy"
+      - "throughput (GB/s)"
+      - "F1 score"
+
+  - name: Baseline
+    description: "A prior method used as comparison point"
+    attributes:
+      - name: source_paper
+        type: text
+        description: "Citation or origin of the baseline"
+      - name: comparison_result
+        type: text
+        description: "How the proposed method compares to this baseline"
+    examples:
+      - "RadixSort-MPI"
+      - "HykSort"
+      - "GPT-3"
+
+  - name: Result
+    description: "A specific quantitative outcome or finding"
+    attributes:
+      - name: metric_value
+        type: text
+        description: "The numeric result with unit"
+      - name: conditions
+        type: text
+        description: "Experimental conditions under which the result holds"
+      - name: statistical_significance
+        type: text
+        description: "p-value, confidence interval, or similar"
+    examples:
+      - "847 GB/s throughput on 65536 nodes"
+      - "95.2% accuracy on test set"
+
+  - name: Limitation
+    description: "An acknowledged weakness or scope constraint"
+    attributes:
+      - name: severity
+        type: text
+        description: "How significantly this limits the contribution"
+      - name: acknowledged_by_authors
+        type: boolean
+        description: "Whether the authors explicitly state this limitation"
+    examples:
+      - "single-machine evaluation only"
+      - "assumes uniform data distribution"
+
+fallback_entity_types:
+  - name: Concept
+    description: "Any theoretical idea not captured by more specific types"
+    attributes:
+      - name: formal_definition
+        type: text
+        description: "Mathematical or formal statement if applicable"
+    examples:
+      - "convergence guarantee"
+      - "approximation ratio"
+
+  - name: Reference
+    description: "A cited prior work from the bibliography"
+    attributes:
+      - name: citation_key
+        type: text
+        description: "Citation number or author-year key"
+      - name: relevance
+        type: text
+        description: "How this reference relates to the paper"
+    examples:
+      - "[1] Dean et al. 2012"
+      - "[15] Vaswani et al. 2017"
+
+structural_entity_types:
+  - name: Equation
+    description: "A labeled equation, theorem, or lemma"
+    attributes:
+      - name: label
+        type: text
+        description: "The equation label (Eq. 1, Theorem 2)"
+      - name: appears_in_section
+        type: text
+        description: "Which section contains this equation"
+    examples:
+      - "Eq. 1"
+      - "Theorem 2"
+      - "Lemma 3"
+
+base_edge_types:
+  - name: USES
+    description: "Entity employs or applies another entity"
+    source_targets:
+      - source: Method
+        target: Dataset
+      - source: Method
+        target: Method
+
+  - name: EVALUATES_ON
+    description: "Method or system evaluated using a dataset or benchmark"
+    source_targets:
+      - source: Method
+        target: Dataset
+      - source: Result
+        target: Dataset
+
+  - name: COMPARED_AGAINST
+    description: "Entity compared to a baseline or alternative"
+    source_targets:
+      - source: Method
+        target: Baseline
+      - source: Result
+        target: Baseline
+
+  - name: ACHIEVES
+    description: "Method or system achieves a specific result"
+    source_targets:
+      - source: Method
+        target: Result
+      - source: Method
+        target: Metric
+
+  - name: EXTENDS
+    description: "Entity builds upon or extends prior work"
+    source_targets:
+      - source: Method
+        target: Method
+      - source: Method
+        target: Baseline
+
+  - name: CITES
+    description: "Entity references another work"
+    source_targets:
+      - source: Claim
+        target: Reference
+      - source: Method
+        target: Reference
+
+  - name: PART_OF
+    description: "Entity is a component of another entity"
+    source_targets:
+      - source: Method
+        target: Method
+      - source: Concept
+        target: Method
+
+  - name: CONTRADICTS
+    description: "Entity conflicts with or contradicts another"
+    source_targets:
+      - source: Claim
+        target: Claim
+      - source: Result
+        target: Result
+
+structural_edge_types:
+  - name: HAS_SECTION
+    description: "Paper contains this section"
+    source_targets:
+      - source: Paper
+        target: Section
+
+  - name: CONTAINS
+    description: "Section or entity contains a sub-element"
+    source_targets:
+      - source: Paper
+        target: Diagram
+      - source: Paper
+        target: Table
+
+  - name: APPEARS_IN
+    description: "Entity appears in a specific section"
+    source_targets:
+      - source: Concept
+        target: Section
+      - source: Method
+        target: Section
+
+  - name: ALIAS_OF
+    description: "Entity is an abbreviation or alternative name for another"
+    source_targets:
+      - source: Concept
+        target: Concept
+      - source: Method
+        target: Method
