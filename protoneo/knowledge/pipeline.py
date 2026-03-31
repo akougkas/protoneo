@@ -112,13 +112,19 @@ class GraphPipeline:
         # Restore graph from last checkpoint snapshot if resuming
         paper_graph = KnowledgeGraph()
         if session.checkpoints:
-            last_stage = session.last_checkpoint
-            snapshot = session.graph_after_step.get(last_stage)
+            last_cp = session.checkpoints[-1]
+            # output_key format: "graph_after_step.<key>" or "knowledge_graph"
+            snapshot = None
+            if last_cp.output_key.startswith("graph_after_step."):
+                step_key = last_cp.output_key.split(".", 1)[1]
+                snapshot = session.graph_after_step.get(step_key)
+            elif last_cp.output_key == "knowledge_graph" and session.knowledge_graph:
+                snapshot = session.knowledge_graph
             if snapshot:
                 paper_graph = KnowledgeGraph.restore_from_snapshot(snapshot)
                 logger.info(
                     "Resuming from checkpoint '%s' (%d nodes, %d edges)",
-                    last_stage, len(paper_graph.nodes), len(paper_graph.edges),
+                    last_cp.stage_name, len(paper_graph.nodes), len(paper_graph.edges),
                 )
 
         ctl.enter_stage("pre_review")
