@@ -24,10 +24,10 @@ from protoneo.config.schema import AgentConfig, DeliberationConfig
 from protoneo.deliberation.session import SessionStatus, StepState
 from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.coref_resolver import resolve_coreferences
-from protoneo.knowledge.graph_extractor import extract_paper_graph
+from protoneo.knowledge.graph_extractor import extract_graph
 from protoneo.knowledge.graph_verifier import verify_graph
-from protoneo.knowledge.paper_graph import PaperGraph
-from protoneo.knowledge.paper_ontology import generate_paper_ontology
+from protoneo.knowledge.graph import KnowledgeGraph
+from protoneo.knowledge.ontology import generate_ontology
 from .conference import ConferenceProfile
 from .manifest import domain_config as _domain_config
 from .review import (
@@ -59,7 +59,7 @@ async def _run_review_stage(
     enriched_message: str,
     bus: SessionEventBus,
     ctl: PipelineControl,
-    paper_graph: PaperGraph,
+    paper_graph: KnowledgeGraph,
 ) -> DeliberationResult:
     """Review stage: independent reviews -> deliberation -> meta-review.
 
@@ -220,14 +220,14 @@ async def _run_pc_chair_review(
 
     # Gather full paper context for the PC Chair
     paper_context_parts = []
-    paper_md = session.paper_markdown or session.paper_text
+    paper_md = session.document_markdown or session.document_text
     if paper_md:
         paper_context_parts.append(
             f"{'=' * 60}\nFULL PAPER\n{'=' * 60}\n\n{paper_md}"
         )
 
-    if session.paper_graph:
-        graph_summary = session.paper_graph.get("summary", "")
+    if session.knowledge_graph:
+        graph_summary = session.knowledge_graph.get("summary", "")
         if graph_summary:
             paper_context_parts.append(
                 f"\n{'=' * 60}\nKNOWLEDGE GRAPH SUMMARY\n{'=' * 60}\n\n{graph_summary}"
@@ -369,8 +369,8 @@ async def _run_graph_pipeline(
         if session:
             session.status = SessionStatus.RUNNING
             # Fix 3: Persist all session data immediately so it survives restarts
-            session.paper_text = doc.text
-            session.paper_markdown = doc.markdown or ""
+            session.document_text = doc.text
+            session.document_markdown = doc.markdown or ""
             session.config["agents"] = {k: v.model_dump() for k, v in agent_configs.items()}
             if delib_config:
                 session.config["deliberation"] = delib_config.model_dump()
@@ -378,7 +378,7 @@ async def _run_graph_pipeline(
             session.config["metadata"]["filename"] = doc.filename
             await _session_manager.update(session)
 
-        paper_graph = PaperGraph()
+        paper_graph = KnowledgeGraph()
 
         # ════════════════════════════════════════════════
         # Skip-graph fast path: ingest metadata only, skip Steps 1-7
@@ -397,7 +397,7 @@ async def _run_graph_pipeline(
             if session:
                 if metadata.title:
                     session.config.setdefault("metadata", {})["paper_title"] = metadata.title
-                session.paper_graph = paper_graph.model_dump(mode="json")
+                session.knowledge_graph = paper_graph.model_dump(mode="json")
                 await _session_manager.update(session)
 
             ctl.enter_stage("pre_review")
@@ -444,7 +444,7 @@ async def _run_graph_pipeline(
 
             session = await _session_manager.get(sid)
             if session:
-                session.paper_graph = paper_graph.model_dump(mode="json")
+                session.knowledge_graph = paper_graph.model_dump(mode="json")
                 session.current_stage = "review"
                 session.status = SessionStatus.COMPLETED
                 await _session_manager.update(session)
@@ -627,7 +627,7 @@ async def _run_graph_pipeline(
                 ) from ping_err
         logger.info("Pre-flight model check passed for %d unique models", len(checked))
 
-        ontology = await generate_paper_ontology(
+        ontology = await generate_ontology(
             doc.text, _llm_client, model=ontology_model,
             session_id=sid, conference_context=conference_context,
             metadata=metadata, markdown=doc.markdown,
@@ -671,12 +671,12 @@ async def _run_graph_pipeline(
             "message": f"Extracting knowledge graph ({len(ontology.entity_types)} entity types)...",
         })
 
-        await extract_paper_graph(
+        await extract_graph(
             doc.text, _llm_client, model=extraction_model,
             session_id=sid,
             on_progress=lambda evt, data: bus.emit(evt, data),
             ontology=ontology,
-            paper_graph=paper_graph,
+            knowledge_graph=paper_graph,
             markdown=doc.markdown,
         )
 
@@ -804,12 +804,12 @@ async def _run_graph_pipeline(
                 "Pruned %d ungrounded entities (confidence < %.2f)",
                 pruned, pruning_threshold,
             )
-        paper_graph.summary = paper_graph.to_reviewer_summary()
+        paper_graph.summary = paper_graph.to_agent_briefing()
         paper_graph.update_stats()
 
         session = await _session_manager.get(sid)
         if session:
-            session.paper_graph = paper_graph.model_dump(mode="json")
+            session.knowledge_graph = paper_graph.model_dump(mode="json")
             session.current_stage = "pre_review"
             session.pipeline_steps["summarize"] = StepState(
                 status="complete", started_at=step_start,
@@ -882,7 +882,7 @@ async def _run_graph_pipeline(
         # Persist annotated graph
         session = await _session_manager.get(sid)
         if session:
-            session.paper_graph = paper_graph.model_dump(mode="json")
+            session.knowledge_graph = paper_graph.model_dump(mode="json")
             session.current_stage = "review"
             session.status = SessionStatus.COMPLETED
             await _session_manager.update(session)

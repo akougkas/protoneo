@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from protoneo.config.schema import AppManifest
 from protoneo.knowledge.types import DomainConfig, SeedEntity, SeedEdge
 
 _DOMAIN_DIR = Path(__file__).resolve().parent / "domain"
@@ -86,3 +87,14 @@ def _load_domain() -> DomainConfig:
 
 # Load once at import time
 domain_config = _load_domain()
+
+manifest = AppManifest(
+    name="paper_review",
+    display_name="Paper Review",
+    version="0.1.0",
+    description="AI peer review panel for academic papers",
+    domain_config=domain_config,
+    profile_dir=Path(__file__).resolve().parent / "profiles",
+    prompt_dir=Path(__file__).resolve().parent / "prompts",
+    pipeline_stages=["independent_review", "deliberation", "meta_review", "pc_chair"],
+)

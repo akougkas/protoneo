@@ -1,9 +1,8 @@
-"""Unified paper knowledge graph.
+"""Unified knowledge graph.
 
-The PaperGraph is the single source of truth for a paper review session.
-Created during Pre-Review, enriched during Review, queried during Post-Review.
-Every pipeline step reads from and writes to the same PaperGraph instance.
-Persisted as part of the session JSON.
+The KnowledgeGraph is the single source of truth for a session's document
+analysis. Created during document processing, enriched during extraction,
+queried during deliberation. Persisted as part of the session JSON.
 """
 
 import uuid as _uuid
@@ -13,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .paper_ontology import PaperOntology
+from .ontology import Ontology
 
 
 class GraphAnnotation(BaseModel):
@@ -50,16 +49,16 @@ class GraphEdge(BaseModel):
     source_text: str = ""
 
 
-class PaperGraph(BaseModel):
-    """The unified graph for a paper review session.
+class KnowledgeGraph(BaseModel):
+    """The unified knowledge graph for a session.
 
-    Created during Pre-Review, enriched during Review, queried during
-    Post-Review. Persisted as part of the session JSON.
+    Created during document processing, enriched during extraction,
+    queried during deliberation. Persisted as part of the session JSON.
     """
 
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
-    ontology: PaperOntology | None = None
+    ontology: Ontology | None = None
     summary: str = ""
 
     paper_title: str = ""
@@ -243,7 +242,7 @@ class PaperGraph(BaseModel):
 
     # ── Ontology ingestion ─────────────────────────────────
 
-    def add_ontology_nodes(self, ontology: PaperOntology) -> None:
+    def add_ontology_nodes(self, ontology: Ontology) -> None:
         """Create Concept nodes from ontology key_contributions.
 
         Links each contribution to the paper root via PART_OF edges.
@@ -268,14 +267,14 @@ class PaperGraph(BaseModel):
         return self.model_dump(mode="json")
 
     @classmethod
-    def restore_from_snapshot(cls, data: dict) -> "PaperGraph":
-        """Restore a PaperGraph from a snapshot dict."""
+    def restore_from_snapshot(cls, data: dict) -> "KnowledgeGraph":
+        """Restore a KnowledgeGraph from a snapshot dict."""
         return cls.model_validate(data)
 
     # ── Ingestion methods ────────────────────────────────────
 
     def ingest_metadata(self, metadata: Any) -> None:
-        """Build structural nodes from heuristic PaperMetadata.
+        """Build structural nodes from heuristic DocumentMetadata.
 
         Creates Paper root, Section nodes, Figure and Table nodes.
         No LLM required.
@@ -364,7 +363,7 @@ class PaperGraph(BaseModel):
         """Absorb nodes and edges from GraphPanel / D3 format.
 
         Handles ID mapping when deduplication merges a D3 node
-        into an existing PaperGraph node.
+        into an existing KnowledgeGraph node.
         """
         d3_to_pg: dict[str, str] = {}
 
@@ -445,12 +444,12 @@ class PaperGraph(BaseModel):
 
         return {"nodes": nodes, "edges": edges}
 
-    def to_reviewer_summary(self) -> str:
-        """Concise review briefing derived from the knowledge graph.
+    def to_agent_briefing(self, domain_config: Any = None) -> str:
+        """Concise briefing derived from the knowledge graph for agent context.
 
         Structured as three sections that directly support review writing:
         key claims, methodology concerns, and evaluation summary. Capped
-        at ~3000 chars to avoid overwhelming reviewers.
+        at ~5000 chars to avoid overwhelming agents.
         """
         if not self.nodes:
             return ""
@@ -626,15 +625,15 @@ class PaperGraph(BaseModel):
 
     # ── Utilization analysis ────────────────────────────────
 
-    def compute_utilization(self, reviews: list[dict]) -> dict[str, Any]:
-        """Compute how well reviewers utilized the knowledge graph.
+    def compute_utilization(self, agent_outputs: list[dict]) -> dict[str, Any]:
+        """Compute how well agents utilized the knowledge graph.
 
-        Deterministic (no LLM). Scans review text for entity label substrings.
+        Deterministic (no LLM). Scans agent output text for entity label substrings.
 
         Args:
-            reviews: list of dicts with at least "agent_id" and text fields
-                     (strengths, weaknesses, questions_for_authors, summary,
-                      comments_for_authors, raw_content).
+            agent_outputs: list of dicts with at least "agent_id" and text fields
+                           (strengths, weaknesses, questions_for_authors, summary,
+                            comments_for_authors, raw_content).
 
         Returns dict with per_entity, per_reviewer, unreferenced_entities,
         utilization_ratio, and by_type breakdowns.
@@ -667,9 +666,9 @@ class PaperGraph(BaseModel):
             return " ".join(parts).lower()
 
         reviewer_texts: dict[str, str] = {}
-        for review in reviews:
-            aid = review.get("agent_id", review.get("reviewer_role", "unknown"))
-            reviewer_texts[aid] = _extract_text(review)
+        for output in agent_outputs:
+            aid = output.get("agent_id", output.get("reviewer_role", "unknown"))
+            reviewer_texts[aid] = _extract_text(output)
 
         per_entity: list[dict] = []
         referenced_ids: set[str] = set()

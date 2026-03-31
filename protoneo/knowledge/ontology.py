@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from ..llm.client import LLMClient
 from .types import DomainConfig
 
-logger = logging.getLogger("protoneo.knowledge.paper_ontology")
+logger = logging.getLogger("protoneo.knowledge.ontology")
 
 
 # ── Ontology schema models ────────────────────────────────
@@ -47,23 +47,23 @@ class OntologyAttribute(BaseModel):
     description: str = ""
 
 
-class OntologyEntityType(BaseModel):
+class EntityType(BaseModel):
     name: str
     description: str
     attributes: list[OntologyAttribute] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
 
 
-class OntologyEdgeType(BaseModel):
+class EdgeType(BaseModel):
     name: str
     description: str
     source_targets: list[dict[str, str]] = Field(default_factory=list)
 
 
-class PaperOntology(BaseModel):
+class Ontology(BaseModel):
     """Domain-specific ontology generated for a specific paper."""
-    entity_types: list[OntologyEntityType] = Field(default_factory=list)
-    edge_types: list[OntologyEdgeType] = Field(default_factory=list)
+    entity_types: list[EntityType] = Field(default_factory=list)
+    edge_types: list[EdgeType] = Field(default_factory=list)
     analysis_summary: str = ""
     paper_domain: str = ""
     key_contributions: list[str] = Field(default_factory=list)
@@ -72,7 +72,7 @@ class PaperOntology(BaseModel):
 # ── Base entity types (always included) ────────────────────
 
 _BASE_ENTITY_TYPES = [
-    OntologyEntityType(
+    EntityType(
         name="Claim",
         description="A testable assertion or contribution claim made by the authors",
         attributes=[
@@ -82,7 +82,7 @@ _BASE_ENTITY_TYPES = [
         ],
         examples=["2.3x speedup over baseline", "first system to achieve X"],
     ),
-    OntologyEntityType(
+    EntityType(
         name="Method",
         description="An algorithm, technique, or approach proposed or used",
         attributes=[
@@ -91,7 +91,7 @@ _BASE_ENTITY_TYPES = [
         ],
         examples=["ScaleSort", "adaptive oversampling", "Hilbert curve pivot selection"],
     ),
-    OntologyEntityType(
+    EntityType(
         name="Dataset",
         description="A dataset or benchmark used for evaluation",
         attributes=[
@@ -101,7 +101,7 @@ _BASE_ENTITY_TYPES = [
         ],
         examples=["ImageNet", "GLUE", "custom synthetic benchmark"],
     ),
-    OntologyEntityType(
+    EntityType(
         name="Metric",
         description="A quantitative measure used to evaluate results",
         attributes=[
@@ -111,7 +111,7 @@ _BASE_ENTITY_TYPES = [
         ],
         examples=["accuracy", "throughput (GB/s)", "F1 score"],
     ),
-    OntologyEntityType(
+    EntityType(
         name="Baseline",
         description="A prior method used as comparison point",
         attributes=[
@@ -120,7 +120,7 @@ _BASE_ENTITY_TYPES = [
         ],
         examples=["RadixSort-MPI", "HykSort", "GPT-3"],
     ),
-    OntologyEntityType(
+    EntityType(
         name="Result",
         description="A specific quantitative outcome or finding",
         attributes=[
@@ -130,7 +130,7 @@ _BASE_ENTITY_TYPES = [
         ],
         examples=["847 GB/s throughput on 65536 nodes", "95.2% accuracy on test set"],
     ),
-    OntologyEntityType(
+    EntityType(
         name="Limitation",
         description="An acknowledged weakness or scope constraint",
         attributes=[
@@ -142,7 +142,7 @@ _BASE_ENTITY_TYPES = [
 ]
 
 _FALLBACK_ENTITY_TYPES = [
-    OntologyEntityType(
+    EntityType(
         name="Concept",
         description="Any theoretical idea not captured by more specific types",
         attributes=[
@@ -150,7 +150,7 @@ _FALLBACK_ENTITY_TYPES = [
         ],
         examples=["convergence guarantee", "approximation ratio"],
     ),
-    OntologyEntityType(
+    EntityType(
         name="Reference",
         description="A cited prior work from the bibliography",
         attributes=[
@@ -162,7 +162,7 @@ _FALLBACK_ENTITY_TYPES = [
 ]
 
 _STRUCTURAL_ENTITY_TYPES = [
-    OntologyEntityType(
+    EntityType(
         name="Equation",
         description="A labeled equation, theorem, or lemma",
         attributes=[
@@ -176,42 +176,42 @@ _STRUCTURAL_ENTITY_TYPES = [
 # ── Base edge types (always included) ─────────────────────
 
 _BASE_EDGE_TYPES = [
-    OntologyEdgeType(
+    EdgeType(
         name="USES",
         description="Entity employs or applies another entity",
         source_targets=[{"source": "Method", "target": "Dataset"}, {"source": "Method", "target": "Method"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="EVALUATES_ON",
         description="Method or system evaluated using a dataset or benchmark",
         source_targets=[{"source": "Method", "target": "Dataset"}, {"source": "Result", "target": "Dataset"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="COMPARED_AGAINST",
         description="Entity compared to a baseline or alternative",
         source_targets=[{"source": "Method", "target": "Baseline"}, {"source": "Result", "target": "Baseline"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="ACHIEVES",
         description="Method or system achieves a specific result",
         source_targets=[{"source": "Method", "target": "Result"}, {"source": "Method", "target": "Metric"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="EXTENDS",
         description="Entity builds upon or extends prior work",
         source_targets=[{"source": "Method", "target": "Method"}, {"source": "Method", "target": "Baseline"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="CITES",
         description="Entity references another work",
         source_targets=[{"source": "Claim", "target": "Reference"}, {"source": "Method", "target": "Reference"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="PART_OF",
         description="Entity is a component of another entity",
         source_targets=[{"source": "Method", "target": "Method"}, {"source": "Concept", "target": "Method"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="CONTRADICTS",
         description="Entity conflicts with or contradicts another",
         source_targets=[{"source": "Claim", "target": "Claim"}, {"source": "Result", "target": "Result"}],
@@ -219,22 +219,22 @@ _BASE_EDGE_TYPES = [
 ]
 
 _STRUCTURAL_EDGE_TYPES = [
-    OntologyEdgeType(
+    EdgeType(
         name="HAS_SECTION",
         description="Paper contains this section",
         source_targets=[{"source": "Paper", "target": "Section"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="CONTAINS",
         description="Section or entity contains a sub-element",
         source_targets=[{"source": "Paper", "target": "Diagram"}, {"source": "Paper", "target": "Table"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="APPEARS_IN",
         description="Entity appears in a specific section",
         source_targets=[{"source": "Concept", "target": "Section"}, {"source": "Method", "target": "Section"}],
     ),
-    OntologyEdgeType(
+    EdgeType(
         name="ALIAS_OF",
         description="Entity is an abbreviation or alternative name for another",
         source_targets=[{"source": "Concept", "target": "Concept"}, {"source": "Method", "target": "Method"}],
@@ -444,7 +444,7 @@ async def _discover_ontology_single(
     session_id: str | None,
     temperature: float,
     discovery_prompt: str = "",
-) -> PaperOntology:
+) -> Ontology:
     """Single ontology discovery call."""
     prompt = discovery_prompt or _DISCOVER_USER
     user_content = prompt.format(
@@ -472,7 +472,7 @@ async def _discover_with_consistency(
     session_id: str | None,
     n_samples: int = 3,
     discovery_prompt: str = "",
-) -> PaperOntology:
+) -> Ontology:
     """Run N parallel ontology discoveries, keep types that appear in >=2 samples.
 
     Self-consistency (RSC Digital Discovery 2026): types appearing across
@@ -490,9 +490,9 @@ async def _discover_with_consistency(
 
     # Collect all generated types across samples
     entity_votes: Counter = Counter()
-    entity_map: dict[str, OntologyEntityType] = {}
+    entity_map: dict[str, EntityType] = {}
     edge_votes: Counter = Counter()
-    edge_map: dict[str, OntologyEdgeType] = {}
+    edge_map: dict[str, EdgeType] = {}
     domains: list[str] = []
     contributions: list[list[str]] = []
     summaries: list[str] = []
@@ -529,7 +529,7 @@ async def _discover_with_consistency(
 
     if successful == 0:
         logger.warning("All %d ontology discovery samples failed", n_samples)
-        return PaperOntology()
+        return Ontology()
 
     # Threshold: if all 3 succeed, require 2/3 majority.
     # If only 1-2 succeed, accept any type that appeared (better than nothing).
@@ -565,7 +565,7 @@ async def _discover_with_consistency(
         len(confirmed_edges),
     )
 
-    return PaperOntology(
+    return Ontology(
         entity_types=confirmed_entities,
         edge_types=confirmed_edges,
         analysis_summary=summary,
@@ -600,13 +600,13 @@ Output JSON:
 
 
 async def _ground_ontology(
-    ontology: PaperOntology,
+    ontology: Ontology,
     paper_text: str,
     llm_client: LLMClient,
     model: str,
     session_id: str | None,
     grounding_prompt: str = "",
-) -> PaperOntology:
+) -> Ontology:
     """Verify each candidate type has concrete examples in the paper.
 
     Rejects types the LLM cannot find at least 2 examples for.
@@ -719,35 +719,35 @@ def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
 # DomainConfig -> Pydantic model converters
 # ══════════════════════════════════════════════════════════
 
-def _seeds_to_entity_types(seeds: list) -> list[OntologyEntityType]:
-    """Convert SeedEntity dataclasses to OntologyEntityType models."""
+def _seeds_to_entity_types(seeds: list) -> list[EntityType]:
+    """Convert SeedEntity dataclasses to EntityType models."""
     from .types import SeedEntity
     result = []
     for s in seeds:
         if isinstance(s, SeedEntity):
-            result.append(OntologyEntityType(
+            result.append(EntityType(
                 name=s.name,
                 description=s.description,
                 attributes=[OntologyAttribute(**a) for a in s.attributes],
                 examples=s.examples,
             ))
-        elif isinstance(s, OntologyEntityType):
+        elif isinstance(s, EntityType):
             result.append(s)
     return result
 
 
-def _seeds_to_edge_types(seeds: list) -> list[OntologyEdgeType]:
-    """Convert SeedEdge dataclasses to OntologyEdgeType models."""
+def _seeds_to_edge_types(seeds: list) -> list[EdgeType]:
+    """Convert SeedEdge dataclasses to EdgeType models."""
     from .types import SeedEdge
     result = []
     for s in seeds:
         if isinstance(s, SeedEdge):
-            result.append(OntologyEdgeType(
+            result.append(EdgeType(
                 name=s.name,
                 description=s.description,
                 source_targets=s.source_targets,
             ))
-        elif isinstance(s, OntologyEdgeType):
+        elif isinstance(s, EdgeType):
             result.append(s)
     return result
 
@@ -757,9 +757,9 @@ def _seeds_to_edge_types(seeds: list) -> list[OntologyEdgeType]:
 # ══════════════════════════════════════════════════════════
 
 def _validate_ontology(
-    ontology: PaperOntology,
+    ontology: Ontology,
     domain_config: DomainConfig | None = None,
-) -> PaperOntology:
+) -> Ontology:
     """Enforce constraints and merge base + LLM-generated + structural types.
 
     Keeps LLM-generated types that do not duplicate any base type name.
@@ -826,8 +826,8 @@ def _validate_ontology(
 # Ontology -> Extraction Prompt
 # ══════════════════════════════════════════════════════════
 
-def ontology_to_extraction_prompt(ontology: PaperOntology) -> str:
-    """Convert a PaperOntology into a guided extraction prompt.
+def ontology_to_extraction_prompt(ontology: Ontology) -> str:
+    """Convert a Ontology into a guided extraction prompt.
 
     Bridges Phase 0 (ontology) to Phase 1 (extraction). The extraction
     LLM uses the ontology schema to know exactly what entity and relationship
@@ -861,15 +861,15 @@ def ontology_to_extraction_prompt(ontology: PaperOntology) -> str:
 # Parsing helpers
 # ══════════════════════════════════════════════════════════
 
-def _parse_ontology(raw: str) -> PaperOntology:
-    """Parse LLM output into PaperOntology.
+def _parse_ontology(raw: str) -> Ontology:
+    """Parse LLM output into Ontology.
 
     Handles reasoning model output (Nemotron, Qwen-thinking) that wraps
     JSON in <think>...</think> tags, code fences, or plain text preamble.
     """
     if not raw or not raw.strip():
         logger.warning("Empty ontology response")
-        return PaperOntology()
+        return Ontology()
 
     # Strip reasoning tags
     cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
@@ -879,7 +879,7 @@ def _parse_ontology(raw: str) -> PaperOntology:
     try:
         data = json.loads(cleaned)
         if isinstance(data, dict):
-            return PaperOntology(**data)
+            return Ontology(**data)
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
@@ -889,7 +889,7 @@ def _parse_ontology(raw: str) -> PaperOntology:
         try:
             data = json.loads(fence.group(1))
             if isinstance(data, dict):
-                return PaperOntology(**data)
+                return Ontology(**data)
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
@@ -923,20 +923,20 @@ def _parse_ontology(raw: str) -> PaperOntology:
             break
 
     if best_data:
-        return PaperOntology(**best_data)
+        return Ontology(**best_data)
 
     logger.warning(
         "Failed to parse ontology output (%d chars). First 500: %s",
         len(raw), raw[:500],
     )
-    return PaperOntology()
+    return Ontology()
 
 
 # ══════════════════════════════════════════════════════════
 # Main entry point
 # ══════════════════════════════════════════════════════════
 
-async def generate_paper_ontology(
+async def generate_ontology(
     text: str,
     llm_client: LLMClient,
     model: str = "",
@@ -945,7 +945,7 @@ async def generate_paper_ontology(
     metadata: Any | None = None,
     markdown: str = "",
     domain_config: DomainConfig | None = None,
-) -> PaperOntology:
+) -> Ontology:
     """Generate a domain-specific ontology for an academic paper.
 
     Four-step workflow:
@@ -960,11 +960,11 @@ async def generate_paper_ontology(
         model: Which model to use.
         session_id: Optional session ID for cost tracking.
         conference_context: Optional venue context (e.g., "HPDC: HPC conference").
-        metadata: Optional PaperMetadata for structural context.
+        metadata: Optional DocumentMetadata for structural context.
         markdown: Optional structured markdown.
 
     Returns:
-        PaperOntology with grounded, self-consistent entity and edge types.
+        Ontology with grounded, self-consistent entity and edge types.
     """
     # ── Step 1: Domain Detection ──────────────────────────
     abstract = ""
@@ -1004,7 +1004,7 @@ async def generate_paper_ontology(
 
     if not draft.entity_types and not draft.edge_types:
         logger.warning("Ontology discovery produced no types, using base types only")
-        return _validate_ontology(PaperOntology(paper_domain=domain), domain_config=domain_config)
+        return _validate_ontology(Ontology(paper_domain=domain), domain_config=domain_config)
 
     # ── Step 3: Grounding Verification ─────────────────────
     grounding_prompt = domain_config.ontology_grounding_prompt if domain_config else ""

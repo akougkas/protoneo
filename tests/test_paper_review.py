@@ -517,7 +517,7 @@ class TestMarkdownExport:
 
 # ── Paper Metadata Extraction ─────────────────────────────
 
-class TestPaperMetadata:
+class TestDocumentMetadata:
     """Tests for heuristic metadata extraction from academic paper text."""
 
     SAMPLE_PAPER = (

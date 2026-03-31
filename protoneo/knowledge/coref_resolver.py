@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from ..llm.client import LLMClient
-from .paper_graph import PaperGraph
+from .graph import KnowledgeGraph
 
 logger = logging.getLogger("protoneo.knowledge.coref_resolver")
 
@@ -161,7 +161,7 @@ def _find_candidate_pairs(entities: list) -> list[tuple[str, str]]:
 
 
 async def resolve_coreferences(
-    paper_graph: PaperGraph,
+    knowledge_graph: KnowledgeGraph,
     llm_client: LLMClient,
     model: str = "",
     session_id: str | None = None,
@@ -172,7 +172,7 @@ async def resolve_coreferences(
     """
     _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
     entities = [
-        n for n in paper_graph.nodes if n.node_type not in _STRUCTURAL
+        n for n in knowledge_graph.nodes if n.node_type not in _STRUCTURAL
     ]
 
     if len(entities) < 3:
@@ -258,12 +258,12 @@ async def resolve_coreferences(
                 result["aliases"].append(a)
                 seen_aliases.add(key)
 
-    total_before = len(paper_graph.nodes)
+    total_before = len(knowledge_graph.nodes)
     merged_count = 0
     alias_count = 0
 
     # Process merges
-    label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
+    label_to_node = {n.label.lower(): n for n in knowledge_graph.nodes}
     for merge in result.get("merges", []):
         keep_label = merge.get("keep", "")
         keep_node = label_to_node.get(keep_label.lower())
@@ -276,15 +276,15 @@ async def resolve_coreferences(
                 continue
 
             # Redirect edges from remove_node to keep_node
-            for edge in paper_graph.edges:
+            for edge in knowledge_graph.edges:
                 if edge.source_id == remove_node.id:
                     edge.source_id = keep_node.id
                 if edge.target_id == remove_node.id:
                     edge.target_id = keep_node.id
 
             # Remove the duplicate node
-            paper_graph.nodes = [
-                n for n in paper_graph.nodes if n.id != remove_node.id
+            knowledge_graph.nodes = [
+                n for n in knowledge_graph.nodes if n.id != remove_node.id
             ]
             label_to_node.pop(remove_label.lower(), None)
             merged_count += 1
@@ -294,7 +294,7 @@ async def resolve_coreferences(
     seen_edges = set()
     deduped_edges = []
     self_loops_removed = 0
-    for e in paper_graph.edges:
+    for e in knowledge_graph.edges:
         if e.source_id == e.target_id:
             self_loops_removed += 1
             continue
@@ -302,12 +302,12 @@ async def resolve_coreferences(
         if key not in seen_edges:
             deduped_edges.append(e)
             seen_edges.add(key)
-    paper_graph.edges = deduped_edges
+    knowledge_graph.edges = deduped_edges
     if self_loops_removed:
         logger.info("Removed %d self-loop edges after co-ref merge", self_loops_removed)
 
     # Process aliases (create ALIAS_OF edges, do NOT merge)
-    label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
+    label_to_node = {n.label.lower(): n for n in knowledge_graph.nodes}
     for alias in result.get("aliases", []):
         full_name = alias.get("full", "")
         abbrev = alias.get("abbreviation", "")
@@ -315,7 +315,7 @@ async def resolve_coreferences(
         abbrev_node = label_to_node.get(abbrev.lower())
 
         if full_node and abbrev_node and full_node.id != abbrev_node.id:
-            paper_graph.add_edge(
+            knowledge_graph.add_edge(
                 source_id=abbrev_node.id,
                 target_id=full_node.id,
                 edge_type="ALIAS_OF",
@@ -324,11 +324,11 @@ async def resolve_coreferences(
             alias_count += 1
             logger.info("Created ALIAS_OF: '%s' -> '%s'", abbrev, full_name)
 
-    paper_graph.update_stats()
+    knowledge_graph.update_stats()
 
     return {
         "merged": merged_count,
         "aliases_created": alias_count,
         "total_entities_before": total_before,
-        "total_entities_after": len(paper_graph.nodes),
+        "total_entities_after": len(knowledge_graph.nodes),
     }

@@ -85,10 +85,20 @@ class SessionContext:
         self._documents.append(document)
 
 
+class StageCheckpoint(BaseModel):
+    """Durable record of a completed pipeline stage."""
+
+    stage_name: str
+    completed_at: str = ""
+    output_key: str = ""
+    idempotent: bool = True
+
+
 class Session(BaseModel):
     """Persistent session record."""
 
     session_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    schema_version: int = 1
     status: SessionStatus = SessionStatus.CREATED
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -98,18 +108,27 @@ class Session(BaseModel):
     result: dict[str, Any] | None = None
     error: str | None = None
 
-    # Unified paper graph (persisted, survives restart)
-    paper_text: str = ""
-    paper_markdown: str = ""
-    paper_graph: dict[str, Any] | None = None
+    # App ownership (set at session creation, immutable)
+    app_name: str = ""
+    app_version: str = ""
+
+    # Document content (persisted, survives restart)
+    document_text: str = ""
+    document_markdown: str = ""
+    knowledge_graph: dict[str, Any] | None = None
 
     # Pipeline stage tracking
     current_stage: str = ""
+    last_checkpoint: str = ""
+    checkpoints: list[StageCheckpoint] = Field(default_factory=list)
 
     # Step-level pipeline tracking (keys: nlp_prepass, ontology, extract, coref, verify, summarize)
     pipeline_steps: dict[str, Any] = Field(default_factory=dict)
     # Graph snapshots after each pipeline step
     graph_after_step: dict[str, Any] = Field(default_factory=dict)
+
+    # Application-specific storage
+    app_data: dict[str, Any] = Field(default_factory=dict)
 
     # Batch membership
     batch_id: str = ""
@@ -188,11 +207,20 @@ class SessionManager:
     def _session_path(self, session_id: str) -> Path:
         return self._storage_dir / f"{session_id}.json"
 
-    async def create(self, config: dict[str, Any] | None = None) -> Session:
-        session = Session(config=config or {})
+    async def create(
+        self,
+        config: dict[str, Any] | None = None,
+        app_name: str = "",
+        app_version: str = "",
+    ) -> Session:
+        session = Session(
+            config=config or {},
+            app_name=app_name,
+            app_version=app_version,
+        )
         self._save(session)
         self._contexts[session.session_id] = SessionContext(session.session_id)
-        logger.info("Created session %s", session.session_id)
+        logger.info("Created session %s (app=%s)", session.session_id, app_name or "kernel")
         return session
 
     async def get(self, session_id: str) -> Session | None:

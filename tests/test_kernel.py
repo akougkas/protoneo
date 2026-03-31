@@ -1015,11 +1015,11 @@ class TestGraphExtraction:
 
 # ── Paper Ontology Generation ─────────────────────────────
 
-class TestPaperOntology:
+class TestOntology:
     """Tests for the paper-specific ontology generator."""
 
     def test_parse_valid_ontology(self):
-        from protoneo.knowledge.paper_ontology import _parse_ontology
+        from protoneo.knowledge.ontology import _parse_ontology
         raw = json.dumps({
             "entity_types": [
                 {"name": "Method", "description": "Techniques and algorithms", "attributes": [], "examples": ["CNN"]}
@@ -1037,10 +1037,10 @@ class TestPaperOntology:
         assert len(ontology.key_contributions) == 1
 
     def test_validate_adds_fallbacks(self):
-        from protoneo.knowledge.paper_ontology import PaperOntology, OntologyEntityType, _validate_ontology
-        ontology = PaperOntology(
+        from protoneo.knowledge.ontology import Ontology, EntityType, _validate_ontology
+        ontology = Ontology(
             entity_types=[
-                OntologyEntityType(name=f"Type{i}", description=f"Type {i} desc") for i in range(5)
+                EntityType(name=f"Type{i}", description=f"Type {i} desc") for i in range(5)
             ],
         )
         validated = _validate_ontology(ontology)
@@ -1054,10 +1054,10 @@ class TestPaperOntology:
         assert "Equation" in names
 
     def test_validate_caps_at_fifteen(self):
-        from protoneo.knowledge.paper_ontology import PaperOntology, OntologyEntityType, _validate_ontology
-        ontology = PaperOntology(
+        from protoneo.knowledge.ontology import Ontology, EntityType, _validate_ontology
+        ontology = Ontology(
             entity_types=[
-                OntologyEntityType(name=f"Type{i}", description=f"Desc") for i in range(15)
+                EntityType(name=f"Type{i}", description=f"Desc") for i in range(15)
             ],
         )
         validated = _validate_ontology(ontology)
@@ -1065,10 +1065,10 @@ class TestPaperOntology:
         assert len(validated.entity_types) == 18
 
     def test_validate_truncates_descriptions(self):
-        from protoneo.knowledge.paper_ontology import PaperOntology, OntologyEntityType, _validate_ontology
-        ontology = PaperOntology(
+        from protoneo.knowledge.ontology import Ontology, EntityType, _validate_ontology
+        ontology = Ontology(
             entity_types=[
-                OntologyEntityType(name="LongDesc", description="x" * 200),
+                EntityType(name="LongDesc", description="x" * 200),
             ],
         )
         validated = _validate_ontology(ontology)
@@ -1076,10 +1076,10 @@ class TestPaperOntology:
             assert len(et.description) <= 100
 
     def test_ontology_to_extraction_prompt(self):
-        from protoneo.knowledge.paper_ontology import PaperOntology, OntologyEntityType, OntologyEdgeType, OntologyAttribute, ontology_to_extraction_prompt
-        ontology = PaperOntology(
+        from protoneo.knowledge.ontology import Ontology, EntityType, EdgeType, OntologyAttribute, ontology_to_extraction_prompt
+        ontology = Ontology(
             entity_types=[
-                OntologyEntityType(
+                EntityType(
                     name="Method",
                     description="Algorithms and techniques",
                     attributes=[OntologyAttribute(name="complexity", description="Time complexity")],
@@ -1087,7 +1087,7 @@ class TestPaperOntology:
                 ),
             ],
             edge_types=[
-                OntologyEdgeType(
+                EdgeType(
                     name="EVALUATES_ON",
                     description="Method evaluated on dataset",
                     source_targets=[{"source": "Method", "target": "Dataset"}],
@@ -1215,9 +1215,9 @@ class TestSessionPipelineFields:
 
     def test_session_serializes_graph_snapshots(self):
         from protoneo.deliberation.session import Session
-        from protoneo.knowledge.paper_graph import PaperGraph
+        from protoneo.knowledge.graph import KnowledgeGraph
         s = Session()
-        pg = PaperGraph()
+        pg = KnowledgeGraph()
         pg.add_node("TestEntity", "Method")
         s.graph_after_step["extract"] = pg.snapshot()
         data = s.model_dump(mode="json")
@@ -1226,43 +1226,43 @@ class TestSessionPipelineFields:
 
 class TestBaseOntology:
     def test_base_entity_types_count(self):
-        from protoneo.knowledge.paper_ontology import _BASE_ENTITY_TYPES
+        from protoneo.knowledge.ontology import _BASE_ENTITY_TYPES
         assert len(_BASE_ENTITY_TYPES) == 7
         names = {t.name for t in _BASE_ENTITY_TYPES}
         assert names == {"Claim", "Method", "Dataset", "Metric", "Baseline", "Result", "Limitation"}
 
     def test_fallback_entity_types(self):
-        from protoneo.knowledge.paper_ontology import _FALLBACK_ENTITY_TYPES
+        from protoneo.knowledge.ontology import _FALLBACK_ENTITY_TYPES
         assert len(_FALLBACK_ENTITY_TYPES) == 2
         names = {t.name for t in _FALLBACK_ENTITY_TYPES}
         assert names == {"Concept", "Reference"}
 
     def test_structural_entity_types(self):
-        from protoneo.knowledge.paper_ontology import _STRUCTURAL_ENTITY_TYPES
+        from protoneo.knowledge.ontology import _STRUCTURAL_ENTITY_TYPES
         assert len(_STRUCTURAL_ENTITY_TYPES) == 1
         assert _STRUCTURAL_ENTITY_TYPES[0].name == "Equation"
 
     def test_base_edge_types(self):
-        from protoneo.knowledge.paper_ontology import _BASE_EDGE_TYPES
+        from protoneo.knowledge.ontology import _BASE_EDGE_TYPES
         assert len(_BASE_EDGE_TYPES) == 8
         names = {t.name for t in _BASE_EDGE_TYPES}
         expected = {"USES", "EVALUATES_ON", "COMPARED_AGAINST", "ACHIEVES", "EXTENDS", "CITES", "PART_OF", "CONTRADICTS"}
         assert names == expected
 
     def test_structural_edge_types(self):
-        from protoneo.knowledge.paper_ontology import _STRUCTURAL_EDGE_TYPES
+        from protoneo.knowledge.ontology import _STRUCTURAL_EDGE_TYPES
         assert len(_STRUCTURAL_EDGE_TYPES) == 4
         names = {t.name for t in _STRUCTURAL_EDGE_TYPES}
         expected = {"HAS_SECTION", "CONTAINS", "APPEARS_IN", "ALIAS_OF"}
         assert names == expected
 
     def test_validate_deduplicates_base_types(self):
-        from protoneo.knowledge.paper_ontology import PaperOntology, OntologyEntityType, _validate_ontology
+        from protoneo.knowledge.ontology import Ontology, EntityType, _validate_ontology
         # LLM returns "Method" which overlaps with base type
-        ontology = PaperOntology(
+        ontology = Ontology(
             entity_types=[
-                OntologyEntityType(name="Method", description="duplicate"),
-                OntologyEntityType(name="CustomType", description="custom"),
+                EntityType(name="Method", description="duplicate"),
+                EntityType(name="CustomType", description="custom"),
             ],
         )
         validated = _validate_ontology(ontology)
@@ -1270,7 +1270,7 @@ class TestBaseOntology:
         assert method_count == 1  # Only the base type, LLM duplicate removed
 
     def test_base_entity_attributes(self):
-        from protoneo.knowledge.paper_ontology import _BASE_ENTITY_TYPES
+        from protoneo.knowledge.ontology import _BASE_ENTITY_TYPES
         claim = next(t for t in _BASE_ENTITY_TYPES if t.name == "Claim")
         attr_names = {a.name for a in claim.attributes}
         assert "stated_in_section" in attr_names
@@ -1315,13 +1315,13 @@ class TestNLPPrepass:
         assert len(meta.section_texts) > 0
 
 
-class TestPaperGraphNewMethods:
+class TestKnowledgeGraphNewMethods:
     def test_add_ontology_nodes(self):
-        from protoneo.knowledge.paper_graph import PaperGraph
-        from protoneo.knowledge.paper_ontology import PaperOntology
-        pg = PaperGraph()
+        from protoneo.knowledge.graph import KnowledgeGraph
+        from protoneo.knowledge.ontology import Ontology
+        pg = KnowledgeGraph()
         pg.add_node("Test Paper", "Paper", node_id="paper-root")
-        ontology = PaperOntology(key_contributions=["Novel sorting", "Hilbert pivots"])
+        ontology = Ontology(key_contributions=["Novel sorting", "Hilbert pivots"])
         pg.add_ontology_nodes(ontology)
         assert pg.ontology is ontology
         labels = {n.label for n in pg.nodes}
@@ -1332,8 +1332,8 @@ class TestPaperGraphNewMethods:
         assert len(part_of_edges) == 2
 
     def test_get_accumulated_context(self):
-        from protoneo.knowledge.paper_graph import PaperGraph
-        pg = PaperGraph()
+        from protoneo.knowledge.graph import KnowledgeGraph
+        pg = KnowledgeGraph()
         pg.add_node("ScaleSort", "Method", description="A novel sorting algorithm")
         pg.add_node("Frontier", "Dataset", description="Supercomputer benchmark")
         pg.add_node("Introduction", "Section")  # structural, should be skipped
@@ -1343,8 +1343,8 @@ class TestPaperGraphNewMethods:
         assert "Introduction" not in ctx  # structural filtered out
 
     def test_get_accumulated_context_all_entities(self):
-        from protoneo.knowledge.paper_graph import PaperGraph
-        pg = PaperGraph()
+        from protoneo.knowledge.graph import KnowledgeGraph
+        pg = KnowledgeGraph()
         for i in range(100):
             pg.add_node(f"Entity{i}", "Method", description="A" * 60)
         ctx = pg.get_accumulated_context()
@@ -1353,33 +1353,33 @@ class TestPaperGraphNewMethods:
             assert f"Entity{i}" in ctx
 
     def test_snapshot_and_restore(self):
-        from protoneo.knowledge.paper_graph import PaperGraph
-        pg = PaperGraph()
+        from protoneo.knowledge.graph import KnowledgeGraph
+        pg = KnowledgeGraph()
         pg.add_node("TestNode", "Method", description="test")
         pg.add_edge("n1", "n2", "USES")
         snap = pg.snapshot()
         assert isinstance(snap, dict)
         assert "nodes" in snap
-        pg2 = PaperGraph.restore_from_snapshot(snap)
+        pg2 = KnowledgeGraph.restore_from_snapshot(snap)
         assert len(pg2.nodes) == len(pg.nodes)
         assert len(pg2.edges) == len(pg.edges)
 
     def test_ingest_metadata_equations(self):
-        from protoneo.knowledge.paper_graph import PaperGraph
+        from protoneo.knowledge.graph import KnowledgeGraph
         from protoneo.knowledge.metadata import extract_metadata
         text = "Title\nAbstract\nWe use Eq. 1 and Theorem 2.\n1. Introduction\nText.\nReferences\n[1] A paper."
         meta = extract_metadata(text)
-        pg = PaperGraph()
+        pg = KnowledgeGraph()
         pg.ingest_metadata(meta)
         eq_nodes = [n for n in pg.nodes if n.node_type == "Equation"]
         assert len(eq_nodes) == 2
 
     def test_ingest_metadata_references_as_attribute(self):
-        from protoneo.knowledge.paper_graph import PaperGraph
+        from protoneo.knowledge.graph import KnowledgeGraph
         from protoneo.knowledge.metadata import extract_metadata
         text = "Title\nAbstract\nCitation [1].\n1. Intro\nText.\nReferences\n[1] Dean et al., MapReduce, 2004.\n[2] Smith, Sorting, 2020."
         meta = extract_metadata(text)
-        pg = PaperGraph()
+        pg = KnowledgeGraph()
         pg.ingest_metadata(meta)
         # References are stored as attributes on paper root, not individual nodes
         root = pg.node_by_id("paper-root")
@@ -1409,8 +1409,8 @@ class TestCorefResolver:
     @pytest.mark.asyncio
     async def test_resolve_coreferences_small_graph(self):
         from protoneo.knowledge.coref_resolver import resolve_coreferences
-        from protoneo.knowledge.paper_graph import PaperGraph
-        pg = PaperGraph()
+        from protoneo.knowledge.graph import KnowledgeGraph
+        pg = KnowledgeGraph()
         pg.add_node("A", "Method")
         mock_client = AsyncMock()
         stats = await resolve_coreferences(pg, mock_client)
@@ -1441,8 +1441,8 @@ class TestGraphVerifier:
     @pytest.mark.asyncio
     async def test_verify_empty_graph(self):
         from protoneo.knowledge.graph_verifier import verify_graph
-        from protoneo.knowledge.paper_graph import PaperGraph
-        pg = PaperGraph()
+        from protoneo.knowledge.graph import KnowledgeGraph
+        pg = KnowledgeGraph()
         mock_client = AsyncMock()
         result = await verify_graph(pg, "some text", mock_client)
         assert result.entities_added == 0
@@ -1456,17 +1456,17 @@ class TestSectionAwareExtraction:
         assert "{accumulated_context_block}" in _SECTION_PROMPT_TEMPLATE
 
     @pytest.mark.asyncio
-    async def test_extract_with_paper_graph(self):
-        """Section-aware extraction populates the PaperGraph directly."""
-        from protoneo.knowledge.graph_extractor import extract_paper_graph
-        from protoneo.knowledge.paper_graph import PaperGraph
-        from protoneo.knowledge.paper_ontology import PaperOntology, OntologyEntityType
+    async def test_extract_with_knowledge_graph(self):
+        """Section-aware extraction populates the KnowledgeGraph directly."""
+        from protoneo.knowledge.graph_extractor import extract_graph
+        from protoneo.knowledge.graph import KnowledgeGraph
+        from protoneo.knowledge.ontology import Ontology, EntityType
 
-        pg = PaperGraph()
+        pg = KnowledgeGraph()
         pg.add_node("Test Paper", "Paper", node_id="paper-root")
 
-        ontology = PaperOntology(
-            entity_types=[OntologyEntityType(name="Method", description="test")],
+        ontology = Ontology(
+            entity_types=[EntityType(name="Method", description="test")],
         )
 
         mock_client = AsyncMock()
@@ -1476,12 +1476,12 @@ class TestSectionAwareExtraction:
             usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
         )
 
-        result = await extract_paper_graph(
+        result = await extract_graph(
             text="1. Introduction\nScaleSort is a sorting algorithm.\n2. Methods\nWe use Hilbert curves.",
             llm_client=mock_client,
             model="test",
             ontology=ontology,
-            paper_graph=pg,
+            knowledge_graph=pg,
         )
 
         # Graph should have been populated directly
@@ -1490,9 +1490,9 @@ class TestSectionAwareExtraction:
         assert len(method_nodes) >= 1
 
     @pytest.mark.asyncio
-    async def test_extract_without_paper_graph_backward_compat(self):
-        """Without paper_graph, falls back to chunk-based extraction."""
-        from protoneo.knowledge.graph_extractor import extract_paper_graph
+    async def test_extract_without_knowledge_graph_backward_compat(self):
+        """Without knowledge_graph, falls back to chunk-based extraction."""
+        from protoneo.knowledge.graph_extractor import extract_graph
 
         mock_client = AsyncMock()
         mock_client.complete.return_value = LLMResponse(
@@ -1501,7 +1501,7 @@ class TestSectionAwareExtraction:
             usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
         )
 
-        result = await extract_paper_graph(
+        result = await extract_graph(
             text="Test paper text with enough content to extract.",
             llm_client=mock_client,
             model="test",

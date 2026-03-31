@@ -8,7 +8,7 @@ import re
 from pydantic import BaseModel, Field
 
 
-class PaperMetadata(BaseModel):
+class DocumentMetadata(BaseModel):
     """Structured metadata extracted from a parsed academic paper."""
 
     title: str = ""
@@ -430,7 +430,7 @@ def _assign_sections_to_citations(
     return citations
 
 
-def extract_metadata(text: str) -> PaperMetadata:
+def extract_metadata(text: str) -> DocumentMetadata:
     """Extract structured metadata from academic paper text."""
     ref_count, refs = _extract_references(text)
     word_count = len(text.split())
@@ -439,7 +439,7 @@ def extract_metadata(text: str) -> PaperMetadata:
     citations = extract_citation_markers(text)
     citations = _assign_sections_to_citations(sections, text, citations)
 
-    return PaperMetadata(
+    return DocumentMetadata(
         title=_extract_title(text),
         abstract=_extract_abstract(text),
         sections=sections,
@@ -491,7 +491,7 @@ def extract_section_texts(text: str) -> dict[str, str]:
     return merged
 
 
-def build_structural_graph(metadata: "PaperMetadata") -> dict:
+def build_structural_graph(metadata: "DocumentMetadata") -> dict:
     """Build a vanilla structural graph from paper metadata.
 
     No LLM calls. Pure structure: paper title as root, sections as children,
@@ -616,7 +616,7 @@ def extract_section_texts_md(markdown: str) -> dict[str, str]:
     return section_texts
 
 
-def extract_metadata_from_markdown(markdown: str, flat_text: str = "") -> PaperMetadata:
+def extract_metadata_from_markdown(markdown: str, flat_text: str = "") -> DocumentMetadata:
     """Extract metadata from structured markdown produced by Docling.
 
     Parses markdown headers directly for section structure instead of
@@ -655,7 +655,7 @@ def extract_metadata_from_markdown(markdown: str, flat_text: str = "") -> PaperM
     citations = extract_citation_markers(text_for_counts)
     citations = _assign_sections_to_citations(final_sections, text_for_counts, citations)
 
-    return PaperMetadata(
+    return DocumentMetadata(
         title=title,
         abstract=abstract,
         sections=final_sections,

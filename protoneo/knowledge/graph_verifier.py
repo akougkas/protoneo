@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
-from .paper_graph import PaperGraph
+from .graph import KnowledgeGraph
 from .types import DomainConfig
 
 logger = logging.getLogger("protoneo.knowledge.graph_verifier")
@@ -147,7 +147,7 @@ def _parse_verification(raw: str) -> dict:
 
 
 async def verify_graph(
-    paper_graph: PaperGraph,
+    knowledge_graph: KnowledgeGraph,
     paper_text: str,
     llm_client: LLMClient,
     model: str = "",
@@ -168,13 +168,13 @@ async def verify_graph(
     """
     _STRUCTURAL = {"Paper", "Section", "Diagram", "Table"}
 
-    semantic_nodes = [n for n in paper_graph.nodes if n.node_type not in _STRUCTURAL]
+    semantic_nodes = [n for n in knowledge_graph.nodes if n.node_type not in _STRUCTURAL]
     if not semantic_nodes:
         return VerificationResult()
 
     result = VerificationResult()
-    node_map = {n.id: n.label for n in paper_graph.nodes}
-    label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
+    node_map = {n.id: n.label for n in knowledge_graph.nodes}
+    label_to_node = {n.label.lower(): n for n in knowledge_graph.nodes}
 
     # Full entity summary (no cap)
     entity_summary = "\n".join(
@@ -183,7 +183,7 @@ async def verify_graph(
     )
 
     # Full edge summary (no cap)
-    all_edges = paper_graph.edges
+    all_edges = knowledge_graph.edges
     edge_summary = "\n".join(
         f"- {node_map.get(e.source_id, '?')} --{e.edge_type}--> {node_map.get(e.target_id, '?')}"
         for e in all_edges
@@ -191,7 +191,7 @@ async def verify_graph(
 
     # Section list for connectivity pass
     section_list = "\n".join(
-        f"- {n.label}" for n in paper_graph.nodes if n.node_type == "Section"
+        f"- {n.label}" for n in knowledge_graph.nodes if n.node_type == "Section"
     )
 
     # Resolve prompts from domain_config or module defaults
@@ -236,7 +236,7 @@ async def verify_graph(
             src_node = label_to_node.get(src_name.lower())
             tgt_node = label_to_node.get(tgt_name.lower())
             if src_node and tgt_node and src_node.id != tgt_node.id:
-                paper_graph.add_edge(
+                knowledge_graph.add_edge(
                     source_id=src_node.id,
                     target_id=tgt_node.id,
                     edge_type=edge_type,
@@ -257,11 +257,11 @@ async def verify_graph(
     # Refresh entity summaries after pass 1 additions (shared snapshot)
     entity_summary_2 = "\n".join(
         f"- {n.label} ({n.node_type})"
-        for n in paper_graph.nodes if n.node_type not in _STRUCTURAL
+        for n in knowledge_graph.nodes if n.node_type not in _STRUCTURAL
     )
     entity_details_3 = "\n".join(
         f"- {n.label} ({n.node_type}): {n.description}"
-        for n in paper_graph.nodes if n.node_type not in _STRUCTURAL
+        for n in knowledge_graph.nodes if n.node_type not in _STRUCTURAL
     )
 
     async def _pass2_completeness() -> dict:
@@ -310,9 +310,9 @@ async def verify_graph(
     # ── Apply Pass 2 results (Completeness) ──
     if parsed2 is not None:
         try:
-            label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
+            label_to_node = {n.label.lower(): n for n in knowledge_graph.nodes}
             section_name_to_id = {
-                n.label.lower(): n.id for n in paper_graph.nodes if n.node_type == "Section"
+                n.label.lower(): n.id for n in knowledge_graph.nodes if n.node_type == "Section"
             }
             for concept in parsed2.get("missing_concepts", []):
                 if result.entities_added >= 15:
@@ -325,7 +325,7 @@ async def verify_graph(
                 suggested_type = concept.get("suggested_type", "Concept")
                 section = concept.get("section", "")
                 if name and len(name) > 2 and name.lower() not in label_to_node:
-                    new_node = paper_graph.add_node(
+                    new_node = knowledge_graph.add_node(
                         label=name,
                         node_type=suggested_type,
                         description="Found by verification completeness pass",
@@ -342,7 +342,7 @@ async def verify_graph(
                                     sec_id = sid
                                     break
                         if sec_id:
-                            paper_graph.add_edge(
+                            knowledge_graph.add_edge(
                                 source_id=new_node.id,
                                 target_id=sec_id,
                                 edge_type="APPEARS_IN",
@@ -351,7 +351,7 @@ async def verify_graph(
                             linked = True
                             edges_added += 1
                     if not linked:
-                        paper_graph.add_edge(
+                        knowledge_graph.add_edge(
                             source_id=new_node.id,
                             target_id="paper-root",
                             edge_type="PART_OF",
@@ -369,7 +369,7 @@ async def verify_graph(
     if parsed3 is not None:
         try:
             result.grounding_issues = parsed3.get("grounding_issues", [])
-            label_to_node = {n.label.lower(): n for n in paper_graph.nodes}
+            label_to_node = {n.label.lower(): n for n in knowledge_graph.nodes}
             for issue in result.grounding_issues:
                 entity_name = issue.get("entity", "")
                 llm_conf = issue.get("confidence", 0.3)
@@ -383,7 +383,7 @@ async def verify_graph(
         except Exception as e:
             logger.warning("Verification pass 3 (grounding) result processing failed: %s", e)
 
-    paper_graph.update_stats()
+    knowledge_graph.update_stats()
 
     logger.info(
         "Verification complete: %d grounding issues, %d entities added, %d connections added",

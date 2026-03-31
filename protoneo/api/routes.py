@@ -97,13 +97,12 @@ class SessionResponse(BaseModel):
     created_at: str
     result: dict[str, Any] | None = None
     error: str | None = None
-    # Fix 15: Include config, paper stats, and pipeline progress
     config: dict[str, Any] | None = None
-    paper_text_length: int = 0
-    paper_markdown_length: int = 0
+    document_text_length: int = 0
+    document_markdown_length: int = 0
     current_stage: str = ""
     pipeline_steps: dict[str, Any] | None = None
-    paper_graph_stats: dict[str, Any] | None = None
+    knowledge_graph_stats: dict[str, Any] | None = None
 
 
 async def _run_with_events(
@@ -692,13 +691,12 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         session = await _session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        # Fix 15: Compute graph summary stats if paper_graph is present
         graph_stats = None
-        if session.paper_graph:
+        if session.knowledge_graph:
             graph_stats = {
-                "node_count": len(session.paper_graph.get("nodes", [])),
-                "edge_count": len(session.paper_graph.get("edges", [])),
-                "has_summary": bool(session.paper_graph.get("summary")),
+                "node_count": len(session.knowledge_graph.get("nodes", [])),
+                "edge_count": len(session.knowledge_graph.get("edges", [])),
+                "has_summary": bool(session.knowledge_graph.get("summary")),
             }
         return SessionResponse(
             session_id=session.session_id,
@@ -707,11 +705,11 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             result=session.result,
             error=session.error,
             config=session.config or None,
-            paper_text_length=len(session.paper_text),
-            paper_markdown_length=len(session.paper_markdown),
+            document_text_length=len(session.document_text),
+            document_markdown_length=len(session.document_markdown),
             current_stage=session.current_stage,
             pipeline_steps=session.pipeline_steps or None,
-            paper_graph_stats=graph_stats,
+            knowledge_graph_stats=graph_stats,
         )
 
     @app.get("/api/sessions")
@@ -720,11 +718,11 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         items = []
         for s in sessions:
             graph_stats = None
-            if s.paper_graph:
+            if s.knowledge_graph:
                 graph_stats = {
-                    "node_count": len(s.paper_graph.get("nodes", [])),
-                    "edge_count": len(s.paper_graph.get("edges", [])),
-                    "has_summary": bool(s.paper_graph.get("summary")),
+                    "node_count": len(s.knowledge_graph.get("nodes", [])),
+                    "edge_count": len(s.knowledge_graph.get("edges", [])),
+                    "has_summary": bool(s.knowledge_graph.get("summary")),
                 }
             items.append(SessionResponse(
                 session_id=s.session_id,
@@ -733,11 +731,11 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                 result=s.result,
                 error=s.error,
                 config=s.config or None,
-                paper_text_length=len(s.paper_text),
-                paper_markdown_length=len(s.paper_markdown),
+                document_text_length=len(s.document_text),
+                document_markdown_length=len(s.document_markdown),
                 current_stage=s.current_stage,
                 pipeline_steps=s.pipeline_steps or None,
-                paper_graph_stats=graph_stats,
+                knowledge_graph_stats=graph_stats,
             ))
         return {"sessions": items}
 

@@ -29,13 +29,13 @@ from protoneo.config.schema import AgentConfig, DeliberationConfig
 from protoneo.deliberation.session import SessionStatus, StepState
 from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.chunker import chunk_document
-from protoneo.knowledge.graph_extractor import extract_paper_graph
-from protoneo.knowledge.paper_graph import PaperGraph
-from protoneo.knowledge.paper_ontology import generate_paper_ontology
+from protoneo.knowledge.graph_extractor import extract_graph
+from protoneo.knowledge.graph import KnowledgeGraph
+from protoneo.knowledge.ontology import generate_ontology
 from protoneo.knowledge.parser import parse_file
 
 from .conference import ConferenceProfile, list_profiles, load_profile
-from .manifest import domain_config as _domain_config
+from .manifest import domain_config as _domain_config, manifest as _manifest
 from .export import packet_to_markdown, packet_to_pdf
 from .pipeline import (
     _run_graph_pipeline,
@@ -119,9 +119,9 @@ async def _recover_stale_sessions(app: FastAPI) -> None:
             logger.info("Recovered stale session %s (was running, now stopped)", s.session_id)
 
         # Reload graph from session data into in-memory cache
-        if s.paper_graph and s.session_id not in _session_graphs:
+        if s.knowledge_graph and s.session_id not in _session_graphs:
             try:
-                pg = PaperGraph.model_validate(s.paper_graph)
+                pg = KnowledgeGraph.model_validate(s.knowledge_graph)
                 _session_graphs[s.session_id] = pg.to_d3_format()
                 graphs_loaded += 1
             except Exception:
@@ -272,7 +272,9 @@ def register_paper_review_routes(app: FastAPI) -> None:
                     "filename": file.filename,
                     "paper_title": "",
                 },
-            }
+            },
+            app_name=_manifest.name,
+            app_version=_manifest.version,
         )
 
         bus = SessionEventBus()
@@ -387,15 +389,19 @@ def register_paper_review_routes(app: FastAPI) -> None:
             content = await file.read()
             file_path.write_bytes(content)
 
-            session = await _session_manager.create(config={
-                "agents": {k: v.model_dump() for k, v in agent_configs.items()},
-                "metadata": {
-                    "type": "panel_review",
-                    "conference": conference,
-                    "filename": file.filename,
-                    "paper_title": "",
+            session = await _session_manager.create(
+                config={
+                    "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+                    "metadata": {
+                        "type": "panel_review",
+                        "conference": conference,
+                        "filename": file.filename,
+                        "paper_title": "",
+                    },
                 },
-            })
+                app_name=_manifest.name,
+                app_version=_manifest.version,
+            )
             session.batch_id = batch.batch_id
             await _session_manager.update(session)
             session_ids.append(session.session_id)
@@ -525,9 +531,9 @@ def register_paper_review_routes(app: FastAPI) -> None:
                 "pipeline_steps": session.pipeline_steps or {},
                 "current_stage": session.current_stage or "",
             }
-            if session.paper_graph:
+            if session.knowledge_graph:
                 try:
-                    pg = PaperGraph.model_validate(session.paper_graph)
+                    pg = KnowledgeGraph.model_validate(session.knowledge_graph)
                     entry["node_count"] = len(pg.nodes)
                     entry["edge_count"] = len(pg.edges)
                 except Exception:
@@ -641,16 +647,20 @@ def register_paper_review_routes(app: FastAPI) -> None:
                 reviewer_ids=reviewer_ids, max_rounds=max_rounds,
             )
 
-            session = await _session_manager.create(config={
-                "agents": {k: v.model_dump() for k, v in agent_configs.items()},
-                "deliberation": delib_config.model_dump(),
-                "metadata": {
-                    "type": "panel_review",
-                    "conference": conference,
-                    "filename": file.filename,
-                    "paper_title": "",
+            session = await _session_manager.create(
+                config={
+                    "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+                    "deliberation": delib_config.model_dump(),
+                    "metadata": {
+                        "type": "panel_review",
+                        "conference": conference,
+                        "filename": file.filename,
+                        "paper_title": "",
+                    },
                 },
-            })
+                app_name=_manifest.name,
+                app_version=_manifest.version,
+            )
             session.batch_id = batch.batch_id
             await _session_manager.update(session)
             session_ids.append(session.session_id)
@@ -792,8 +802,8 @@ def register_paper_review_routes(app: FastAPI) -> None:
         delib_config = DeliberationConfig(**session.config.get("deliberation", {}))
 
         # Reconstruct document from persisted data
-        doc_text = session.paper_text
-        doc_md = session.paper_markdown or ""
+        doc_text = session.document_text
+        doc_md = session.document_markdown or ""
         filename = session.config.get("metadata", {}).get("filename", "paper.pdf")
         if not doc_text:
             raise HTTPException(status_code=400, detail="No paper text stored. Cannot retry.")
@@ -881,7 +891,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
                 ac = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
                 dc = DeliberationConfig(**session.config.get("deliberation", {}))
 
-                doc_text = session.paper_text
+                doc_text = session.document_text
                 if not doc_text:
                     continue
 
@@ -890,7 +900,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
                     document_id=uuid.uuid4().hex,
                     filename=session.config.get("metadata", {}).get("filename", "paper.pdf"),
                     text=doc_text,
-                    markdown=session.paper_markdown or "",
+                    markdown=session.document_markdown or "",
                 )
 
                 model_map_raw = {}
@@ -966,7 +976,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if not session.paper_graph:
+        if not session.knowledge_graph:
             raise HTTPException(status_code=400, detail="Session has no graph. Build or import a graph first.")
 
         # Allow overriding conference for the review
@@ -1001,12 +1011,12 @@ def register_paper_review_routes(app: FastAPI) -> None:
                 max_rounds=body.max_rounds if body and body.max_rounds else 2,
             )
 
-        pg = PaperGraph.model_validate(session.paper_graph)
+        pg = KnowledgeGraph.model_validate(session.knowledge_graph)
 
         ctx = _session_manager.get_context(session_id)
-        doc_text = session.paper_text or (ctx.documents[0].text if ctx.documents else "")
+        doc_text = session.document_text or (ctx.documents[0].text if ctx.documents else "")
 
-        doc_markdown = session.paper_markdown or ""
+        doc_markdown = session.document_markdown or ""
         doc_proxy = _MinimalDoc(doc_text, doc_markdown, session.config.get("metadata", {}).get("filename", "paper.pdf"))
         user_message = build_user_message(doc_proxy, profile)
         enriched_message = user_message + pg.summary
@@ -1042,7 +1052,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
 
                 sess = await _session_manager.get(sid)
                 if sess:
-                    sess.paper_graph = pg.model_dump(mode="json")
+                    sess.knowledge_graph = pg.model_dump(mode="json")
                     sess.current_stage = "review"
                     sess.status = SessionStatus.COMPLETED
                     await _session_manager.update(sess)
@@ -1082,11 +1092,11 @@ def register_paper_review_routes(app: FastAPI) -> None:
     def _build_review_context(session) -> str:
         """Assemble full context from paper, graph, and reviewer outputs."""
         parts = []
-        paper_md = session.paper_markdown or session.paper_text
+        paper_md = session.document_markdown or session.document_text
         if paper_md:
             parts.append(f"## Paper Content\n\n{paper_md}")
-        if session.paper_graph:
-            gs = session.paper_graph.get("summary", "")
+        if session.knowledge_graph:
+            gs = session.knowledge_graph.get("summary", "")
             if gs:
                 parts.append(f"## Knowledge Graph Summary\n\n{gs}")
         phases = session.result.get("phases", [])
@@ -1275,20 +1285,20 @@ def register_paper_review_routes(app: FastAPI) -> None:
 
     @app.get("/api/sessions/{session_id}/graph/export")
     async def export_graph(session_id: str):
-        """Export the session's PaperGraph as a standalone JSON file."""
+        """Export the session's KnowledgeGraph as a standalone JSON file."""
         _session_manager = get_session_manager()
         session = await _session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        if not session.paper_graph:
+        if not session.knowledge_graph:
             raise HTTPException(status_code=404, detail="No graph to export")
 
         export_data = {
             "schema_version": 1,
             "paper_title": session.config.get("metadata", {}).get("paper_title", ""),
             "conference": session.config.get("metadata", {}).get("conference", ""),
-            "graph": session.paper_graph,
-            "paper_markdown": session.paper_markdown or session.paper_text,
+            "graph": session.knowledge_graph,
+            "document_markdown": session.document_markdown or session.document_text,
         }
 
         filename = f"graph-{session_id[:8]}.json"
@@ -1323,16 +1333,16 @@ def register_paper_review_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail="Invalid JSON in graph file")
 
         if "graph" in graph_data and "schema_version" in graph_data:
-            paper_graph_dict = graph_data["graph"]
+            graph_dict = graph_data["graph"]
             paper_title = graph_data.get("paper_title", "")
-            imported_paper_markdown = graph_data.get("paper_markdown", "")
+            imported_markdown = graph_data.get("document_markdown", graph_data.get("paper_markdown", ""))
         else:
-            paper_graph_dict = graph_data
+            graph_dict = graph_data
             paper_title = ""
-            imported_paper_markdown = ""
+            imported_markdown = ""
 
         try:
-            pg = PaperGraph.model_validate(paper_graph_dict)
+            pg = KnowledgeGraph.model_validate(graph_dict)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid graph data: {e}")
 
@@ -1351,30 +1361,34 @@ def register_paper_review_routes(app: FastAPI) -> None:
             reviewer_ids=reviewer_ids, max_rounds=max_rounds,
         )
 
-        session = await _session_manager.create(config={
-            "agents": {k: v.model_dump() for k, v in agent_configs.items()},
-            "deliberation": delib_config.model_dump(),
-            "metadata": {
-                "type": "panel_review",
-                "conference": conference,
-                "filename": graph_data.get("paper_title", "imported-graph"),
-                "paper_title": paper_title,
+        session = await _session_manager.create(
+            config={
+                "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+                "deliberation": delib_config.model_dump(),
+                "metadata": {
+                    "type": "panel_review",
+                    "conference": conference,
+                    "filename": graph_data.get("paper_title", "imported-graph"),
+                    "paper_title": paper_title,
+                },
             },
-        })
-        session.paper_graph = paper_graph_dict
-        session.paper_markdown = imported_paper_markdown
-        session.paper_text = imported_paper_markdown
+            app_name=_manifest.name,
+            app_version=_manifest.version,
+        )
+        session.knowledge_graph = graph_dict
+        session.document_markdown = imported_markdown
+        session.document_text = imported_markdown
         session.graph_source = "imported"
         if not pg.summary:
-            pg.summary = pg.to_reviewer_summary()
-            session.paper_graph = pg.model_dump(mode="json")
+            pg.summary = pg.to_agent_briefing()
+            session.knowledge_graph = pg.model_dump(mode="json")
         await _session_manager.update(session)
 
         # Build enriched message with paper content (not just graph summary)
-        if imported_paper_markdown:
+        if imported_markdown:
             enriched_message = (
                 f"{'=' * 60}\nMANUSCRIPT\n{'=' * 60}\n\n"
-                + imported_paper_markdown
+                + imported_markdown
                 + "\n\n" + pg.summary
             )
         else:
@@ -1409,7 +1423,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
 
                 sess = await _session_manager.get(sid)
                 if sess:
-                    sess.paper_graph = pg.model_dump(mode="json")
+                    sess.knowledge_graph = pg.model_dump(mode="json")
                     sess.current_stage = "review"
                     sess.status = SessionStatus.COMPLETED
                     await _session_manager.update(sess)
@@ -1446,12 +1460,12 @@ def register_paper_review_routes(app: FastAPI) -> None:
         session = await _session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        if not session.paper_graph:
+        if not session.knowledge_graph:
             raise HTTPException(status_code=404, detail="No graph for this session")
         if not session.result:
             raise HTTPException(status_code=409, detail="Session has no review results yet")
 
-        pg = PaperGraph.model_validate(session.paper_graph)
+        pg = KnowledgeGraph.model_validate(session.knowledge_graph)
 
         reviews = []
         for phase in session.result.get("phases", []):
@@ -1510,9 +1524,9 @@ def register_paper_review_routes(app: FastAPI) -> None:
         prov_args = _extract_provenance_args(session)
         packet = result_to_packet(result, profile, paper_title, final_review=final_review, **prov_args)
 
-        if session.paper_graph:
+        if session.knowledge_graph:
             try:
-                pg = PaperGraph.model_validate(session.paper_graph)
+                pg = KnowledgeGraph.model_validate(session.knowledge_graph)
                 packet.graph_summary = pg.summary
                 packet.graph_node_count = len(pg.nodes)
                 packet.graph_edge_count = len(pg.edges)
@@ -1656,7 +1670,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
                 pass
 
         doc = context.documents[0]
-        ontology = await generate_paper_ontology(
+        ontology = await generate_ontology(
             doc.text, _llm_client, model=model,
             session_id=session_id, conference_context=conference_context,
             domain_config=_domain_config,
@@ -1719,14 +1733,14 @@ def register_paper_review_routes(app: FastAPI) -> None:
             _event_buses[session_id] = bus
 
         step_idx = valid_steps.index(step_name)
-        paper_graph = PaperGraph()
+        paper_graph = KnowledgeGraph()
         if step_idx > 0:
             prev_step = valid_steps[step_idx - 1]
             prev_snapshot = session.graph_after_step.get(prev_step)
             if prev_snapshot:
-                paper_graph = PaperGraph.restore_from_snapshot(prev_snapshot)
-            elif session.paper_graph:
-                paper_graph = PaperGraph.model_validate(session.paper_graph)
+                paper_graph = KnowledgeGraph.restore_from_snapshot(prev_snapshot)
+            elif session.knowledge_graph:
+                paper_graph = KnowledgeGraph.model_validate(session.knowledge_graph)
 
         import time as _time
         step_state = StepState(status="running", started_at=_time.time())
@@ -1897,7 +1911,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
     @app.post("/api/sessions/{session_id}/pipeline/edit-ontology")
     async def pipeline_edit_ontology(session_id: str, body: OntologyEdit):
         """Edit the generated ontology before advancing past it."""
-        from protoneo.knowledge.paper_ontology import OntologyEntityType, OntologyEdgeType
+        from protoneo.knowledge.ontology import EntityType, EdgeType
         _event_buses = get_event_buses()
 
         ontology = _session_ontologies.get(session_id)
@@ -1905,9 +1919,9 @@ def register_paper_review_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="No ontology for this session")
 
         if body.edited_entity_types is not None:
-            ontology.entity_types = [OntologyEntityType(**et) for et in body.edited_entity_types]
+            ontology.entity_types = [EntityType(**et) for et in body.edited_entity_types]
         if body.edited_edge_types is not None:
-            ontology.edge_types = [OntologyEdgeType(**rt) for rt in body.edited_edge_types]
+            ontology.edge_types = [EdgeType(**rt) for rt in body.edited_edge_types]
         _session_ontologies[session_id] = ontology
 
         bus = _event_buses.get(session_id)
@@ -1945,7 +1959,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
         ontology = _session_ontologies.get(session_id)
 
         doc = context.documents[0]
-        graph_data = await extract_paper_graph(
+        graph_data = await extract_graph(
             doc.text, _llm_client, model=model,
             session_id=session_id, on_progress=on_progress,
             ontology=ontology,
@@ -1964,9 +1978,9 @@ def register_paper_review_routes(app: FastAPI) -> None:
         _session_manager = get_session_manager()
 
         session = await _session_manager.get(session_id)
-        if session and session.paper_graph:
+        if session and session.knowledge_graph:
             try:
-                pg = PaperGraph.model_validate(session.paper_graph)
+                pg = KnowledgeGraph.model_validate(session.knowledge_graph)
                 d3 = pg.to_d3_format()
                 d3["stats"] = pg.graph_stats()
                 return d3
@@ -1986,7 +2000,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
         from protoneo.knowledge.metadata import extract_metadata
         doc = context.documents[0]
         metadata = extract_metadata(doc.text)
-        pg = PaperGraph()
+        pg = KnowledgeGraph()
         pg.ingest_metadata(metadata)
         return pg.to_d3_format()
 
@@ -2003,7 +2017,7 @@ def register_paper_review_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail=f"No graph snapshot for step '{step_name}'")
 
         try:
-            pg = PaperGraph.restore_from_snapshot(snapshot)
+            pg = KnowledgeGraph.restore_from_snapshot(snapshot)
             return {**pg.to_d3_format(), "stats": pg.graph_stats()}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to restore graph: {e}")
@@ -2016,13 +2030,13 @@ def register_paper_review_routes(app: FastAPI) -> None:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if not session.paper_graph:
+        if not session.knowledge_graph:
             raise HTTPException(status_code=404, detail="No graph built yet")
 
         try:
-            pg = PaperGraph.model_validate(session.paper_graph)
+            pg = KnowledgeGraph.model_validate(session.knowledge_graph)
             return {
-                "summary": pg.to_reviewer_summary(),
+                "summary": pg.to_agent_briefing(),
                 "stats": pg.graph_stats(),
             }
         except Exception as e:

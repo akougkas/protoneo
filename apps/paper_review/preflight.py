@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from protoneo.knowledge.metadata import PaperMetadata, extract_metadata
+from protoneo.knowledge.metadata import DocumentMetadata, extract_metadata
 from .conference import ConferenceProfile
 
 
@@ -32,7 +32,7 @@ class PreflightResult(BaseModel):
     pass_count: int = 0
     warn_count: int = 0
     block_count: int = 0
-    metadata: PaperMetadata | None = None
+    metadata: DocumentMetadata | None = None
 
     @property
     def can_proceed(self) -> bool:

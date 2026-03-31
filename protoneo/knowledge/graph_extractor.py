@@ -8,7 +8,7 @@ all previously completed batches. Within a batch, sections are extracted
 in parallel via asyncio.gather(), dispatched round-robin across multiple
 model endpoints (e.g., 4 LM Studio inference slots + mini server).
 
-Each batch's results merge into the PaperGraph before the next batch
+Each batch's results merge into the KnowledgeGraph before the next batch
 begins, so later batches see all entities from earlier batches.
 No separate reduce step. No graph replacement.
 
@@ -28,8 +28,8 @@ from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
 from .metadata import extract_section_texts, extract_section_texts_md
-from .paper_graph import PaperGraph
-from .paper_ontology import PaperOntology, ontology_to_extraction_prompt
+from .graph import KnowledgeGraph
+from .ontology import Ontology, ontology_to_extraction_prompt
 
 logger = logging.getLogger("protoneo.knowledge.graph_extractor")
 
@@ -260,7 +260,7 @@ def _salvage_truncated_json(raw: str) -> ExtractedGraph | None:
     return None
 
 
-def _validate_against_ontology(graph: ExtractedGraph, ontology: PaperOntology) -> ExtractedGraph:
+def _validate_against_ontology(graph: ExtractedGraph, ontology: Ontology) -> ExtractedGraph:
     """Coerce extracted entity types to match ontology schema."""
     valid_types = {et.name for et in ontology.entity_types}
     if not valid_types:
@@ -539,21 +539,21 @@ def _split_subsections(section_name: str, section_text: str) -> list[tuple[str, 
     return chunks if chunks else [(section_name, section_text)]
 
 
-async def extract_paper_graph(
+async def extract_graph(
     text: str,
     llm_client: LLMClient,
     model: str = "",
     session_id: str | None = None,
     on_progress: EventCallback = None,
-    ontology: PaperOntology | None = None,
-    paper_graph: "PaperGraph | None" = None,
+    ontology: Ontology | None = None,
+    knowledge_graph: "KnowledgeGraph | None" = None,
     batch_size: int = 4,
     models: list[str] | None = None,
     markdown: str = "",
 ) -> dict[str, Any]:
     """Extract a knowledge graph from an academic paper.
 
-    When paper_graph is provided, uses batch-parallel section extraction:
+    When knowledge_graph is provided, uses batch-parallel section extraction:
     sections are grouped into batches of ``batch_size`` and extracted in
     parallel within each batch via asyncio.gather(). All sections in a
     batch share the same accumulated context snapshot from prior batches.
@@ -564,7 +564,7 @@ async def extract_paper_graph(
     headers) for finer-grained extraction. Also auto-creates APPEARS_IN
     edges linking each extracted entity to its source section node.
 
-    When paper_graph is None, falls back to chunk-based extraction for
+    When knowledge_graph is None, falls back to chunk-based extraction for
     backward compatibility (no reduce step, just accumulation).
     """
     # Build ontology guide
@@ -577,8 +577,8 @@ async def extract_paper_graph(
             "Relationship types: USES, EVALUATES_ON, ACHIEVES, OUTPERFORMS, EXTENDS, COMPONENT_OF, SUPPORTS"
         )
 
-    # ── Batch-parallel section path (PaperGraph provided) ──
-    if paper_graph is not None:
+    # ── Batch-parallel section path (KnowledgeGraph provided) ──
+    if knowledge_graph is not None:
         # Prefer markdown section texts when available
         if markdown:
             section_texts = extract_section_texts_md(markdown)
@@ -658,16 +658,16 @@ async def extract_paper_graph(
                 return section_name, ExtractedGraph()
 
         def _ingest_result(section_name: str, section_graph: ExtractedGraph) -> int:
-            """Merge extraction results into paper_graph. Returns nodes added.
+            """Merge extraction results into knowledge_graph. Returns nodes added.
 
             Auto-creates APPEARS_IN edges from each new entity to the
             section node, bridging the structural and semantic subgraphs.
             """
-            nodes_before = len(paper_graph.nodes)
+            nodes_before = len(knowledge_graph.nodes)
             name_to_id = {}
             new_node_ids = []
             for e in section_graph.entities:
-                node = paper_graph.add_node(
+                node = knowledge_graph.add_node(
                     label=e.name,
                     node_type=e.type,
                     description=e.description,
@@ -676,12 +676,12 @@ async def extract_paper_graph(
                 name_to_id[e.name] = node.id
                 new_node_ids.append(node.id)
 
-            label_to_id = {n.label.lower(): n.id for n in paper_graph.nodes}
+            label_to_id = {n.label.lower(): n.id for n in knowledge_graph.nodes}
             for r in section_graph.relationships:
                 src_id = label_to_id.get(r.source.lower()) or name_to_id.get(r.source)
                 tgt_id = label_to_id.get(r.target.lower()) or name_to_id.get(r.target)
                 if src_id and tgt_id:
-                    paper_graph.add_edge(
+                    knowledge_graph.add_edge(
                         source_id=src_id, target_id=tgt_id,
                         edge_type=r.type, description=r.description,
                         source_text=section_name,
@@ -691,7 +691,7 @@ async def extract_paper_graph(
             # Use the base section name (before " > subsection") for matching.
             base_section = section_name.split(" > ")[0] if " > " in section_name else section_name
             sec_node = None
-            for n in paper_graph.nodes:
+            for n in knowledge_graph.nodes:
                 if n.node_type == "Section" and (
                     n.label.lower() == base_section.lower()
                     or base_section.lower() in n.label.lower()
@@ -702,16 +702,16 @@ async def extract_paper_graph(
             if sec_node:
                 _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
                 for nid in new_node_ids:
-                    node = paper_graph.node_by_id(nid)
+                    node = knowledge_graph.node_by_id(nid)
                     if node and node.node_type not in _STRUCTURAL:
-                        paper_graph.add_edge(
+                        knowledge_graph.add_edge(
                             source_id=nid,
                             target_id=sec_node.id,
                             edge_type="APPEARS_IN",
                             description=f"extracted from {section_name}",
                         )
 
-            return len(paper_graph.nodes) - nodes_before
+            return len(knowledge_graph.nodes) - nodes_before
 
         # Process sections in batches
         processed = 0
@@ -719,14 +719,14 @@ async def extract_paper_graph(
             batch = sections[batch_start:batch_start + batch_size]
 
             # Snapshot context from all previously processed sections
-            accumulated_ctx = paper_graph.get_accumulated_context()
+            accumulated_ctx = knowledge_graph.get_accumulated_context()
 
             if on_progress:
                 on_progress("graph_progress", {
                     "phase": "extracting",
                     "message": f"Extracting batch {batch_start // batch_size + 1} ({len(batch)} sections)...",
-                    "node_count": len(paper_graph.nodes),
-                    "edge_count": len(paper_graph.edges),
+                    "node_count": len(knowledge_graph.nodes),
+                    "edge_count": len(knowledge_graph.edges),
                     "section": processed + 1,
                     "total_sections": total_sections,
                 })
@@ -749,12 +749,12 @@ async def extract_paper_graph(
             logger.info(
                 "Batch %d: %d sections, +%d nodes (total: %d nodes, %d edges)",
                 batch_start // batch_size + 1, len(batch), batch_nodes,
-                len(paper_graph.nodes), len(paper_graph.edges),
+                len(knowledge_graph.nodes), len(knowledge_graph.edges),
             )
 
             # Emit live graph update after each batch
             if on_progress:
-                d3 = paper_graph.to_d3_format()
+                d3 = knowledge_graph.to_d3_format()
                 on_progress("graph_updated", {
                     "node_count": len(d3["nodes"]),
                     "edge_count": len(d3["edges"]),
@@ -764,21 +764,21 @@ async def extract_paper_graph(
                     "total_sections": total_sections,
                 })
 
-        paper_graph.update_stats()
-        graph_data = paper_graph.to_d3_format()
+        knowledge_graph.update_stats()
+        graph_data = knowledge_graph.to_d3_format()
 
         if on_progress:
             on_progress("graph_progress", {
                 "phase": "complete",
-                "message": f"Graph complete: {len(paper_graph.nodes)} nodes, {len(paper_graph.edges)} edges",
-                "node_count": len(paper_graph.nodes),
-                "edge_count": len(paper_graph.edges),
+                "message": f"Graph complete: {len(knowledge_graph.nodes)} nodes, {len(knowledge_graph.edges)} edges",
+                "node_count": len(knowledge_graph.nodes),
+                "edge_count": len(knowledge_graph.edges),
             })
 
-        logger.info("Final graph: %d nodes, %d edges", len(paper_graph.nodes), len(paper_graph.edges))
+        logger.info("Final graph: %d nodes, %d edges", len(knowledge_graph.nodes), len(knowledge_graph.edges))
         return graph_data
 
-    # ── Fallback: chunk-based extraction (no PaperGraph) ──
+    # ── Fallback: chunk-based extraction (no KnowledgeGraph) ──
     chunks = _chunk_text(text)
     total_chunks = len(chunks)
     logger.info("Chunk-based fallback extraction: %d chunks", total_chunks)
