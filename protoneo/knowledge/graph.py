@@ -16,7 +16,7 @@ from .ontology import Ontology
 
 
 class GraphAnnotation(BaseModel):
-    """An annotation added by a reviewer or during deliberation."""
+    """An annotation added by an agent or during deliberation."""
 
     agent_id: str
     annotation_type: str  # "strength", "weakness", "question", "consensus"
@@ -25,7 +25,7 @@ class GraphAnnotation(BaseModel):
 
 
 class GraphNode(BaseModel):
-    """A node in the paper graph."""
+    """A node in the knowledge graph."""
 
     id: str = Field(default_factory=lambda: _uuid.uuid4().hex[:12])
     label: str
@@ -39,7 +39,7 @@ class GraphNode(BaseModel):
 
 
 class GraphEdge(BaseModel):
-    """A directed edge in the paper graph."""
+    """A directed edge in the knowledge graph."""
 
     source_id: str
     target_id: str
@@ -325,7 +325,7 @@ class KnowledgeGraph(BaseModel):
 
         # Store references as metadata on the paper root, not as individual nodes.
         # Individual Reference nodes bloat the graph (50+ entries) without adding
-        # semantic value for reviewers. The reference count is already an attribute.
+        # semantic value for agents. The reference count is already an attribute.
         if hasattr(metadata, 'references') and metadata.references:
             root_node = self.node_by_id("paper-root")
             if root_node:
@@ -403,7 +403,6 @@ class KnowledgeGraph(BaseModel):
         and a numeric 'group' for D3 force-graph coloring, in addition to the
         standard 'labels' array.
         """
-        # Fix 4: Build stable type-to-group mapping for D3 coloring
         all_types = sorted({n.node_type for n in self.nodes})
         type_to_group = {t: i for i, t in enumerate(all_types)}
 
@@ -472,7 +471,7 @@ class KnowledgeGraph(BaseModel):
         stats = self.graph_stats()
 
         lines = [
-            f"\n\n## Paper Knowledge Graph Review Briefing"
+            f"\n\n## Knowledge Graph Briefing"
             f" ({stats['semantic_entities']} entities, "
             f"{stats['connectivity_ratio']:.0%} connected)\n"
         ]
@@ -747,7 +746,7 @@ class KnowledgeGraph(BaseModel):
     def prune_orphans(self) -> int:
         """Remove semantic entities with no edges. Returns count removed.
 
-        Orphaned entities add noise without helping reviewers. Structural
+        Orphaned entities add noise without helping agents. Structural
         nodes (Paper, Section, etc.) are never pruned.
         """
         _KEEP = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}

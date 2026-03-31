@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 from protoneo.api.routes import (
     PipelineControl,
     SessionEventBus,
-    get_engine,
     get_event_buses,
     get_llm_client,
     get_pipeline_controls,

@@ -1,7 +1,7 @@
 """
 Pipeline orchestration for Paper Review.
 
-Contains the main 7-step graph pipeline, review stage orchestration,
+Contains the kernel graph pipeline invocation, review stage orchestration,
 and PC Chair review generation.
 """
 
@@ -133,7 +133,6 @@ def _parse_final_review(raw: str) -> dict[str, Any]:
     Handles markdown code fences, leading/trailing text, and malformed JSON.
     Falls back to treating the raw output as comments_for_authors.
     """
-    # Fix 5: Use shared fence stripping
     cleaned = strip_json_fences(raw)
 
     # Try direct parse first
@@ -342,10 +341,10 @@ async def _run_graph_pipeline(
     graph_only: bool = False,
     skip_graph: bool = False,
 ) -> None:
-    """Run the pre-review graph pipeline (Steps 1-7), optionally followed by review.
+    """Run the pre-review graph pipeline, optionally followed by review.
 
-    When graph_only=True: runs Steps 1-7, sets session.status = "completed", returns.
-    When graph_only=False: runs Steps 1-7, waits at gate, then runs review stage.
+    When graph_only=True: runs the graph pipeline, sets session.status = "completed", returns.
+    When graph_only=False: runs the graph pipeline, waits at gate, then runs review stage.
     """
     from protoneo.knowledge.metadata import extract_metadata, extract_metadata_from_markdown
     from protoneo.api.routes import get_pipeline_controls
@@ -358,7 +357,6 @@ async def _run_graph_pipeline(
         session = await _session_manager.get(sid)
         if session:
             session.status = SessionStatus.RUNNING
-            # Fix 3: Persist all session data immediately so it survives restarts
             session.document_text = doc.text
             session.document_markdown = doc.markdown or ""
             session.config["agents"] = {k: v.model_dump() for k, v in agent_configs.items()}
@@ -371,11 +369,9 @@ async def _run_graph_pipeline(
         paper_graph = KnowledgeGraph()
 
         # ════════════════════════════════════════════════
-        # Skip-graph fast path: ingest metadata only, skip Steps 1-7
+        # Skip-graph fast path: ingest metadata only
         # ════════════════════════════════════════════════
         if skip_graph:
-            from protoneo.knowledge.metadata import extract_metadata, extract_metadata_from_markdown
-
             if doc.markdown:
                 metadata = extract_metadata_from_markdown(doc.markdown, doc.text)
             else:

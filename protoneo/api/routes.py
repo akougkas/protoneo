@@ -15,7 +15,6 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from ..agents.types import Document
 from ..config.schema import AgentConfig, AppManifest, DeliberationConfig, ProtoNeoConfig
 from ..deliberation.engine import DeliberationEngine
 from ..deliberation.session import SessionManager, SessionStatus, StepState
@@ -32,8 +31,6 @@ from .pipeline_control import PipelineControl
 logger = logging.getLogger("protoneo.api")
 
 
-# Keep SessionEventBus and PipelineControl importable from this module
-# for backward compatibility with existing consumers.
 __all__ = [
     "SessionEventBus",
     "PipelineControl",
@@ -852,7 +849,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         bus = _event_buses.get(session_id)
 
-        if not bus and session.status in (SessionStatus.FAILED, "failed"):
+        if not bus and session.status == SessionStatus.FAILED:
             await websocket.send_json({"type": "error", "detail": session.error or "Unknown error"})
             await websocket.close()
             return
@@ -864,7 +861,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         # For already-completed sessions, send the terminal event immediately
         # but keep the connection open for post-review chat streaming.
-        if session.status in (SessionStatus.COMPLETED, "completed"):
+        if session.status == SessionStatus.COMPLETED:
             await websocket.send_json({"type": "completed", "result": session.result})
 
         queue = bus.subscribe()
@@ -877,8 +874,8 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                     if msg.get("action") == "start":
                         current = await _session_manager.get(session_id)
                         if current and current.status not in (
-                            SessionStatus.RUNNING, "running",
-                            SessionStatus.COMPLETED, "completed",
+                            SessionStatus.RUNNING,
+                            SessionStatus.COMPLETED,
                         ):
                             cfg = current.config
                             ac = {k: AgentConfig(**v) for k, v in cfg.get("agents", {}).items()}
@@ -886,7 +883,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                             asyncio.create_task(
                                 _run_with_events(session_id, ac, dc, msg.get("message", ""), bus)
                             )
-            except (WebSocketDisconnect, Exception):
+            except Exception:
                 pass
 
         read_task = asyncio.create_task(read_client())

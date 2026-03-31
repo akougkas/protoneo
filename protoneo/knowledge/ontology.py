@@ -1,27 +1,27 @@
-"""Multi-step paper ontology workflow for academic review.
+"""Multi-step ontology generation for domain-specific knowledge graphs.
 
-Adapted from MiroFish's ontology-first pattern. Instead of social media actors,
-this generates a domain-specific schema of entity types and relationship types
-tailored to what reviewers need to evaluate in a specific academic submission.
+Generates a schema of entity types and relationship types tailored to a
+specific document, using LLM-driven discovery with self-consistency and
+grounding verification.
 
 Architecture (inspired by ODKE+, OntoKGen, Ontogenia ESWC 2024):
 
   Step 1: Domain Detection + Pattern Seeding (no LLM, fast)
-    Classify paper domain from abstract keywords, load seed pattern.
+    Classify document domain from abstract keywords, load seed pattern.
 
   Step 2: Ontology Discovery (LLM, self-consistent)
     Run N parallel generations, keep types appearing in >=2 of N samples.
 
   Step 3: Ontology Grounding (LLM, focused)
-    Verify each candidate type has concrete examples in the paper.
+    Verify each candidate type has concrete examples in the document.
     Reject ungrounded types.
 
   Step 4: Merge + Validate (no LLM)
     Merge grounded types with base types, generate extraction prompt.
 
-The ontology runs as Phase 0 before graph extraction. It tells the extractor
-what entity types and relationships are relevant for this specific paper,
-producing a more focused and grounded knowledge graph.
+Runs as Phase 0 before graph extraction. The resulting ontology tells the
+extractor what entity and relationship types to extract, producing a more
+focused and grounded knowledge graph.
 """
 
 import asyncio
@@ -61,7 +61,7 @@ class EdgeType(BaseModel):
 
 
 class Ontology(BaseModel):
-    """Domain-specific ontology generated for a specific paper."""
+    """Domain-specific ontology generated for a specific document."""
     entity_types: list[EntityType] = Field(default_factory=list)
     edge_types: list[EdgeType] = Field(default_factory=list)
     analysis_summary: str = ""
@@ -827,11 +827,11 @@ def _validate_ontology(
 # ══════════════════════════════════════════════════════════
 
 def ontology_to_extraction_prompt(ontology: Ontology) -> str:
-    """Convert a Ontology into a guided extraction prompt.
+    """Convert an Ontology into a guided extraction prompt.
 
     Bridges Phase 0 (ontology) to Phase 1 (extraction). The extraction
     LLM uses the ontology schema to know exactly what entity and relationship
-    types to extract from the paper.
+    types to extract from the document.
     """
     entity_section = []
     for et in ontology.entity_types:
@@ -946,7 +946,7 @@ async def generate_ontology(
     markdown: str = "",
     domain_config: DomainConfig | None = None,
 ) -> Ontology:
-    """Generate a domain-specific ontology for an academic paper.
+    """Generate a domain-specific ontology for a document.
 
     Four-step workflow:
       1. Domain detection + pattern seeding (no LLM)
@@ -955,7 +955,7 @@ async def generate_ontology(
       4. Merge with base types + validate
 
     Args:
-        text: Full paper text.
+        text: Full document text.
         llm_client: LLM client for generation calls.
         model: Which model to use.
         session_id: Optional session ID for cost tracking.
@@ -1036,8 +1036,8 @@ async def generate_ontology(
     llm_edges = [et.name for et in ontology.edge_types if et.name not in base_r_names]
 
     logger.info(
-        "Ontology complete: domain=%s, %d total entity types (%d paper-specific: %s), "
-        "%d total edge types (%d paper-specific: %s), %d contributions",
+        "Ontology complete: domain=%s, %d total entity types (%d document-specific: %s), "
+        "%d total edge types (%d document-specific: %s), %d contributions",
         ontology.paper_domain,
         len(ontology.entity_types), len(llm_types), llm_types,
         len(ontology.edge_types), len(llm_edges), llm_edges,

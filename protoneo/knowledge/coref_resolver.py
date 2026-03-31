@@ -166,7 +166,7 @@ async def resolve_coreferences(
     model: str = "",
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve co-references and link abbreviations in the paper graph.
+    """Resolve co-references and link abbreviations in the knowledge graph.
 
     Returns stats dict with merge/alias counts.
     """
@@ -290,7 +290,7 @@ async def resolve_coreferences(
             merged_count += 1
             logger.info("Merged '%s' into '%s'", remove_label, keep_label)
 
-    # Fix 10: Deduplicate edges and remove self-loops after merges
+    # Deduplicate edges and remove self-loops after merges
     seen_edges = set()
     deduped_edges = []
     self_loops_removed = 0

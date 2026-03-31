@@ -14,8 +14,8 @@ from ..config.schema import AppManifest, AppRegistration, ProtoNeoConfig
 from ..export import create_export_registry
 from ..knowledge import create_document_processor
 from ..tools import create_tool_registry
-from .events import SessionEventBus
-from .pipeline_control import PipelineControl
+from .events import SessionEventBus as SessionEventBus
+from .pipeline_control import PipelineControl as PipelineControl
 from .routes import register_kernel_routes, set_registries
 
 
@@ -70,8 +70,7 @@ def create_app(
             )
             manifest.on_register(reg)
 
-    # Legacy: mount Paper Review application directly
-    # (graph/pipeline routes are now in kernel; this registers app-specific routes)
+    # Mount Paper Review application routes
     from apps.paper_review.api import register_paper_review_routes
     register_paper_review_routes(app)
 

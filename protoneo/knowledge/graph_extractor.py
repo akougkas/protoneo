@@ -1,4 +1,4 @@
-"""Batch-parallel section-aware knowledge graph extraction from academic papers.
+"""Batch-parallel section-aware knowledge graph extraction.
 
 Architecture: Process sections in batched parallel, accumulating context
 between batches.
@@ -13,7 +13,7 @@ begins, so later batches see all entities from earlier batches.
 No separate reduce step. No graph replacement.
 
 The extraction is ontology-constrained: only entity types and relationship
-types defined in the paper ontology are accepted. Mismatches are coerced
+types defined in the ontology are accepted. Mismatches are coerced
 to fallbacks.
 """
 
@@ -94,7 +94,7 @@ class GraphRelationship(BaseModel):
 
 
 class ExtractedGraph(BaseModel):
-    """Graph extracted from a paper by the LLM."""
+    """Graph extracted from a document by the LLM."""
     entities: list[GraphEntity] = Field(default_factory=list)
     relationships: list[GraphRelationship] = Field(default_factory=list)
 

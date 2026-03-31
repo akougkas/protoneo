@@ -6,7 +6,6 @@ assignments, deliberation config, and accumulated results. Sessions
 are stored as JSON on disk (SQLite is a future upgrade path).
 """
 
-import json
 import logging
 import uuid
 from datetime import datetime

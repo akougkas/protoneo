@@ -155,16 +155,16 @@ async def verify_graph(
     markdown: str = "",
     domain_config: DomainConfig | None = None,
 ) -> VerificationResult:
-    """Run 3-pass verification audit on the paper graph.
+    """Run 3-pass verification audit on the knowledge graph.
 
     Pass 1 (Connectivity): Identifies disconnected entities and missing
         APPEARS_IN edges. Directly fixes the structural-semantic gap.
     Pass 2 (Completeness): Finds concrete named entities missing from
-        the graph by scanning the full paper text.
+        the graph by scanning the full document text.
     Pass 3 (Grounding): Flags hallucinated entities and lowers their
         confidence scores.
 
-    All passes use the full graph and full paper text (no truncation).
+    All passes use the full graph and full document text (no truncation).
     """
     _STRUCTURAL = {"Paper", "Section", "Diagram", "Table"}
 
