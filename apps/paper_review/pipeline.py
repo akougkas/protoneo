@@ -23,13 +23,9 @@ from protoneo.api.routes import (
     get_session_ontologies,
 )
 from protoneo.config.schema import AgentConfig, DeliberationConfig
-from protoneo.deliberation.session import SessionStatus, StepState
+from protoneo.deliberation.session import SessionStatus
 from protoneo.deliberation.types import DeliberationResult
-from protoneo.knowledge.coref_resolver import resolve_coreferences
-from protoneo.knowledge.graph_extractor import extract_graph
-from protoneo.knowledge.graph_verifier import verify_graph
 from protoneo.knowledge.graph import KnowledgeGraph
-from protoneo.knowledge.ontology import generate_ontology
 from .conference import ConferenceProfile
 from .manifest import domain_config as _domain_config
 from .review import (
@@ -451,91 +447,17 @@ async def _run_graph_pipeline(
             return
 
         # ════════════════════════════════════════════════
-        # Stage 1: Pre-Review (7 steps, 1 graph)
+        # Stage 1: Pre-Review (kernel graph pipeline)
         # ════════════════════════════════════════════════
-        ctl.enter_stage("pre_review")
         bus.emit("stage_started", {
             "stage": "pre_review", "step": "parse",
             "message": "Starting pre-review analysis...",
         })
 
-        # ── Step 1: Parse ──────────────────────────────
-        ctl.enter_step("parse")
-        step_start = _time.monotonic()
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "parse",
-            "message": "PDF parsed, extracting structure...",
-        })
-        session = await _session_manager.get(sid)
-        if session:
-            session.pipeline_steps["parse"] = StepState(
-                status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
-            ).model_dump()
-            await _session_manager.update(session)
-
-        # ── Step 2: NLP Pre-pass ───────────────────────
-        ctl.enter_step("metadata")
-        step_start = _time.monotonic()
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "metadata",
-            "message": "Running NLP pre-pass: metadata, citations, equations...",
-        })
-
-        if doc.markdown:
-            metadata = extract_metadata_from_markdown(doc.markdown, doc.text)
-        else:
-            metadata = extract_metadata(doc.text)
-        paper_graph.ingest_metadata(metadata)
-
-        bus.emit("metadata_extracted", {
-            "title": metadata.title,
-            "sections": metadata.sections,
-            "figure_count": metadata.figure_count,
-            "table_count": metadata.table_count,
-            "reference_count": metadata.reference_count,
-            "word_count": metadata.estimated_word_count,
-            "citation_count": len(metadata.citation_markers),
-            "equation_count": len(metadata.equation_labels),
-        })
-
-        d3_data = paper_graph.to_d3_format()
-        _session_graphs[sid] = d3_data
-        bus.emit("graph_updated", {
-            "nodes": d3_data["nodes"],
-            "edges": d3_data["edges"],
-            "node_count": len(d3_data["nodes"]),
-            "edge_count": len(d3_data["edges"]),
-        })
-
-        session = await _session_manager.get(sid)
-        if session:
-            if metadata.title:
-                session.config.setdefault("metadata", {})["paper_title"] = metadata.title
-            session.pipeline_steps["nlp_prepass"] = StepState(
-                status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
-                nodes_added=len(paper_graph.nodes),
-                edges_added=len(paper_graph.edges),
-            ).model_dump()
-            session.graph_after_step["nlp_prepass"] = paper_graph.snapshot()
-            await _session_manager.update(session)
-
-        # ── Step 3: Ontology ───────────────────────────
-        ctl.enter_step("ontology")
-        step_start = _time.monotonic()
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "ontology",
-            "message": f"Generating review ontology for: {metadata.title[:80] if metadata.title else 'paper'}...",
-        })
-
-        conference_context = f"{profile.name}: {profile.scope_text()}"
-
         # Resolve per-step graph models from the model_map.
-        # Graph pipeline steps (ontology, extraction, coref, verification)
-        # MUST use local models only. Subscription tokens (Anthropic, OpenAI)
-        # are reserved for review roles to avoid rate limits and bans.
-        _SUBSCRIPTION_PROVIDERS = {"openai"}  # anthropic removed
+        # Graph pipeline steps MUST use local models only. Subscription
+        # tokens are reserved for review roles to avoid rate limits.
+        _SUBSCRIPTION_PROVIDERS = {"openai"}
 
         def _is_subscription(model_id: str) -> bool:
             provider = model_id.split("/", 1)[0] if "/" in model_id else ""
@@ -556,34 +478,25 @@ async def _run_graph_pipeline(
                         return f"{_prov}/{_mid}"
             except Exception:
                 pass
-            # Last resort: any local-endpoint model from agent configs
             for c in agent_configs.values():
                 if c.model and not any(c.model.startswith(f"{sp}/") for sp in _SUBSCRIPTION_PROVIDERS):
                     return c.model
-            logger.warning(
-                "No local model available for graph step '%s'. "
-                "Configure a local endpoint (LM Studio, Ollama) in Settings.",
-                step_key,
-            )
+            logger.warning("No local model for graph step '%s'", step_key)
             return ""
 
-        ontology_model = _resolve_graph_model("ontology")
-        extraction_model = _resolve_graph_model("extraction")
-        coref_model = _resolve_graph_model("coref")
-        verification_model = _resolve_graph_model("verification")
+        resolved_models = {
+            "ontology": _resolve_graph_model("ontology"),
+            "extraction": _resolve_graph_model("extraction"),
+            "coref": _resolve_graph_model("coref"),
+            "verification": _resolve_graph_model("verification"),
+        }
 
         logger.info(
-            "Model map keys: %s | Resolved: ontology=%s extraction=%s coref=%s verify=%s",
-            list(model_map.keys()), ontology_model, extraction_model, coref_model, verification_model,
+            "Model map keys: %s | Resolved: %s",
+            list(model_map.keys()), resolved_models,
         )
 
-        # ── Pre-flight: verify all graph models are reachable ──
-        resolved_models = {
-            "ontology": ontology_model,
-            "extraction": extraction_model,
-            "coref": coref_model,
-            "verification": verification_model,
-        }
+        # Pre-flight: verify all graph models are reachable
         for step_name, model_id in resolved_models.items():
             if not model_id:
                 bus.emit("model_missing", {
@@ -605,227 +518,34 @@ async def _run_graph_pipeline(
                     _llm_client.complete(
                         model=model_id,
                         messages=[{"role": "user", "content": "ping"}],
-                        max_tokens=1,
-                        temperature=0,
+                        max_tokens=1, temperature=0,
                     ),
                     timeout=15.0,
                 )
             except Exception as ping_err:
                 bus.emit("model_unreachable", {
-                    "model": model_id,
-                    "step": step_name,
-                    "error": str(ping_err),
+                    "model": model_id, "step": step_name, "error": str(ping_err),
                 })
                 raise RuntimeError(
                     f"Model '{model_id}' (used by {step_name}) is unreachable: {ping_err}"
                 ) from ping_err
         logger.info("Pre-flight model check passed for %d unique models", len(checked))
 
-        ontology = await generate_ontology(
-            doc.text, _llm_client, model=ontology_model,
-            session_id=sid, conference_context=conference_context,
-            metadata=metadata, markdown=doc.markdown,
-            domain_config=_domain_config,
-        )
-        paper_graph.ontology = ontology
-        paper_graph.add_ontology_nodes(ontology)
-        _session_ontologies[sid] = ontology
+        # Run kernel graph pipeline
+        from protoneo.knowledge.pipeline import GraphPipeline
 
-        bus.emit("ontology_ready", {
-            "entity_types": [et.model_dump() for et in ontology.entity_types],
-            "edge_types": [rt.model_dump() for rt in ontology.edge_types],
-            "paper_domain": ontology.paper_domain,
-            "key_contributions": ontology.key_contributions,
-            "analysis_summary": ontology.analysis_summary,
-            "paused": not ctl.auto_advance,
-        })
-
-        session = await _session_manager.get(sid)
-        if session:
-            session.pipeline_steps["ontology"] = StepState(
-                status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
-                model_used=ontology_model,
-                nodes_added=len(paper_graph.nodes),
-                edges_added=len(paper_graph.edges),
-            ).model_dump()
-            session.graph_after_step["ontology"] = paper_graph.snapshot()
-            await _session_manager.update(session)
-
-        await ctl.wait_if_paused()
-        ontology = _session_ontologies[sid]
-        paper_graph.ontology = ontology
-
-        # ── Step 4: Section-Aware Extraction ───────────
-        ctl.enter_step("extract")
-        step_start = _time.monotonic()
-        nodes_before = len(paper_graph.nodes)
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "extract",
-            "message": f"Extracting knowledge graph ({len(ontology.entity_types)} entity types)...",
-        })
-
-        await extract_graph(
-            doc.text, _llm_client, model=extraction_model,
+        graph_pipeline = GraphPipeline(_llm_client, _session_manager, _domain_config)
+        paper_graph = await graph_pipeline.run(
             session_id=sid,
-            on_progress=lambda evt, data: bus.emit(evt, data),
-            ontology=ontology,
-            knowledge_graph=paper_graph,
-            markdown=doc.markdown,
+            document=doc,
+            bus=bus,
+            ctl=ctl,
+            models=resolved_models,
+            pruning_threshold=profile.graph_pruning_threshold,
+            conference_context=f"{profile.name}: {profile.scope_text()}",
+            graph_cache=_session_graphs,
+            ontology_cache=_session_ontologies,
         )
-
-        _session_graphs[sid] = paper_graph.to_d3_format()
-
-        bus.emit("graph_complete", {
-            "node_count": len(paper_graph.nodes),
-            "edge_count": len(paper_graph.edges),
-        })
-
-        session = await _session_manager.get(sid)
-        if session:
-            session.pipeline_steps["extract"] = StepState(
-                status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
-                model_used=extraction_model,
-                nodes_added=len(paper_graph.nodes) - nodes_before,
-                edges_added=len(paper_graph.edges),
-            ).model_dump()
-            session.graph_after_step["extract"] = paper_graph.snapshot()
-            await _session_manager.update(session)
-
-        # ── Step 5: Co-reference Resolution ────────────
-        ctl.enter_step("coref")
-        step_start = _time.monotonic()
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "coref",
-            "message": "Resolving co-references and linking abbreviations...",
-        })
-
-        coref_stats = await resolve_coreferences(
-            paper_graph, _llm_client,
-            model=coref_model, session_id=sid,
-        )
-
-        bus.emit("coref_complete", {
-            "merged": coref_stats["merged"],
-            "aliases_created": coref_stats["aliases_created"],
-            "node_count": len(paper_graph.nodes),
-            "edge_count": len(paper_graph.edges),
-        })
-
-        d3_data = paper_graph.to_d3_format()
-        _session_graphs[sid] = d3_data
-        bus.emit("graph_updated", {
-            "nodes": d3_data["nodes"],
-            "edges": d3_data["edges"],
-            "node_count": len(d3_data["nodes"]),
-            "edge_count": len(d3_data["edges"]),
-        })
-
-        session = await _session_manager.get(sid)
-        if session:
-            session.pipeline_steps["coref"] = StepState(
-                status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
-                model_used=coref_model,
-            ).model_dump()
-            session.graph_after_step["coref"] = paper_graph.snapshot()
-            await _session_manager.update(session)
-
-        # ── Step 6: Verification ───────────────────────
-        ctl.enter_step("verify")
-        step_start = _time.monotonic()
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "verify",
-            "message": "Running 3-check verification audit...",
-        })
-
-        verification = await verify_graph(
-            paper_graph, doc.text, _llm_client,
-            model=verification_model, session_id=sid,
-            markdown=doc.markdown,
-            domain_config=_domain_config,
-        )
-
-        bus.emit("verify_complete", {
-            "grounding_issues": len(verification.grounding_issues),
-            "missing_concepts_added": verification.entities_added,
-            "missing_connections": len(verification.missing_connections),
-            "node_count": len(paper_graph.nodes),
-            "edge_count": len(paper_graph.edges),
-        })
-
-        if verification.entities_added > 0 or verification.missing_connections:
-            d3_data = paper_graph.to_d3_format()
-            _session_graphs[sid] = d3_data
-            bus.emit("graph_updated", {
-                "nodes": d3_data["nodes"],
-                "edges": d3_data["edges"],
-                "node_count": len(d3_data["nodes"]),
-                "edge_count": len(d3_data["edges"]),
-            })
-
-        session = await _session_manager.get(sid)
-        if session:
-            session.pipeline_steps["verify"] = StepState(
-                status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
-                model_used=verification_model,
-                entities_flagged=verification.entities_flagged,
-            ).model_dump()
-            session.graph_after_step["verify"] = paper_graph.snapshot()
-            await _session_manager.update(session)
-
-        # ── Step 7: Summarize ──────────────────────────
-        ctl.enter_step("summarize")
-        step_start = _time.monotonic()
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "summarize",
-            "message": "Generating graph summary for reviewers...",
-        })
-
-        # Ensure all semantic nodes have APPEARS_IN edges to their sections
-        bridged = paper_graph.ensure_structural_links()
-        if bridged:
-            logger.info("Created %d structural APPEARS_IN links", bridged)
-
-        # Remove only low-confidence (likely hallucinated) entities, not orphans.
-        # Threshold is venue-configurable (strict venues can demand 0.6+).
-        pruning_threshold = profile.graph_pruning_threshold
-        pruned = paper_graph.prune_ungrounded(threshold=pruning_threshold)
-        if pruned:
-            logger.info(
-                "Pruned %d ungrounded entities (confidence < %.2f)",
-                pruned, pruning_threshold,
-            )
-        paper_graph.summary = paper_graph.to_agent_briefing()
-        paper_graph.update_stats()
-
-        session = await _session_manager.get(sid)
-        if session:
-            session.knowledge_graph = paper_graph.model_dump(mode="json")
-            session.current_stage = "pre_review"
-            session.pipeline_steps["summarize"] = StepState(
-                status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
-                nodes_added=len(paper_graph.nodes),
-                edges_added=len(paper_graph.edges),
-            ).model_dump()
-            session.graph_after_step["summarize"] = paper_graph.snapshot()
-            await _session_manager.update(session)
-
-            # Persist graph to disk so it survives backend restarts
-            try:
-                from pathlib import Path as _Path
-                graph_dir = _Path(_session_manager._storage_dir) / "graphs"
-                graph_dir.mkdir(parents=True, exist_ok=True)
-                graph_path = graph_dir / f"{sid}_graph.json"
-                graph_path.write_text(json.dumps(paper_graph.to_d3_format(), indent=2))
-            except Exception as _e:
-                logger.warning("Failed to persist graph to disk for %s: %s", sid, _e)
-
-        ctl.stage_done("pre_review")
-        bus.emit("stage_complete", {"stage": "pre_review"})
 
         # ═══════════════════════════════════════════════
         # Graph-only mode: stop here
