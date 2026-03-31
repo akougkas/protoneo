@@ -19,6 +19,8 @@ from protoneo.api.routes import (
     get_engine,
     get_llm_client,
     get_session_manager,
+    get_session_graphs,
+    get_session_ontologies,
 )
 from protoneo.config.schema import AgentConfig, DeliberationConfig
 from protoneo.deliberation.session import SessionStatus, StepState
@@ -39,17 +41,9 @@ from .review import (
 
 logger = logging.getLogger("protoneo.paper_review.pipeline")
 
-# Per-session caches
-_session_graphs: dict[str, dict] = {}
-_session_ontologies: dict[str, Any] = {}
-
-
-def get_session_graphs() -> dict[str, dict]:
-    return _session_graphs
-
-
-def get_session_ontologies() -> dict[str, Any]:
-    return _session_ontologies
+# Use kernel-level caches (shared with kernel routes)
+_session_graphs = get_session_graphs()
+_session_ontologies = get_session_ontologies()
 
 
 async def _run_review_stage(

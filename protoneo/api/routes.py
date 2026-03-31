@@ -16,10 +16,13 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, W
 from pydantic import BaseModel, Field
 
 from ..agents.types import Document
-from ..config.schema import AgentConfig, DeliberationConfig, ProtoNeoConfig
+from ..config.schema import AgentConfig, AppManifest, DeliberationConfig, ProtoNeoConfig
 from ..deliberation.engine import DeliberationEngine
-from ..deliberation.session import SessionManager, SessionStatus
+from ..deliberation.session import SessionManager, SessionStatus, StepState
 from ..knowledge.chunker import chunk_document
+from ..knowledge.graph import KnowledgeGraph
+from ..knowledge.graph_extractor import extract_graph
+from ..knowledge.ontology import generate_ontology as _generate_ontology
 from ..knowledge.parser import parse_file
 from ..llm.client import LLMClient
 from ..llm.registry import CapabilityRegistry
@@ -35,12 +38,16 @@ __all__ = [
     "SessionEventBus",
     "PipelineControl",
     "register_kernel_routes",
+    "set_registries",
     "get_config",
     "get_llm_client",
     "get_session_manager",
     "get_engine",
     "get_event_buses",
     "get_pipeline_controls",
+    "get_session_graphs",
+    "get_session_ontologies",
+    "get_manifests",
     "_get_upload_dir",
 ]
 
@@ -52,6 +59,16 @@ _session_manager: SessionManager | None = None
 _engine: DeliberationEngine | None = None
 _event_buses: dict[str, SessionEventBus] = {}
 _pipeline_controls: dict[str, PipelineControl] = {}
+
+# Knowledge caches (in-memory, populated during pipeline execution)
+_session_graphs: dict[str, dict] = {}
+_session_ontologies: dict[str, Any] = {}
+
+# Registry references (set by create_app via set_registries)
+_manifests: dict[str, AppManifest] = {}
+_doc_processor: Any = None
+_tool_registry: Any = None
+_export_registry: Any = None
 
 
 def get_config() -> ProtoNeoConfig:
@@ -71,6 +88,23 @@ def get_event_buses() -> dict[str, SessionEventBus]:
 
 def get_pipeline_controls() -> dict[str, PipelineControl]:
     return _pipeline_controls
+
+def get_session_graphs() -> dict[str, dict]:
+    return _session_graphs
+
+def get_session_ontologies() -> dict[str, Any]:
+    return _session_ontologies
+
+def get_manifests() -> dict[str, AppManifest]:
+    return _manifests
+
+def set_registries(manifests, doc_processor, tool_registry, export_registry):
+    """Called by create_app to share registry references with kernel routes."""
+    global _manifests, _doc_processor, _tool_registry, _export_registry
+    _manifests = manifests
+    _doc_processor = doc_processor
+    _tool_registry = tool_registry
+    _export_registry = export_registry
 
 
 def _get_upload_dir() -> Path:
@@ -894,4 +928,520 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                 }
                 for aid, cfg in agents.items()
             ]
+        }
+
+    # ── Graph ──────────────────────────────────────────────
+
+    @app.get("/api/sessions/{session_id}/graph")
+    async def get_session_graph(session_id: str):
+        """Get the knowledge graph for a session."""
+        session = await _session_manager.get(session_id)
+        if session and session.knowledge_graph:
+            try:
+                pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+                d3 = pg.to_d3_format()
+                d3["stats"] = pg.graph_stats()
+                return d3
+            except Exception:
+                pass
+
+        if session_id in _session_graphs:
+            return _session_graphs[session_id]
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        context = _session_manager.get_context(session_id)
+        if not context.documents:
+            return {"nodes": [], "edges": []}
+
+        from ..knowledge.metadata import extract_metadata
+        doc = context.documents[0]
+        metadata = extract_metadata(doc.text)
+        pg = KnowledgeGraph()
+        pg.ingest_metadata(metadata)
+        return pg.to_d3_format()
+
+    @app.get("/api/sessions/{session_id}/graph/step/{step_name}")
+    async def get_graph_at_step(session_id: str, step_name: str):
+        """Get the graph snapshot from after a specific pipeline step."""
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        snapshot = session.graph_after_step.get(step_name)
+        if not snapshot:
+            raise HTTPException(status_code=404, detail=f"No graph snapshot for step '{step_name}'")
+
+        try:
+            pg = KnowledgeGraph.restore_from_snapshot(snapshot)
+            return {**pg.to_d3_format(), "stats": pg.graph_stats()}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to restore graph: {e}")
+
+    @app.get("/api/sessions/{session_id}/graph/export")
+    async def export_graph(session_id: str):
+        """Export the session's KnowledgeGraph as a standalone JSON file."""
+        from fastapi.responses import Response
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not session.knowledge_graph:
+            raise HTTPException(status_code=404, detail="No graph to export")
+
+        export_data = {
+            "schema_version": 1,
+            "paper_title": session.config.get("metadata", {}).get("paper_title", ""),
+            "conference": session.config.get("metadata", {}).get("conference", ""),
+            "graph": session.knowledge_graph,
+            "document_markdown": session.document_markdown or session.document_text,
+        }
+
+        filename = f"graph-{session_id[:8]}.json"
+        return Response(
+            content=json.dumps(export_data, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/sessions/{session_id}/ontology")
+    async def get_session_ontology(session_id: str):
+        """Get the generated ontology for a session."""
+        ontology = _session_ontologies.get(session_id)
+        if not ontology:
+            raise HTTPException(status_code=404, detail="No ontology generated for this session")
+        return {
+            "entity_types": [et.model_dump() for et in ontology.entity_types],
+            "edge_types": [rt.model_dump() for rt in ontology.edge_types],
+            "analysis_summary": ontology.analysis_summary,
+            "paper_domain": ontology.paper_domain,
+            "key_contributions": ontology.key_contributions,
+        }
+
+    @app.post("/api/sessions/{session_id}/generate-ontology")
+    async def generate_ontology_endpoint(
+        session_id: str,
+        model: str = Form(""),
+        conference_context: str = Form(""),
+    ):
+        """Generate a domain-specific ontology for the session's document."""
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        context = _session_manager.get_context(session_id)
+        if not context.documents:
+            raise HTTPException(status_code=400, detail="No document uploaded to this session")
+
+        bus = _event_buses.get(session_id)
+        if bus:
+            bus.emit("graph_progress", {
+                "phase": "ontology",
+                "phase_num": 0, "total_phases": 3,
+                "message": "Analyzing document domain and designing ontology...",
+                "node_count": 0, "edge_count": 0,
+            })
+
+        # Resolve domain config from the session's owning app manifest
+        domain_config = None
+        if session.app_name and session.app_name in _manifests:
+            domain_config = _manifests[session.app_name].domain_config
+
+        doc = context.documents[0]
+        ontology = await _generate_ontology(
+            doc.text, _llm_client, model=model,
+            session_id=session_id, conference_context=conference_context,
+            domain_config=domain_config,
+        )
+
+        _session_ontologies[session_id] = ontology
+
+        if bus:
+            bus.emit("graph_progress", {
+                "phase": "ontology_complete",
+                "phase_num": 0, "total_phases": 3,
+                "message": f"Ontology ready: {len(ontology.entity_types)} entity types, {len(ontology.edge_types)} relationship types",
+                "node_count": 0, "edge_count": 0,
+            })
+
+        return {
+            "session_id": session_id,
+            "entity_types": [et.model_dump() for et in ontology.entity_types],
+            "edge_types": [rt.model_dump() for rt in ontology.edge_types],
+            "analysis_summary": ontology.analysis_summary,
+            "paper_domain": ontology.paper_domain,
+            "key_contributions": ontology.key_contributions,
+        }
+
+    @app.post("/api/sessions/{session_id}/extract-graph")
+    async def extract_graph_endpoint(
+        session_id: str,
+        model: str = Form(""),
+    ):
+        """Extract a knowledge graph from the session's uploaded document."""
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        context = _session_manager.get_context(session_id)
+        if not context.documents:
+            raise HTTPException(status_code=400, detail="No document uploaded to this session")
+
+        bus = _event_buses.get(session_id)
+        on_progress = None
+        if bus:
+            on_progress = lambda evt_type, data: bus.emit(evt_type, data)
+
+        ontology = _session_ontologies.get(session_id)
+
+        doc = context.documents[0]
+        graph_data = await extract_graph(
+            doc.text, _llm_client, model=model,
+            session_id=session_id, on_progress=on_progress,
+            ontology=ontology,
+        )
+        _session_graphs[session_id] = graph_data
+
+        return {
+            "session_id": session_id,
+            "node_count": len(graph_data.get("nodes", [])),
+            "edge_count": len(graph_data.get("edges", [])),
+        }
+
+    @app.get("/api/sessions/{session_id}/graph-utilization")
+    async def get_graph_utilization(session_id: str):
+        """Compute how well agents utilized the knowledge graph."""
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not session.knowledge_graph:
+            raise HTTPException(status_code=404, detail="No graph for this session")
+        if not session.result:
+            raise HTTPException(status_code=409, detail="Session has no results yet")
+
+        pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+        agent_outputs = []
+        phases = session.result.get("phases", [])
+        for phase in phases:
+            for output in phase.get("outputs", []):
+                parsed = output.get("parsed_output", {})
+                if parsed:
+                    parsed["agent_id"] = output.get("agent_id", "")
+                    agent_outputs.append(parsed)
+
+        return pg.compute_utilization(agent_outputs)
+
+    @app.get("/api/sessions/{session_id}/graph-summary")
+    async def get_graph_summary(session_id: str):
+        """Get the agent briefing text and graph stats."""
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not session.knowledge_graph:
+            raise HTTPException(status_code=404, detail="No graph built yet")
+
+        try:
+            pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+            return {
+                "summary": pg.to_agent_briefing(),
+                "stats": pg.graph_stats(),
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to generate summary: {e}")
+
+    # ── Pipeline Control ───────────────────────────────────
+
+    @app.get("/api/sessions/{session_id}/pipeline")
+    async def get_pipeline_status(session_id: str):
+        """Get current pipeline state for a session."""
+        ctl = _pipeline_controls.get(session_id)
+        if not ctl:
+            return {"session_id": session_id, "active": False}
+        return {"session_id": session_id, "active": True, **ctl.status()}
+
+    @app.get("/api/sessions/{session_id}/pipeline/status")
+    async def get_all_pipeline_steps(session_id: str):
+        """Get all step states for a session."""
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        ctl = _pipeline_controls.get(session_id)
+        return {
+            "session_id": session_id,
+            "pipeline_steps": session.pipeline_steps,
+            "current_stage": session.current_stage,
+            "active": ctl is not None,
+            "pipeline_control": ctl.status() if ctl else None,
+        }
+
+    @app.post("/api/sessions/{session_id}/pipeline/advance")
+    async def pipeline_advance(session_id: str):
+        """Advance past the current gate."""
+        ctl = _pipeline_controls.get(session_id)
+        if not ctl:
+            raise HTTPException(status_code=404, detail="No active pipeline for this session")
+
+        bus = _event_buses.get(session_id)
+        if bus:
+            bus.emit("pipeline_advanced", {
+                "from_stage": ctl.current_stage,
+                "message": f"Proceeding from {ctl.current_stage}",
+            })
+
+        ctl.advance()
+        return {"session_id": session_id, **ctl.status()}
+
+    @app.post("/api/sessions/{session_id}/pipeline/pause")
+    async def pipeline_pause(session_id: str):
+        """Pause the pipeline at its current position."""
+        ctl = _pipeline_controls.get(session_id)
+        if not ctl:
+            raise HTTPException(status_code=404, detail="No active pipeline for this session")
+
+        ctl.pause()
+        bus = _event_buses.get(session_id)
+        if bus:
+            bus.emit("pipeline_paused", {
+                "stage": ctl.current_stage,
+                "step": ctl.current_step,
+                "message": f"Pipeline paused at {ctl.current_stage}/{ctl.current_step}",
+                **ctl.status(),
+            })
+        return {"session_id": session_id, **ctl.status()}
+
+    @app.post("/api/sessions/{session_id}/pipeline/resume")
+    async def pipeline_resume(session_id: str):
+        """Resume pipeline in auto-advance mode."""
+        ctl = _pipeline_controls.get(session_id)
+        if not ctl:
+            raise HTTPException(status_code=404, detail="No active pipeline for this session")
+
+        ctl.resume()
+        bus = _event_buses.get(session_id)
+        if bus:
+            bus.emit("pipeline_resumed", {
+                "stage": ctl.current_stage,
+                "message": "Pipeline resumed in auto-advance mode",
+                **ctl.status(),
+            })
+        return {"session_id": session_id, **ctl.status()}
+
+    @app.post("/api/sessions/{session_id}/pipeline/cancel")
+    async def pipeline_cancel(session_id: str):
+        """Cancel the entire pipeline."""
+        ctl = _pipeline_controls.get(session_id)
+        bus = _event_buses.get(session_id)
+
+        if ctl:
+            ctl.cancel()
+
+        session = await _session_manager.get(session_id)
+        if session:
+            session.status = SessionStatus.STOPPED
+            await _session_manager.update(session)
+
+        if bus:
+            bus.emit("pipeline_cancelled", {"message": "Pipeline cancelled"})
+            bus.emit("error", {"detail": "Pipeline cancelled"})
+
+        return {"session_id": session_id, "status": "cancelled"}
+
+    class OntologyEdit(BaseModel):
+        edited_entity_types: list[dict] | None = None
+        edited_edge_types: list[dict] | None = None
+
+    @app.post("/api/sessions/{session_id}/pipeline/edit-ontology")
+    async def pipeline_edit_ontology(session_id: str, body: OntologyEdit):
+        """Edit the generated ontology before advancing past it."""
+        from ..knowledge.ontology import EntityType, EdgeType
+
+        ontology = _session_ontologies.get(session_id)
+        if not ontology:
+            raise HTTPException(status_code=404, detail="No ontology for this session")
+
+        if body.edited_entity_types is not None:
+            ontology.entity_types = [EntityType(**et) for et in body.edited_entity_types]
+        if body.edited_edge_types is not None:
+            ontology.edge_types = [EdgeType(**rt) for rt in body.edited_edge_types]
+        _session_ontologies[session_id] = ontology
+
+        bus = _event_buses.get(session_id)
+        if bus:
+            bus.emit("ontology_edited", {
+                "entity_types": len(ontology.entity_types),
+                "edge_types": len(ontology.edge_types),
+                "message": "Ontology edited",
+            })
+        return {
+            "session_id": session_id,
+            "entity_types": len(ontology.entity_types),
+            "edge_types": len(ontology.edge_types),
+        }
+
+    @app.post("/api/sessions/{session_id}/pipeline/step/{step_name}/run")
+    async def run_pipeline_step(session_id: str, step_name: str):
+        """Run or re-run a single pipeline step."""
+        import time as _time
+
+        valid_steps = ["nlp_prepass", "ontology", "extract", "coref", "verify", "summarize"]
+        if step_name not in valid_steps:
+            raise HTTPException(status_code=400, detail=f"Invalid step: {step_name}. Valid: {valid_steps}")
+
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        bus = _event_buses.get(session_id)
+        if not bus:
+            bus = SessionEventBus()
+            _event_buses[session_id] = bus
+
+        step_idx = valid_steps.index(step_name)
+        kg = KnowledgeGraph()
+        if step_idx > 0:
+            prev_step = valid_steps[step_idx - 1]
+            prev_snapshot = session.graph_after_step.get(prev_step)
+            if prev_snapshot:
+                kg = KnowledgeGraph.restore_from_snapshot(prev_snapshot)
+            elif session.knowledge_graph:
+                kg = KnowledgeGraph.model_validate(session.knowledge_graph)
+
+        step_state = StepState(status="running", started_at=_time.time())
+        session.pipeline_steps[step_name] = step_state.model_dump()
+
+        for downstream in valid_steps[step_idx + 1:]:
+            if downstream in session.pipeline_steps:
+                ds = session.pipeline_steps[downstream]
+                if isinstance(ds, dict):
+                    ds["status"] = "pending"
+
+        await _session_manager.update(session)
+
+        bus.emit("step_started", {
+            "stage": "pre_review", "step": step_name,
+            "message": f"Running step: {step_name}",
+        })
+
+        return {
+            "session_id": session_id,
+            "step": step_name,
+            "status": "running",
+            "stale_steps": valid_steps[step_idx + 1:],
+        }
+
+    @app.post("/api/sessions/{session_id}/pipeline/step/{step_name}/cancel")
+    async def cancel_pipeline_step(session_id: str, step_name: str):
+        """Cancel a running pipeline step."""
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        if step_name in session.pipeline_steps:
+            step_data = session.pipeline_steps[step_name]
+            if isinstance(step_data, dict):
+                step_data["status"] = "failed"
+                step_data["error"] = "Cancelled by user"
+                await _session_manager.update(session)
+
+        bus = _event_buses.get(session_id)
+        if bus:
+            bus.emit("step_cancelled", {"step": step_name})
+
+        return {"session_id": session_id, "step": step_name, "status": "cancelled"}
+
+    # ── Export ─────────────────────────────────────────────
+
+    @app.get("/api/export/formats")
+    async def list_export_formats():
+        """List available export formats."""
+        if _export_registry:
+            return {"formats": _export_registry.available_formats()}
+        return {"formats": []}
+
+    @app.get("/api/sessions/{session_id}/export")
+    async def export_session(session_id: str, format: str = "json"):
+        """Export session results in the requested format."""
+        from fastapi.responses import Response
+
+        if not _export_registry:
+            raise HTTPException(status_code=500, detail="Export registry not initialized")
+
+        exporter = _export_registry.get(format)
+        if not exporter:
+            available = [f["format_name"] for f in _export_registry.available_formats()]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown format '{format}'. Available: {available}",
+            )
+
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        app_data = session.app_data if session.app_data else None
+        data = await exporter.export(session, app_data=app_data)
+
+        filename = f"session-{session_id[:8]}.{exporter.file_extension}"
+        return Response(
+            content=data,
+            media_type=exporter.mime_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # ── Parsers ────────────────────────────────────────────
+
+    @app.get("/api/parsers")
+    async def list_parsers():
+        """List available document parsers by extension."""
+        if not _doc_processor:
+            return {"parsers": {}}
+        result = {}
+        for ext in (".pdf", ".txt", ".text", ".md", ".markdown"):
+            available = _doc_processor.available_parsers(ext)
+            if available:
+                result[ext] = available
+        return {"parsers": result}
+
+    # ── Tools ──────────────────────────────────────────────
+
+    @app.get("/api/tools")
+    async def list_tools():
+        """List available tools."""
+        if _tool_registry:
+            return {"tools": _tool_registry.available_tools()}
+        return {"tools": []}
+
+    # ── Manifests ──────────────────────────────────────────
+
+    @app.get("/api/manifests")
+    async def list_manifests():
+        """List all registered application manifests."""
+        return {
+            "apps": [
+                {
+                    "name": m.name,
+                    "display_name": m.display_name,
+                    "version": m.version,
+                    "description": m.description,
+                    "score_fields": m.score_fields,
+                    "pipeline_stages": m.pipeline_stages,
+                }
+                for m in _manifests.values()
+            ]
+        }
+
+    @app.get("/api/manifests/{app_name}")
+    async def get_manifest(app_name: str):
+        """Get a specific application manifest."""
+        m = _manifests.get(app_name)
+        if not m:
+            raise HTTPException(status_code=404, detail=f"App '{app_name}' not registered")
+        return {
+            "name": m.name,
+            "display_name": m.display_name,
+            "version": m.version,
+            "description": m.description,
+            "score_fields": m.score_fields,
+            "pipeline_stages": m.pipeline_stages,
         }

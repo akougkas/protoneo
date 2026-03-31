@@ -81,8 +81,8 @@ export function getGraphAtStep(sessionId, stepName) {
   return kernel.get(`/api/sessions/${sessionId}/graph/step/${stepName}`)
 }
 
-export function getReviewerSummary(sessionId) {
-  return kernel.get(`/api/sessions/${sessionId}/reviewer-summary`)
+export function getGraphSummary(sessionId) {
+  return kernel.get(`/api/sessions/${sessionId}/graph-summary`)
 }
 
 export function getSessionOntology(sessionId) {
@@ -281,6 +281,36 @@ export function reviewWithGraph(graphFile, conference = 'hpdc26', modelMap = {},
 // Graph utilization
 export function getGraphUtilization(sessionId) {
   return kernel.get(`/api/sessions/${sessionId}/graph-utilization`)
+}
+
+// Export
+export function getExportFormats() {
+  return kernel.get('/api/export/formats')
+}
+
+export function exportSession(sessionId, format = 'json') {
+  return kernel.get(`/api/sessions/${sessionId}/export`, {
+    params: { format },
+    responseType: 'blob',
+  })
+}
+
+// Parsers and tools
+export function getParsers() {
+  return kernel.get('/api/parsers')
+}
+
+export function getTools() {
+  return kernel.get('/api/tools')
+}
+
+// App manifests
+export function getManifests() {
+  return kernel.get('/api/manifests')
+}
+
+export function getManifest(appName) {
+  return kernel.get(`/api/manifests/${appName}`)
 }
 
 export default kernel

@@ -16,7 +16,7 @@ from ..knowledge import create_document_processor
 from ..tools import create_tool_registry
 from .events import SessionEventBus
 from .pipeline_control import PipelineControl
-from .routes import register_kernel_routes
+from .routes import register_kernel_routes, set_registries
 
 
 def create_app(
@@ -40,13 +40,16 @@ def create_app(
     export_registry = create_export_registry()
     manifests: dict[str, AppManifest] = {}
 
-    # Store on app.state for kernel routes
+    # Share registries with kernel routes module
+    set_registries(manifests, doc_processor, tool_registry, export_registry)
+
+    # Store on app.state for reference
     app.state.document_processor = doc_processor
     app.state.tool_registry = tool_registry
     app.state.export_registry = export_registry
     app.state.manifests = manifests
 
-    # Register kernel routes (health, settings, models, sessions, etc.)
+    # Register kernel routes (health, settings, models, sessions, graph, pipeline, etc.)
     register_kernel_routes(app, config)
 
     # Register applications through manifest interface
@@ -68,7 +71,7 @@ def create_app(
             manifest.on_register(reg)
 
     # Legacy: mount Paper Review application directly
-    # (will be converted to AppManifest in a later session)
+    # (graph/pipeline routes are now in kernel; this registers app-specific routes)
     from apps.paper_review.api import register_paper_review_routes
     register_paper_review_routes(app)
 

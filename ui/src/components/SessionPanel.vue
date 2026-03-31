@@ -708,8 +708,8 @@ async function fetchPacket() {
 
 async function fetchGateData() {
   try {
-    const { getReviewerSummary } = await import('../api/kernel.js')
-    const res = await getReviewerSummary(props.sessionId)
+    const { getGraphSummary } = await import('../api/kernel.js')
+    const res = await getGraphSummary(props.sessionId)
     gateGraphStats.value = res.data.stats
     gateReviewerSummary.value = res.data.summary
   } catch (e) {
