@@ -57,6 +57,8 @@ backend/data/
 
 # Planning artifacts
 PLAN.md
+.archived/
+
 
 # Session prompts and review notes (dev-only)
 NEXT_SESSION_REVIEWS.md
