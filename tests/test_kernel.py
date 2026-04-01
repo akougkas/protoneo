@@ -475,6 +475,29 @@ class TestSequentialPattern:
         assert result.outputs[0].agent_id == "a1"
         assert result.outputs[1].agent_id == "a2"
 
+    @pytest.mark.asyncio
+    async def test_sequential_populates_structured_field(self):
+        """C2: structured field is populated when output contains JSON."""
+        json_output = '```json\n{"overall_merit": {"score": 3}}\n```'
+        a1 = _make_mock_agent("a1", "Analyst", json_output)
+        ctx = SessionContext("s1")
+        msg = Message(role="user", content="Input")
+        rules = DeliberationRules()
+        pattern = SequentialPattern()
+        result = await pattern.execute([a1], ctx, msg, rules)
+        assert result.outputs[0].structured == {"overall_merit": {"score": 3}}
+
+    @pytest.mark.asyncio
+    async def test_sequential_structured_none_for_non_json(self):
+        """C2: structured is None when output is not JSON."""
+        a1 = _make_mock_agent("a1", "Analyst", "Just plain text analysis.")
+        ctx = SessionContext("s1")
+        msg = Message(role="user", content="Input")
+        rules = DeliberationRules()
+        pattern = SequentialPattern()
+        result = await pattern.execute([a1], ctx, msg, rules)
+        assert result.outputs[0].structured is None
+
 
 class TestParallelPattern:
     @pytest.mark.asyncio
@@ -490,6 +513,17 @@ class TestParallelPattern:
         assert len(result.outputs) == 2
         agent_ids = {o.agent_id for o in result.outputs}
         assert agent_ids == {"a1", "a2"}
+
+    @pytest.mark.asyncio
+    async def test_parallel_populates_structured_field(self):
+        """C2: structured field populated in parallel pattern."""
+        a1 = _make_mock_agent("a1", "R-A", '{"overall_merit": {"score": 4}}')
+        ctx = SessionContext("s1")
+        msg = Message(role="user", content="Paper")
+        rules = DeliberationRules()
+        pattern = ParallelPattern()
+        result = await pattern.execute([a1], ctx, msg, rules)
+        assert result.outputs[0].structured == {"overall_merit": {"score": 4}}
 
 
 class TestRoundRobinPattern:

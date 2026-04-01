@@ -20,6 +20,27 @@ from .types import DeliberationResult, DeliberationRules, PhaseResult
 
 logger = logging.getLogger("protoneo.deliberation.patterns")
 
+
+def _try_extract_json(text: str) -> dict | None:
+    """Best-effort JSON extraction from LLM output for the structured field."""
+    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+    cleaned = re.sub(r"\n?\s*```\s*$", "", cleaned).strip()
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            return obj
+    except (json.JSONDecodeError, TypeError):
+        pass
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if match:
+        try:
+            obj = json.loads(match.group())
+            if isinstance(obj, dict):
+                return obj
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
+
 # Type alias for the event callback that streams phase-level updates
 EventCallback = Callable[[str, dict], None] | None
 
@@ -63,6 +84,7 @@ class SequentialPattern:
                 agent_id=agent.agent_id,
                 agent_role=agent.role,
                 content=response.content,
+                structured=_try_extract_json(response.content),
                 metadata=response.metadata,
             )
             context.add_output(output)
@@ -127,6 +149,7 @@ class ParallelPattern:
                 agent_id=agent.agent_id,
                 agent_role=agent.role,
                 content=response.content,
+                structured=_try_extract_json(response.content),
                 metadata=response.metadata,
             )
 
@@ -514,6 +537,7 @@ class RoundRobinPattern:
                     agent_id=agent.agent_id,
                     agent_role=agent.role,
                     content=response.content,
+                    structured=_try_extract_json(response.content),
                     metadata={**response.metadata, "round": round_num + 1},
                 )
                 context.add_output(output)

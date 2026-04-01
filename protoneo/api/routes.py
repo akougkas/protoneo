@@ -44,6 +44,7 @@ __all__ = [
     "get_pipeline_controls",
     "get_session_graphs",
     "get_session_ontologies",
+    "get_batch_manager",
     "get_manifests",
     "_get_upload_dir",
 ]
@@ -60,6 +61,7 @@ _pipeline_controls: dict[str, PipelineControl] = {}
 # Knowledge caches (in-memory, populated during pipeline execution)
 _session_graphs: dict[str, dict] = {}
 _session_ontologies: dict[str, Any] = {}
+_batch_manager: Any = None
 
 # Registry references (set by create_app via set_registries)
 _manifests: dict[str, AppManifest] = {}
@@ -91,6 +93,9 @@ def get_session_graphs() -> dict[str, dict]:
 
 def get_session_ontologies() -> dict[str, Any]:
     return _session_ontologies
+
+def get_batch_manager():
+    return _batch_manager
 
 def get_manifests() -> dict[str, AppManifest]:
     return _manifests
@@ -219,12 +224,11 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
     _session_manager = SessionManager(_config.storage.session_dir)
     _engine = DeliberationEngine(_llm_client, _session_manager)
 
-    # Also initialize batch manager for PC Panel
+    # Initialize batch manager (shared with app routes via get_batch_manager)
+    global _batch_manager
     _batch_manager = BatchManager(
         Path(_config.storage.session_dir).parent / "batches"
     )
-    # Store batch_manager on app state for PC Panel to access
-    app.state.batch_manager = _batch_manager
 
     # ── Health ──────────────────────────────────────────────
 
@@ -1121,7 +1125,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         phases = session.result.get("phases", [])
         for phase in phases:
             for output in phase.get("outputs", []):
-                parsed = output.get("parsed_output", {})
+                parsed = output.get("structured", {})
                 if parsed:
                     parsed["agent_id"] = output.get("agent_id", "")
                     agent_outputs.append(parsed)
