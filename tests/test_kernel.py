@@ -390,6 +390,55 @@ class TestBaseAgent:
         assert "methodology" in output.content
         assert output.agent_id == agent.agent_id
 
+    @pytest.mark.asyncio
+    async def test_process_stream_includes_usage_in_metadata(self):
+        """C3: streamed responses include usage dict in metadata."""
+        client = AsyncMock(spec=LLMClient)
+        client._last_stream_usage = {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        }
+        client._strip_thinking = LLMClient._strip_thinking
+
+        async def _fake_stream(**kwargs):
+            for chunk in ["Hello", " world"]:
+                yield chunk
+
+        client.stream = _fake_stream
+        agent = BaseAgent(
+            role="Reviewer",
+            model="test",
+            system_prompt="Review.",
+            llm_client=client,
+        )
+        ctx = SessionContext("s1")
+        msg = Message(role="user", content="Review this.")
+        response = await agent.process_stream(ctx, msg)
+        assert "usage" in response.metadata
+        assert response.metadata["usage"]["total_tokens"] == 150
+
+    @pytest.mark.asyncio
+    async def test_process_includes_usage_in_metadata(self):
+        """C3: non-streamed responses include usage dict in metadata."""
+        client = AsyncMock(spec=LLMClient)
+        client.complete = AsyncMock(
+            return_value=LLMResponse(
+                content="Review done.",
+                model="test",
+                usage=TokenUsage(prompt_tokens=200, completion_tokens=100, total_tokens=300),
+            )
+        )
+        agent = BaseAgent(
+            role="Reviewer", model="test",
+            system_prompt="Review.", llm_client=client,
+        )
+        ctx = SessionContext("s1")
+        msg = Message(role="user", content="Review this.")
+        response = await agent.process(ctx, msg)
+        assert "usage" in response.metadata
+        assert response.metadata["usage"]["total_tokens"] == 300
+
 
 # ── Session ─────────────────────────────────────────────────
 

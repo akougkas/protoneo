@@ -195,6 +195,9 @@ class BaseAgent:
         # Strip thinking tags the same way complete() does
         content = self._llm_client._strip_thinking(content)
 
+        # Capture usage from the final streaming chunk when available
+        stream_usage = getattr(self._llm_client, "_last_stream_usage", {})
+
         return Message(
             role="assistant",
             content=content,
@@ -203,6 +206,7 @@ class BaseAgent:
                 "model": self._model,
                 "streamed": True,
                 "temperature": call_kwargs.get("temperature", self._temperature),
+                "usage": stream_usage if stream_usage else {},
             },
         )
 

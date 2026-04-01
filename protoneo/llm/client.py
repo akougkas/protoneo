@@ -449,15 +449,32 @@ class LLMClient:
                     yield response.content
                 return
 
-        call_overrides: dict[str, Any] = {"temperature": temperature, "stream": True, **kwargs}
+        call_overrides: dict[str, Any] = {
+            "temperature": temperature,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            **kwargs,
+        }
         if max_tokens is not None:
             call_overrides["max_tokens"] = max_tokens
         call_kwargs = await self._build_kwargs_async(model, messages, **call_overrides)
 
         response = await acompletion(**call_kwargs)
 
+        # Track usage from the final streaming chunk when the provider
+        # sends it (OpenAI, LM Studio, and others that honor stream_options).
+        self._last_stream_usage: dict[str, int] = {}
+
         async for chunk in response:
-            delta = chunk.choices[0].delta
+            # Capture usage from the final chunk (choices may be empty)
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage:
+                self._last_stream_usage = {
+                    "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(chunk_usage, "total_tokens", 0) or 0,
+                }
+            delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield delta.content
 
