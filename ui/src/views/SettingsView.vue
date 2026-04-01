@@ -2,13 +2,14 @@
   <div class="settings-page">
     <header class="settings-header">
       <div class="header-left">
-        <router-link to="/" class="logo">ProtoNeo</router-link>
+        <router-link to="/" class="logo">PROTONEO</router-link>
+        <span class="brand-divider"></span>
         <span class="product-tag">Settings</span>
       </div>
-      <router-link to="/" class="back-link">Back to Reviews</router-link>
+      <router-link to="/" class="back-link">&larr; Back</router-link>
     </header>
 
-    <!-- No quality banner here - that belongs in PanelHome, not Settings -->
+    <!-- No quality banner here - that belongs in Home, not Settings -->
 
     <!-- ═══════════════ AI PROVIDERS ═══════════════ -->
     <section class="section">
@@ -31,34 +32,34 @@
         </div>
         <div class="provider-grid">
           <div v-for="node in localNodes" :key="node.id" :class="['provider-card', { connected: node.online, disabled: !isProviderEnabled(node.id) }]">
-            <div class="pc-top">
-              <div class="pc-name-row">
+            <div class="card-top">
+              <div class="card-name-row">
                 <span :class="['status-dot', node.online ? 'on' : 'off']"></span>
-                <span class="pc-name">{{ node.display_name || node.id }}</span>
-                <span class="pc-type-badge">{{ node.type === 'ollama' ? 'Ollama' : 'OpenAI-compat' }}</span>
+                <span class="card-name">{{ node.display_name || node.id }}</span>
+                <span class="card-type-badge">{{ node.type === 'ollama' ? 'Ollama' : 'OpenAI-compat' }}</span>
               </div>
-              <div class="pc-controls">
+              <div class="card-controls">
                 <label class="power-toggle">
                   <input type="checkbox" :checked="isProviderEnabled(node.id)" @change="toggleEndpoint(node.id, $event.target.checked)" />
                   <span class="power-slider"></span>
                 </label>
-                <span :class="['pc-status-label', node.online && isProviderEnabled(node.id) ? 'connected' : '']">
+                <span :class="['card-status-label', node.online && isProviderEnabled(node.id) ? 'connected' : '']">
                   {{ !isProviderEnabled(node.id) ? 'Off' : node.online ? (node.models?.length || 0) + ' discovered' : 'Offline' }}
                 </span>
               </div>
             </div>
-            <div class="pc-detail mono">{{ node.url }}</div>
+            <div class="card-detail mono">{{ node.url }}</div>
 
             <!-- Loaded vs available distinction -->
-            <div v-if="node.online && node.loaded_model" class="pc-loaded">
+            <div v-if="node.online && node.loaded_model" class="card-loaded">
               In VRAM: <strong>{{ node.loaded_model }}</strong>
             </div>
-            <div v-if="node.online && node.loaded_models?.length" class="pc-loaded">
+            <div v-if="node.online && node.loaded_models?.length" class="card-loaded">
               In memory: <strong>{{ node.loaded_models.join(', ') }}</strong>
             </div>
 
             <!-- Active model selection -->
-            <div v-if="node.online && node.models?.length" class="pc-select">
+            <div v-if="node.online && node.models?.length" class="card-select">
               <label class="select-label">Active model:</label>
               <select class="provider-model-select" :disabled="!isProviderEnabled(node.id)" :value="settings.active_models[node.id] || ''" @change="setActiveModel(node.id, $event.target.value)">
                 <option value="">Select a model...</option>
@@ -75,11 +76,11 @@
                 {{ selectedModelMeta(node.id).benchmark.protoneo_class }}
               </span>
             </div>
-            <div v-if="selectedModelMeta(node.id)?.loaded === false" class="pc-nudge">Selected model is not loaded in VRAM. Load it in the service, then refresh discovery.</div>
+            <div v-if="selectedModelMeta(node.id)?.loaded === false" class="card-nudge">Selected model is not loaded in VRAM. Load it in the service, then refresh discovery.</div>
 
             <!-- Nudge when no models -->
-            <div v-if="node.online && !node.models?.length && node.nudge" class="pc-nudge">{{ node.nudge }}</div>
-            <div v-if="!node.online" class="pc-nudge">
+            <div v-if="node.online && !node.models?.length && node.nudge" class="card-nudge">{{ node.nudge }}</div>
+            <div v-if="!node.online" class="card-nudge">
               Service not running. Start LM Studio or Ollama on this machine to use local models.
             </div>
           </div>
@@ -95,24 +96,24 @@
         </div>
         <div class="provider-grid">
           <div v-for="node in lanNodes" :key="node.id" :class="['provider-card', { connected: node.online, disabled: !isProviderEnabled(node.id) }]">
-            <div class="pc-top">
-              <div class="pc-name-row">
+            <div class="card-top">
+              <div class="card-name-row">
                 <span :class="['status-dot', node.online ? 'on' : 'off']"></span>
-                <span class="pc-name">{{ node.display_name || node.id }}</span>
+                <span class="card-name">{{ node.display_name || node.id }}</span>
               </div>
-              <div class="pc-controls">
+              <div class="card-controls">
                 <label class="power-toggle">
                   <input type="checkbox" :checked="isProviderEnabled(node.id)" @change="toggleEndpoint(node.id, $event.target.checked)" />
                   <span class="power-slider"></span>
                 </label>
-                <span :class="['pc-status-label', node.online && isProviderEnabled(node.id) ? 'connected' : '']">
+                <span :class="['card-status-label', node.online && isProviderEnabled(node.id) ? 'connected' : '']">
                   {{ !isProviderEnabled(node.id) ? 'Off' : node.online ? (node.models?.length || 0) + ' discovered' : 'Offline' }}
                 </span>
               </div>
             </div>
-            <div class="pc-detail mono">{{ node.url }}</div>
-            <div v-if="node.online && node.loaded_model" class="pc-loaded">In VRAM: <strong>{{ node.loaded_model }}</strong></div>
-            <div v-if="node.online && node.models?.length" class="pc-select">
+            <div class="card-detail mono">{{ node.url }}</div>
+            <div v-if="node.online && node.loaded_model" class="card-loaded">In VRAM: <strong>{{ node.loaded_model }}</strong></div>
+            <div v-if="node.online && node.models?.length" class="card-select">
               <label class="select-label">Active model:</label>
               <select class="provider-model-select" :disabled="!isProviderEnabled(node.id)" :value="settings.active_models[node.id] || ''" @change="setActiveModel(node.id, $event.target.value)">
                 <option value="">Select a model...</option>
@@ -129,8 +130,8 @@
                 {{ selectedModelMeta(node.id).benchmark.protoneo_class }}
               </span>
             </div>
-            <div v-if="selectedModelMeta(node.id)?.loaded === false" class="pc-nudge">Selected model is not loaded in VRAM. Load it on this endpoint, then refresh discovery.</div>
-            <div v-if="node.nudge" class="pc-nudge">{{ node.nudge }}</div>
+            <div v-if="selectedModelMeta(node.id)?.loaded === false" class="card-nudge">Selected model is not loaded in VRAM. Load it on this endpoint, then refresh discovery.</div>
+            <div v-if="node.nudge" class="card-nudge">{{ node.nudge }}</div>
           </div>
         </div>
       </div>
@@ -144,22 +145,22 @@
         </div>
         <div class="provider-grid">
           <div :class="['provider-card', { connected: openrouterAvailable, disabled: !isProviderEnabled('openrouter') }]">
-            <div class="pc-top">
-              <div class="pc-name-row">
+            <div class="card-top">
+              <div class="card-name-row">
                 <span :class="['status-dot', openrouterAvailable ? 'on' : 'off']"></span>
-                <span class="pc-name">OpenRouter</span>
+                <span class="card-name">OpenRouter</span>
               </div>
-              <div class="pc-controls">
+              <div class="card-controls">
                 <label class="power-toggle">
                   <input type="checkbox" :checked="isProviderEnabled('openrouter')" @change="toggleProvider('openrouter', $event.target.checked)" />
                   <span class="power-slider"></span>
                 </label>
-                <span :class="['pc-status-label', openrouterAvailable && isProviderEnabled('openrouter') ? 'connected' : '']">
+                <span :class="['card-status-label', openrouterAvailable && isProviderEnabled('openrouter') ? 'connected' : '']">
                   {{ !isProviderEnabled('openrouter') ? 'Off' : openrouterAvailable ? openrouterModelCount + ' models' : 'Not configured' }}
                 </span>
               </div>
             </div>
-            <div class="pc-toggle-row">
+            <div class="card-toggle-row">
               <label class="toggle-label">
                 <input type="checkbox" v-model="settings.openrouter_free_only" @change="saveAndRefresh" />
                 Free tier only
@@ -168,7 +169,7 @@
                 ({{ discovery.openrouter.total_available }} total)
               </span>
             </div>
-            <div v-if="openrouterAvailable && openrouterModelCount > 0" class="pc-select">
+            <div v-if="openrouterAvailable && openrouterModelCount > 0" class="card-select">
               <label class="select-label">Active model:</label>
               <select class="provider-model-select" :disabled="!isProviderEnabled('openrouter')" :value="settings.active_models['openrouter'] || ''" @change="setActiveModel('openrouter', $event.target.value)">
                 <option value="">Select a model...</option>
@@ -182,7 +183,7 @@
                 {{ selectedModelMeta('openrouter').benchmark.protoneo_class }}
               </span>
             </div>
-            <div v-if="!openrouterAvailable" class="pc-nudge">Set OPENROUTER_API_KEY in .env to access cloud models.</div>
+            <div v-if="!openrouterAvailable" class="card-nudge">Set OPENROUTER_API_KEY in .env to access cloud models.</div>
           </div>
         </div>
       </div>
@@ -196,28 +197,28 @@
         </div>
         <div class="provider-grid">
           <div v-for="p in subscriptionProviders" :key="p.provider" :class="['provider-card', { connected: p.logged_in || p.has_credentials, disabled: !isProviderEnabled(p.provider) }]">
-            <div class="pc-top">
-              <div class="pc-name-row">
+            <div class="card-top">
+              <div class="card-name-row">
                 <span :class="['status-dot', p.logged_in || p.has_credentials ? 'on' : 'off']"></span>
-                <span class="pc-name">{{ p.display_name }}</span>
-                <span v-if="p.oauth_experimental" class="pc-type-badge experimental">Experimental</span>
+                <span class="card-name">{{ p.display_name }}</span>
+                <span v-if="p.oauth_experimental" class="card-type-badge experimental">Experimental</span>
               </div>
-              <div class="pc-controls">
+              <div class="card-controls">
                 <label class="power-toggle">
                   <input type="checkbox" :checked="isProviderEnabled(p.provider)" @change="toggleProvider(p.provider, $event.target.checked)" />
                   <span class="power-slider"></span>
                 </label>
-                <span :class="['pc-status-label', (p.logged_in || p.has_credentials) && isProviderEnabled(p.provider) ? 'connected' : '']">
+                <span :class="['card-status-label', (p.logged_in || p.has_credentials) && isProviderEnabled(p.provider) ? 'connected' : '']">
                   {{ !isProviderEnabled(p.provider) ? 'Off' : p.logged_in ? (p.token_type === 'oauth' ? 'OAuth' : 'Connected') : p.has_credentials ? 'API Key' : 'Not connected' }}
                 </span>
               </div>
             </div>
 
-            <div v-if="p.email" class="pc-detail">{{ p.email }}</div>
-            <div v-if="p.logged_in && !p.expired" class="pc-detail">Token expires {{ formatExpiry(p.expires_at) }}</div>
+            <div v-if="p.email" class="card-detail">{{ p.email }}</div>
+            <div v-if="p.logged_in && !p.expired" class="card-detail">Token expires {{ formatExpiry(p.expires_at) }}</div>
 
             <!-- Active model from discovered -->
-            <div v-if="discoveredProviderModels(p.provider).length" class="pc-select">
+            <div v-if="discoveredProviderModels(p.provider).length" class="card-select">
               <label class="select-label">Active model:</label>
               <select class="provider-model-select" :disabled="!isProviderEnabled(p.provider)" :value="settings.active_models[p.provider] || ''" @change="setActiveModel(p.provider, $event.target.value)">
                 <option value="">Select a model...</option>
@@ -225,7 +226,7 @@
               </select>
             </div>
             <!-- Manual model ID input when discovery returns empty but provider is connected -->
-            <div v-else-if="(p.logged_in || p.has_credentials) && isProviderEnabled(p.provider)" class="pc-select">
+            <div v-else-if="(p.logged_in || p.has_credentials) && isProviderEnabled(p.provider)" class="card-select">
               <label class="select-label">Model ID:</label>
               <div class="manual-model-row">
                 <input
@@ -247,13 +248,13 @@
             </div>
 
             <!-- Nudge from discovery -->
-            <div v-if="discoveryNudge(p.provider)" class="pc-nudge">{{ discoveryNudge(p.provider) }}</div>
-            <div v-else-if="p.connection_hint" class="pc-nudge">{{ p.connection_hint }}</div>
+            <div v-if="discoveryNudge(p.provider)" class="card-nudge">{{ discoveryNudge(p.provider) }}</div>
+            <div v-else-if="p.connection_hint" class="card-nudge">{{ p.connection_hint }}</div>
 
             <!-- Login flow -->
-            <div v-if="pendingLogin === p.provider" class="pc-login-progress">
-              <div class="pc-waiting"><span class="waiting-dot"></span> Waiting for browser login...</div>
-              <div v-if="showManualPaste" class="pc-paste">
+            <div v-if="pendingLogin === p.provider" class="card-login-progress">
+              <div class="card-waiting"><span class="waiting-dot"></span> Waiting for browser login...</div>
+              <div v-if="showManualPaste" class="card-paste">
                 <label class="paste-label">Paste redirect URL:</label>
                 <div class="paste-row">
                   <input v-model="pasteCode" class="paste-input" @keydown.enter="submitPasteCode(p.provider)" />
@@ -262,13 +263,13 @@
               </div>
             </div>
 
-            <div class="pc-actions">
+            <div class="card-actions">
               <button v-if="p.oauth_enabled !== false && !p.logged_in && !p.has_credentials" class="connect-btn" :disabled="pendingLogin === p.provider" @click="startLogin(p.provider)">
                 {{ pendingLogin === p.provider ? 'Waiting...' : 'Connect' }}
               </button>
               <button v-if="p.logged_in" class="disconnect-btn" @click="disconnect(p.provider)">Disconnect</button>
             </div>
-            <div v-if="loginError && pendingLogin === p.provider" class="pc-error">{{ loginError }}</div>
+            <div v-if="loginError && pendingLogin === p.provider" class="card-error">{{ loginError }}</div>
           </div>
         </div>
       </div>
@@ -377,6 +378,68 @@
         </div>
       </div>
     </section>
+
+    <!-- ═══════════════ VLM FIGURE DESCRIPTION ═══════════════ -->
+    <section class="section">
+      <div class="section-header-row">
+        <div>
+          <h2 class="section-title">VLM Figure Description</h2>
+          <p class="section-desc">Configure a Vision-Language Model endpoint for automatic figure descriptions during PDF parsing.</p>
+        </div>
+        <button class="action-btn-sm" @click="testVlm" :disabled="testingVlm || !settings.vlm_endpoint.url">
+          {{ testingVlm ? 'Testing...' : 'Test Connection' }}
+        </button>
+      </div>
+
+      <div class="vlm-form">
+        <div class="vlm-row">
+          <label class="vlm-label">Endpoint URL</label>
+          <input
+            class="vlm-input"
+            type="text"
+            placeholder="http://192.168.86.141:8081/v1/chat/completions"
+            v-model="settings.vlm_endpoint.url"
+            @change="saveSettings"
+          />
+        </div>
+        <div class="vlm-row">
+          <label class="vlm-label">Model name</label>
+          <input
+            class="vlm-input"
+            type="text"
+            placeholder="qwen3-vl-30b"
+            v-model="settings.vlm_endpoint.model"
+            @change="saveSettings"
+          />
+        </div>
+        <div class="vlm-row vlm-row--wide">
+          <label class="vlm-label">Description prompt</label>
+          <textarea
+            class="vlm-textarea"
+            rows="3"
+            v-model="settings.vlm_endpoint.prompt"
+            @change="saveSettings"
+          ></textarea>
+        </div>
+        <div class="vlm-row-group">
+          <div class="vlm-row vlm-row--narrow">
+            <label class="vlm-label">Temperature</label>
+            <input class="vlm-input" type="number" step="0.1" min="0" max="2" v-model.number="settings.vlm_endpoint.temperature" @change="saveSettings" />
+          </div>
+          <div class="vlm-row vlm-row--narrow">
+            <label class="vlm-label">Top-P</label>
+            <input class="vlm-input" type="number" step="0.1" min="0" max="1" v-model.number="settings.vlm_endpoint.top_p" @change="saveSettings" />
+          </div>
+          <div class="vlm-row vlm-row--narrow">
+            <label class="vlm-label">Timeout (s)</label>
+            <input class="vlm-input" type="number" step="10" min="30" max="600" v-model.number="settings.vlm_endpoint.timeout" @change="saveSettings" />
+          </div>
+        </div>
+        <div v-if="vlmTestResult" :class="['vlm-test-result', vlmTestResult.ok ? 'ok' : 'err']">
+          {{ vlmTestResult.message }}
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -396,6 +459,7 @@ const settings = reactive({
   openrouter_free_only: true,
   provider_enabled: {},
   active_models: {},
+  vlm_endpoint: { url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 300, concurrency: 1 },
   benchmark_results: [],
   discovered_models: {},
 })
@@ -406,6 +470,8 @@ const discovering = ref(false)
 const benchmarking = ref(false)
 const benchProgress = ref('')
 
+const testingVlm = ref(false)
+const vlmTestResult = ref(null)
 const pendingLogin = ref(null)
 const loginError = ref('')
 const pasteCode = ref('')
@@ -653,7 +719,9 @@ async function loadAll() {
   try {
     const [pRes, sRes, bRes] = await Promise.all([getProviders(), getSettings(), getBenchmarkResults()])
     providers.value = pRes.data.providers || []
-    Object.assign(settings, sRes.data)
+    const loaded = sRes.data
+    if (!loaded.vlm_endpoint) loaded.vlm_endpoint = { url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 300, concurrency: 1 }
+    Object.assign(settings, loaded)
     benchmarkResults.value = bRes.data.results || []
   } catch (e) { console.error('Load failed:', e) }
 }
@@ -673,12 +741,32 @@ async function saveSettings() {
       provider_enabled: settings.provider_enabled,
       active_models: settings.active_models,
       openrouter_free_only: settings.openrouter_free_only,
+      vlm_endpoint: settings.vlm_endpoint,
     })
   }
   catch (e) { console.error('Save failed:', e) }
 }
 
 async function saveAndRefresh() { await saveSettings(); await refreshDiscovery() }
+
+async function testVlm() {
+  if (!settings.vlm_endpoint.url) return
+  testingVlm.value = true
+  vlmTestResult.value = null
+  try {
+    const base = settings.vlm_endpoint.url.replace(/\/chat\/completions$/, '')
+    const res = await fetch(base + '/models')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    const models = data.data || data.models || []
+    const names = models.map(m => m.id || m.name).join(', ')
+    vlmTestResult.value = { ok: true, message: `Connected. Models: ${names}` }
+  } catch (e) {
+    vlmTestResult.value = { ok: false, message: `Connection failed: ${e.message}` }
+  } finally {
+    testingVlm.value = false
+  }
+}
 
 async function runBenchmark() {
   if (!activeModelList.value.length) return
@@ -741,68 +829,123 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 .settings-page {
   max-width: 1240px;
   margin: 0 auto;
-  padding: 40px 24px 56px;
+  padding: var(--pn-space-7) var(--pn-space-5) var(--pn-space-8);
 }
-.settings-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 24px; }
-.header-left { display: flex; align-items: baseline; gap: 12px; }
-.logo { font-family: 'Space Grotesk', sans-serif; font-size: 28px; font-weight: 700; letter-spacing: -0.5px; text-decoration: none; color: inherit; }
-.product-tag { font-size: 13px; font-weight: 500; background: #000; color: #fff; padding: 2px 10px; border-radius: 3px; }
-.back-link { font-size: 13px; color: #666; text-decoration: none; }
-.back-link:hover { color: #000; }
+.settings-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: var(--pn-space-6);
+  padding-bottom: var(--pn-space-5);
+  border-bottom: 1px solid var(--pn-border);
+}
+.header-left { display: flex; align-items: center; gap: var(--pn-space-3); }
+.brand-divider { width: 1px; height: 18px; background: var(--pn-border-strong); }
+.logo {
+  font-family: var(--pn-mono); font-size: 13px; font-weight: 700;
+  letter-spacing: 0.18em; text-decoration: none; color: var(--pn-text);
+}
+.logo:hover { color: var(--pn-accent); }
+.product-tag {
+  font-family: var(--pn-serif); font-size: 14px; font-weight: 500;
+  font-style: italic; color: var(--pn-text-secondary);
+}
+.back-link {
+  font-size: 11px; color: var(--pn-text-muted); text-decoration: none;
+  padding: var(--pn-space-2) var(--pn-space-3); border: 1px solid var(--pn-border);
+  letter-spacing: 0.04em; transition: all var(--pn-duration) var(--pn-ease);
+}
+.back-link:hover { border-color: var(--pn-text); color: var(--pn-text); }
 
-.section { margin-bottom: 48px; }
-.section-header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; gap: 16px; }
-.section-title { font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #333; margin-bottom: 4px; }
-.section-desc { font-size: 13px; color: #888; }
-.action-btn-sm { font-size: 12px; font-weight: 600; padding: 6px 16px; border: 1px solid #ddd; background: #fff; color: #333; border-radius: 4px; cursor: pointer; }
-.action-btn-sm:hover { border-color: #000; }
-.action-btn-sm:disabled { opacity: 0.5; cursor: not-allowed; }
-.bench-btn { border-color: #000; background: #000; color: #fff; }
+.section { margin-bottom: var(--pn-space-7); }
+.section-header-row {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  margin-bottom: var(--pn-space-5); gap: var(--pn-space-4);
+}
+.section-title {
+  font-family: var(--pn-mono); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--pn-text-secondary); margin-bottom: var(--pn-space-1);
+}
+.section-desc { font-size: 12px; color: var(--pn-text-muted); }
+.action-btn-sm {
+  font-size: 11px; font-weight: 600; padding: var(--pn-space-2) var(--pn-space-4);
+  border: 1px solid var(--pn-border); background: var(--pn-surface);
+  color: var(--pn-text); cursor: pointer; letter-spacing: 0.04em;
+  transition: all var(--pn-duration) var(--pn-ease);
+}
+.action-btn-sm:hover { border-color: var(--pn-text); }
+.action-btn-sm:disabled { opacity: 0.35; cursor: not-allowed; }
+.bench-btn { border-color: var(--pn-text); background: var(--pn-text); color: var(--pn-bg); }
 .bench-btn:hover { background: #222; }
 
-.tier-group { margin-bottom: 24px; }
-.tier-label-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid #f0f0f0; }
-.tier-dot { width: 10px; height: 10px; border-radius: 50%; }
-.tier-dot.local { background: #4a4; }
-.tier-dot.homelab { background: #999; }
-.tier-dot.api { background: #e8a500; }
-.tier-dot.subscription { background: #999; }
-.tier-name { font-size: 13px; font-weight: 700; color: #333; text-transform: uppercase; letter-spacing: 0.3px; }
-.tier-hint { font-size: 11px; color: #aaa; }
-
-.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-.provider-card {
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-  padding: 16px 18px;
-  background: #fff;
-  transition: opacity 0.2s ease, border-color 0.2s ease;
+.tier-group { margin-bottom: var(--pn-space-5); }
+.tier-label-row {
+  display: flex; align-items: center; gap: var(--pn-space-2);
+  margin-bottom: var(--pn-space-3); padding-bottom: var(--pn-space-2);
+  border-bottom: 1px solid var(--pn-border);
 }
-.provider-card.connected { border-color: #e0e0e0; }
-.provider-card.disabled { opacity: 0.62; }
-.pc-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.pc-controls { display: flex; align-items: center; gap: 10px; }
-.pc-name-row { display: flex; align-items: center; gap: 8px; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; }
-.status-dot.on { background: #4a4; }
-.status-dot.off { border: 2px solid #ccc; width: 4px; height: 4px; }
-.pc-name { font-size: 15px; font-weight: 700; color: #111; }
-.pc-type-badge { font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 2px; background: #f0f0f0; color: #888; text-transform: uppercase; }
-.pc-type-badge.experimental { background: #fff3e0; color: #b45309; }
-.pc-status-label { font-size: 11px; font-weight: 600; color: #999; text-transform: uppercase; letter-spacing: 0.3px; }
-.pc-status-label.connected { color: #4a4; }
-.pc-detail { font-size: 12px; color: #888; margin-bottom: 4px; }
-.pc-detail.mono, .mono { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
-.pc-loaded { font-size: 12px; color: #333; margin: 6px 0; padding: 4px 8px; background: #f0f8f0; border-radius: 3px; border-left: 3px solid #4a4; }
-.pc-select { margin: 8px 0; }
-.select-label { font-size: 11px; color: #666; display: block; margin-bottom: 4px; }
-.provider-model-select { width: 100%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; background: #fff; color: #333; }
+.tier-dot { width: 8px; height: 8px; border-radius: 50%; }
+.tier-dot.local { background: var(--pn-ok); }
+.tier-dot.homelab { background: var(--pn-text-muted); }
+.tier-dot.api { background: var(--pn-warn); }
+.tier-dot.subscription { background: var(--pn-text-muted); }
+.tier-name {
+  font-family: var(--pn-mono); font-size: 10px; font-weight: 700;
+  color: var(--pn-text-secondary); text-transform: uppercase; letter-spacing: 0.06em;
+}
+.tier-hint { font-size: 10px; color: var(--pn-text-ghost); }
+
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--pn-space-3); }
+.provider-card {
+  border: 1px solid var(--pn-border);
+  padding: var(--pn-space-4) var(--pn-space-4);
+  background: var(--pn-surface);
+  transition: all var(--pn-duration) var(--pn-ease);
+}
+.provider-card:hover { border-color: var(--pn-border-strong); }
+.provider-card.connected { border-color: var(--pn-border); }
+.provider-card.disabled { opacity: 0.5; }
+.card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--pn-space-2); }
+.card-controls { display: flex; align-items: center; gap: var(--pn-space-3); }
+.card-name-row { display: flex; align-items: center; gap: var(--pn-space-2); }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; }
+.status-dot.on { background: var(--pn-ok); }
+.status-dot.off { border: 1.5px solid var(--pn-border-strong); width: 6px; height: 6px; }
+.card-name { font-size: 13px; font-weight: 700; color: var(--pn-text); }
+.card-type-badge {
+  font-family: var(--pn-mono); font-size: 8px; font-weight: 600;
+  padding: 1px 5px; background: var(--pn-border); color: var(--pn-text-muted);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.card-type-badge.experimental { background: var(--pn-warn-dim); color: var(--pn-warn); }
+.card-status-label {
+  font-family: var(--pn-mono); font-size: 9px; font-weight: 600;
+  color: var(--pn-text-muted); text-transform: uppercase; letter-spacing: 0.06em;
+}
+.card-status-label.connected { color: var(--pn-ok); }
+.card-detail { font-size: 11px; color: var(--pn-text-muted); margin-bottom: 3px; }
+.card-detail.mono, .mono { font-size: 10px; }
+.card-loaded {
+  font-size: 11px; color: var(--pn-text); margin: var(--pn-space-2) 0;
+  padding: var(--pn-space-1) var(--pn-space-2);
+  border-left: 2px solid var(--pn-ok); background: var(--pn-ok-dim);
+}
+.card-select { margin: var(--pn-space-2) 0; }
+.select-label {
+  font-family: var(--pn-mono); font-size: 9px; font-weight: 600;
+  color: var(--pn-text-muted); display: block; margin-bottom: 3px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.provider-model-select { width: 100%; font-size: 11px; }
 .provider-model-select:focus { outline: none; border-color: #000; }
 .manual-model-row { display: flex; gap: 6px; }
 .manual-model-input { flex: 1; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; background: #fff; color: #333; }
 .manual-model-input:focus { outline: none; border-color: #000; }
 .manual-model-input::placeholder { color: #aaa; font-style: italic; }
-.pc-nudge { font-size: 12px; color: #a07000; background: #fffbf0; border: 1px solid #f5e6c0; border-radius: 4px; padding: 8px 10px; margin-top: 8px; line-height: 1.5; }
+.card-nudge {
+  font-size: 11px; color: var(--pn-warn); background: var(--pn-warn-dim);
+  border: 1px solid var(--pn-warn); padding: var(--pn-space-2) var(--pn-space-3);
+  margin-top: var(--pn-space-2); line-height: 1.5;
+}
 .selected-model-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .meta-chip {
   display: inline-flex;
@@ -853,32 +996,32 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
   box-shadow: 0 1px 3px rgba(0,0,0,0.16);
   transition: transform 0.2s ease;
 }
-.power-toggle input:checked + .power-slider { background: #4a4; }
+.power-toggle input:checked + .power-slider { background: var(--pn-accent); }
 .power-toggle input:checked + .power-slider::after { transform: translateX(16px); }
 
-.pc-toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.card-toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .toggle-label { font-size: 12px; color: #555; cursor: pointer; display: flex; align-items: center; gap: 5px; }
 .toggle-hint { font-size: 11px; color: #aaa; }
 
-.pc-actions { margin-top: 10px; }
+.card-actions { margin-top: 10px; }
 .connect-btn { font-size: 12px; font-weight: 600; padding: 6px 18px; border: 1px solid #000; background: #000; color: #fff; border-radius: 4px; cursor: pointer; }
 .connect-btn:hover { background: #222; }
 .connect-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .disconnect-btn { font-size: 12px; font-weight: 600; padding: 6px 18px; border: 1px solid #ddd; background: #fff; color: #999; border-radius: 4px; cursor: pointer; }
 .disconnect-btn:hover { border-color: #c44; color: #c44; }
 
-.pc-login-progress { margin-top: 10px; }
-.pc-waiting { font-size: 12px; color: #888; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.card-login-progress { margin-top: 10px; }
+.card-waiting { font-size: 12px; color: #888; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .waiting-dot { width: 8px; height: 8px; border-radius: 50%; background: #e8a500; animation: pulse-dot 1.4s ease-in-out infinite; }
 @keyframes pulse-dot { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
-.pc-paste { margin-top: 8px; }
+.card-paste { margin-top: 8px; }
 .paste-label { font-size: 11px; color: #666; display: block; margin-bottom: 6px; }
 .paste-row { display: flex; gap: 6px; }
 .paste-input { flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
 .paste-input:focus { outline: none; border-color: #000; }
 .paste-btn { font-size: 12px; font-weight: 600; padding: 6px 14px; border: 1px solid #000; background: #000; color: #fff; border-radius: 4px; cursor: pointer; }
 .paste-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.pc-error { font-size: 12px; color: #c44; margin-top: 8px; }
+.card-error { font-size: 11px; color: var(--pn-err); margin-top: var(--pn-space-2); }
 
 /* Active models table */
 .empty-state { font-size: 13px; color: #999; padding: 24px; text-align: center; border: 1px dashed #ddd; border-radius: 6px; }
@@ -968,6 +1111,32 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 
 .bench-throughput { font-size: 11px; color: #888; margin-top: 6px; font-family: 'JetBrains Mono', monospace; }
 .bench-tags { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+
+/* VLM Section */
+.vlm-form { display: flex; flex-direction: column; gap: var(--pn-space-3); }
+.vlm-row { display: flex; flex-direction: column; gap: var(--pn-space-1); }
+.vlm-row--wide { max-width: 100%; }
+.vlm-row--narrow { max-width: 160px; }
+.vlm-row-group { display: flex; gap: var(--pn-space-4); flex-wrap: wrap; }
+.vlm-label { font-size: 11px; font-weight: 600; color: var(--pn-text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.vlm-input {
+  font-family: var(--pn-mono); font-size: 12px; padding: var(--pn-space-2) var(--pn-space-3);
+  border: 1px solid var(--pn-border); background: var(--pn-surface); color: var(--pn-text);
+  transition: border-color var(--pn-duration) var(--pn-ease);
+}
+.vlm-input:focus { border-color: var(--pn-text); outline: none; }
+.vlm-textarea {
+  font-family: var(--pn-mono); font-size: 12px; padding: var(--pn-space-2) var(--pn-space-3);
+  border: 1px solid var(--pn-border); background: var(--pn-surface); color: var(--pn-text);
+  resize: vertical; min-height: 60px;
+}
+.vlm-textarea:focus { border-color: var(--pn-text); outline: none; }
+.vlm-test-result {
+  font-size: 12px; padding: var(--pn-space-2) var(--pn-space-3);
+  border: 1px solid var(--pn-border);
+}
+.vlm-test-result.ok { border-color: #2a7a2a; color: #2a7a2a; background: #e8f5e9; }
+.vlm-test-result.err { border-color: #c44; color: #c44; background: #ffebee; }
 
 @media (max-width: 920px) {
   .settings-header,

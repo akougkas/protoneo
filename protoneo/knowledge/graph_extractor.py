@@ -103,8 +103,7 @@ class ExtractedGraph(BaseModel):
 
 _SECTION_SYSTEM = """\
 You extract entities and relationships from academic paper sections.
-RESPOND WITH VALID JSON ONLY. No thinking, no markdown, no explanation.
-Your entire response must be a single JSON object."""
+Output ONLY valid JSON. You may reason in <think> tags first."""
 
 _SECTION_PROMPT_TEMPLATE = """\
 Extract entities and relationships from section "{section_name}" of an academic paper.
@@ -118,11 +117,12 @@ RULES:
 3. PRIORITIZE relationships. A graph with 5 entities and 8 relationships is better than 15 entities and 3 relationships.
 4. Cross-reference entities from previous sections by exact name.
 5. Use specific entity types from the ontology. Use "Concept" only as a last resort.
-6. Entity names: use the paper's own terminology, under 6 words. Use readable multi-word names with spaces, not CamelCase.
+6. Entity names: use the paper's own terminology, under 6 words. Readable multi-word names with spaces, not CamelCase.
 7. For quantitative results, include the value in the description (e.g., "3.76x speedup over dense baseline").
 8. If an entity is an abbreviation, include the full form in the description.
-9. If the text contains markdown tables, extract the key data points as entities with relationships.
-10. If the text contains equations or formulas, extract the named equation and what it computes.
+9. Extract key data points from markdown tables as entities with relationships.
+10. Extract named equations and what they compute.
+11. Figure descriptions contain quantitative analysis (axes, trends, method comparisons). Extract the findings they report as Result or Metric entities.
 
 Respond with ONLY this JSON, nothing else:
 {{"entities": [{{"name": "...", "type": "...", "description": "one sentence with key details"}}], "relationships": [{{"source": "entity name", "target": "entity name", "type": "EDGE_TYPE", "description": "brief context"}}]}}
@@ -132,7 +132,7 @@ Section text ({section_name}):
 
 # ── Legacy chunk prompt (kept for backward compat) ─────────
 
-_CHUNK_SYSTEM = "You extract entities and relationships from academic paper text. Always respond with valid JSON only. No markdown, no explanation."
+_CHUNK_SYSTEM = "You extract entities and relationships from academic paper text. Output ONLY valid JSON. You may reason in <think> tags first."
 
 _CHUNK_PROMPT_TEMPLATE = """\
 Extract entities and relationships from this paper chunk.

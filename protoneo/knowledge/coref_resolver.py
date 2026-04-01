@@ -18,7 +18,7 @@ from .graph import KnowledgeGraph
 
 logger = logging.getLogger("protoneo.knowledge.coref_resolver")
 
-_COREF_SYSTEM = "You resolve co-references and identify abbreviations in knowledge graph entities extracted from an academic paper. Always respond with valid JSON only."
+_COREF_SYSTEM = "You resolve co-references and identify abbreviations in knowledge graph entities extracted from an academic paper. Output ONLY valid JSON. You may reason in <think> tags first."
 
 _COREF_PROMPT = """\
 Below are entities extracted from an academic paper. Identify:

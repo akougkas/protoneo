@@ -25,6 +25,7 @@ from ..knowledge.ontology import generate_ontology as _generate_ontology
 from ..knowledge.parser import parse_file
 from ..llm.client import LLMClient
 from ..llm.registry import CapabilityRegistry
+from ..llm.settings import build_vlm_config
 from .events import SessionEventBus
 from .pipeline_control import PipelineControl
 
@@ -788,7 +789,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         file_path.write_bytes(content)
 
         try:
-            doc = parse_file(str(file_path))
+            doc = parse_file(str(file_path), vlm_config=build_vlm_config())
             doc = chunk_document(doc)
         except Exception as e:
             file_path.unlink(missing_ok=True)

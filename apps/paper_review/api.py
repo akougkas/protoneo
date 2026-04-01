@@ -32,6 +32,7 @@ from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.chunker import chunk_document
 from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.knowledge.parser import parse_file
+from protoneo.llm.settings import build_vlm_config
 
 from .conference import ConferenceProfile, list_profiles, load_profile
 from .manifest import domain_config as _domain_config
@@ -173,7 +174,7 @@ async def get_conference(slug: str):
 @router.post("/preflight")
 async def preflight_check(
     file: UploadFile = File(...),
-    conference: str = Form("hpdc26"),
+    conference: str = Form(...),
 ):
     """Run fast preflight checks on a manuscript before launching the full review."""
     try:
@@ -191,7 +192,7 @@ async def preflight_check(
     file_path.write_bytes(content)
 
     try:
-        doc = parse_file(str(file_path), fast=True)
+        doc = parse_file(str(file_path), fast=True, vlm_config=build_vlm_config())
     except Exception as e:
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {e}")
@@ -206,7 +207,7 @@ async def preflight_check(
 @router.post("/review")
 async def start_panel_review(
     file: UploadFile = File(...),
-    conference: str = Form("hpdc26"),
+    conference: str = Form(...),
     model_map_json: str = Form("{}"),
     max_rounds: int = Form(2),
     user_instructions: str = Form(""),
@@ -215,9 +216,9 @@ async def start_panel_review(
 ):
     """Create and start a full Paper Review session.
 
-    Returns immediately with session_id. PDF parsing (pdf2md) runs
-    in the background so the UI can navigate to the session page.
-    pdf2md uses local AI (Nemotron + VLM) for clean markdown extraction.
+    Returns immediately with session_id. PDF parsing runs in the
+    background so the UI can navigate to the session page. Docling
+    handles layout extraction with optional VLM figure descriptions.
     """
     _session_manager = get_session_manager()
     _event_buses = get_event_buses()
@@ -294,8 +295,9 @@ async def start_panel_review(
 
         try:
             loop = asyncio.get_running_loop()
+            vlm = build_vlm_config()
             doc = await loop.run_in_executor(
-                None, parse_file, str(file_path), fast_parse,
+                None, lambda: parse_file(str(file_path), fast=fast_parse, vlm_config=vlm),
             )
             doc = chunk_document(doc)
         except Exception as e:
@@ -340,7 +342,7 @@ async def start_panel_review(
 @router.post("/batch")
 async def start_batch(
     files: list[UploadFile] = File(...),
-    conference: str = Form("hpdc26"),
+    conference: str = Form(...),
     model_map_json: str = Form("{}"),
     fast_parse: bool = Form(True),
 ):
@@ -437,8 +439,9 @@ async def start_batch(
 
             try:
                 loop = asyncio.get_running_loop()
+                vlm = build_vlm_config()
                 doc = await loop.run_in_executor(
-                    None, parse_file, str(fpath), fast_parse,
+                    None, lambda: parse_file(str(fpath), fast=fast_parse, vlm_config=vlm),
                 )
                 doc = chunk_document(doc)
             except Exception as e:
@@ -591,7 +594,7 @@ async def list_batches(limit: int = 20):
 @router.post("/batch-review")
 async def start_batch_review(
     files: list[UploadFile] = File(...),
-    conference: str = Form("hpdc26"),
+    conference: str = Form(...),
     model_map_json: str = Form("{}"),
     max_rounds: int = Form(2),
     user_instructions: str = Form(""),
@@ -693,8 +696,9 @@ async def start_batch_review(
 
             try:
                 loop = asyncio.get_running_loop()
+                vlm = build_vlm_config()
                 doc = await loop.run_in_executor(
-                    None, parse_file, str(fpath), fast_parse,
+                    None, lambda: parse_file(str(fpath), fast=fast_parse, vlm_config=vlm),
                 )
                 doc = chunk_document(doc)
             except Exception as e:
@@ -1281,7 +1285,7 @@ async def update_final_review(session_id: str, body: UpdateFinalReviewRequest):
 @router.post("/review-with-graph")
 async def review_with_graph(
     graph_file: UploadFile = File(...),
-    conference: str = Form("hpdc26"),
+    conference: str = Form(...),
     model_map_json: str = Form("{}"),
     max_rounds: int = Form(2),
     user_instructions: str = Form(""),

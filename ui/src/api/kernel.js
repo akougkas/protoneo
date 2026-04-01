@@ -12,25 +12,25 @@ export function getHealth() {
 }
 
 export function getConferences() {
-  return kernel.get('/api/conferences')
+  return kernel.get('/api/apps/paper_review/conferences')
 }
 
 export function getConference(slug) {
-  return kernel.get(`/api/conferences/${slug}`)
+  return kernel.get(`/api/apps/paper_review/conferences/${slug}`)
 }
 
 export function getModels() {
   return kernel.get('/api/models')
 }
 
-export function startPanelReview(file, conference = 'hpdc26', modelMap = {}, maxRounds = 3, userInstructions = '') {
+export function startReview(file, conference, modelMap = {}, maxRounds = 3, userInstructions = '') {
   const form = new FormData()
   form.append('file', file)
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
-  return kernel.post('/api/panel/review', form, {
+  return kernel.post('/api/apps/paper_review/review', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
@@ -44,7 +44,7 @@ export function listSessions(limit = 20) {
 }
 
 export function getReviewPacket(sessionId) {
-  return kernel.get(`/api/sessions/${sessionId}/review-packet`)
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/review-packet`)
 }
 
 export function connectStream(sessionId) {
@@ -52,23 +52,23 @@ export function connectStream(sessionId) {
   return new WebSocket(`${wsBase}/api/sessions/${sessionId}/stream`)
 }
 
-export function runPreflight(file, conference = 'hpdc26') {
+export function runPreflight(file, conference) {
   const form = new FormData()
   form.append('file', file)
   form.append('conference', conference)
-  return kernel.post('/api/panel/preflight', form, {
+  return kernel.post('/api/apps/paper_review/preflight', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
 
 export function getReviewPacketMd(sessionId) {
-  return kernel.get(`/api/sessions/${sessionId}/review-packet.md`, {
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/review-packet.md`, {
     responseType: 'blob',
   })
 }
 
 export function getReviewPacketPdf(sessionId) {
-  return kernel.get(`/api/sessions/${sessionId}/review-packet.pdf`, {
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/review-packet.pdf`, {
     responseType: 'blob',
   })
 }
@@ -198,63 +198,63 @@ export function providerLogout(providerName) {
 }
 
 // Batch operations
-export function startBatch(files, conference = 'hpdc26', modelMap = {}) {
+export function startBatch(files, conference, modelMap = {}) {
   const form = new FormData()
   files.forEach(f => form.append('files', f))
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
-  return kernel.post('/api/panel/batch', form, {
+  return kernel.post('/api/apps/paper_review/batch', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
 
-export function startBatchReview(files, conference = 'hpdc26', modelMap = {}, maxRounds = 3, userInstructions = '') {
+export function startBatchReview(files, conference, modelMap = {}, maxRounds = 3, userInstructions = '') {
   const form = new FormData()
   files.forEach(f => form.append('files', f))
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
-  return kernel.post('/api/panel/batch-review', form, {
+  return kernel.post('/api/apps/paper_review/batch-review', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
 
 export function getBatch(batchId) {
-  return kernel.get(`/api/panel/batch/${batchId}`)
+  return kernel.get(`/api/apps/paper_review/batch/${batchId}`)
 }
 
 export function listBatches(limit = 20) {
-  return kernel.get('/api/panel/batches', { params: { limit } })
+  return kernel.get('/api/apps/paper_review/batches', { params: { limit } })
 }
 
 export function retrySession(sessionId) {
-  return kernel.post(`/api/sessions/${sessionId}/retry`)
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/retry`)
 }
 
 export function retryFailedInBatch(batchId) {
-  return kernel.post(`/api/panel/batch/${batchId}/retry-failed`)
+  return kernel.post(`/api/apps/paper_review/batch/${batchId}/retry-failed`)
 }
 
 export function launchReview(sessionId) {
-  return kernel.post(`/api/sessions/${sessionId}/launch-review`)
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/launch-review`)
 }
 
 // Post-review: refine field, score lightpass, persist edits
 export function refineField(sessionId, field, instruction, currentFields) {
-  return kernel.post(`/api/sessions/${sessionId}/refine-field`, {
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/refine-field`, {
     field, instruction, current_fields: currentFields,
   })
 }
 
 export function scoreLightpass(sessionId, newScore, newLabel, currentFields) {
-  return kernel.post(`/api/sessions/${sessionId}/score-lightpass`, {
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/score-lightpass`, {
     new_score: newScore, new_label: newLabel, current_fields: currentFields,
   })
 }
 
 export function updateFinalReview(sessionId, finalReview) {
-  return kernel.post(`/api/sessions/${sessionId}/update-final-review`, {
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/update-final-review`, {
     final_review: finalReview,
   })
 }
@@ -266,14 +266,14 @@ export function exportGraph(sessionId) {
   })
 }
 
-export function reviewWithGraph(graphFile, conference = 'hpdc26', modelMap = {}, maxRounds = 3, userInstructions = '') {
+export function reviewWithGraph(graphFile, conference, modelMap = {}, maxRounds = 3, userInstructions = '') {
   const form = new FormData()
   form.append('graph_file', graphFile)
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
-  return kernel.post('/api/panel/review-with-graph', form, {
+  return kernel.post('/api/apps/paper_review/review-with-graph', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }

@@ -86,6 +86,34 @@ def _strip_line_number_pollution(text: str) -> str:
 def _clean_markdown(md: str) -> str:
     """Final cleansing pass on Docling markdown output."""
     md = re.sub(r"\n*<!-- image -->\n*", "\n\n", md)
+
+    # Demote headings injected by VLM descriptions into bold text.
+    # VLM responses use ### and #### for structure (e.g. "### Chart Type
+    # and Axes") which pollutes the paper's actual section hierarchy.
+    md = re.sub(r"^#{3,6}\s+\**(.+?)\**\s*$", r"**\1**", md, flags=re.MULTILINE)
+
+    # Remove headings that are just bare numbers (line number artifacts).
+    md = re.sub(r"^#{1,6}\s+\d{1,5}\s*$", "", md, flags=re.MULTILINE)
+
+    # Strip table garbage after the References section.
+    # Docling sometimes extracts two-column bibliographies as a markdown
+    # table with line numbers in the first column. These appear after the
+    # clean list-style references and add no value.
+    ref_match = re.search(r"^## References\s*$", md, re.MULTILINE)
+    if ref_match:
+        before_refs = md[:ref_match.start()]
+        refs_section = md[ref_match.start():]
+        # Keep list items (- [1] ...) and headings, strip table rows
+        ref_lines = refs_section.split("\n")
+        cleaned_ref_lines = [
+            l for l in ref_lines
+            if not l.startswith("|") and not re.match(r"^\|[-\s|]+\|$", l)
+        ]
+        md = before_refs + "\n".join(cleaned_ref_lines)
+
+    # Remove orphaned link fragments (e.g. "[. 1-15. doi:...](...)")
+    md = re.sub(r"^\[[\.\s,\d–-]+doi:[^\]]*\]\([^)]*\)\s*$", "", md, flags=re.MULTILINE)
+
     md = re.sub(r"\n{3,}", "\n\n", md)
     md = "\n".join(line.rstrip() for line in md.split("\n"))
     return md.strip()
@@ -159,7 +187,8 @@ def _build_docling_pipeline_options(vlm_config: dict[str, Any] | None = None):
             prompt=vlm_config.get("prompt", (
                 "You are an expert scientific figure analyst. "
                 "Describe this figure in 500 words for a peer reviewer who cannot see it. "
-                "Cover: chart type, axes, data series with colors, trends, and key observations."
+                "Cover: chart type, axes, data series with colors, trends, and key observations. "
+                "Write as continuous prose paragraphs. Do not use markdown headings."
             )),
         )
         logger.info("Docling VLM enabled: %s (model=%s)", vlm_config["url"], vlm_config.get("model", "default"))

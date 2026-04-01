@@ -34,7 +34,7 @@ class VerificationResult(BaseModel):
     entities_flagged: int = 0
 
 
-_VERIFY_SYSTEM = "You verify knowledge graphs extracted from academic papers. Always respond with valid JSON only."
+_VERIFY_SYSTEM = "You verify knowledge graphs extracted from academic papers. Output ONLY valid JSON. You may reason in <think> tags first."
 
 # ── Pass 1: Connectivity ──
 _VERIFY_CONNECTIVITY_PROMPT = """\
@@ -204,8 +204,12 @@ async def verify_graph(
     ground_prompt = (domain_config.verify_grounding_prompt if domain_config and domain_config.verify_grounding_prompt
                      else _VERIFY_GROUNDING_PROMPT)
 
-    # Prefer markdown for paper text, fall back to flat text
-    full_text = markdown if markdown else paper_text
+    # Prefer markdown for paper text, fall back to flat text.
+    # Truncate to ~40K chars to fit within local model context windows.
+    # Verification only needs enough text to check entity grounding and
+    # find missing concepts, not the full VLM-enriched markdown.
+    raw_text = markdown if markdown else paper_text
+    full_text = raw_text[:40000] if len(raw_text) > 40000 else raw_text
 
     edges_added = 0
 

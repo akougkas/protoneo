@@ -63,6 +63,23 @@ class LocalEndpoint(BaseModel):
     location: str = _LOCALHOST  # "localhost" or "lan"
 
 
+class VlmEndpoint(BaseModel):
+    """VLM endpoint for figure description during PDF parsing."""
+
+    url: str = ""
+    model: str = ""
+    prompt: str = (
+        "You are an expert scientific figure analyst. "
+        "Describe this figure in 500 words for a peer reviewer who cannot see it. "
+        "Cover: chart type, axes, data series with colors, trends, and key observations. "
+        "Write as continuous prose paragraphs. Do not use markdown headings."
+    )
+    temperature: float = 0.1
+    top_p: float = 0.9
+    timeout: float = 300.0
+    concurrency: int = 1
+
+
 class ModelPreset(BaseModel):
     """Named model assignment preset.
 
@@ -106,6 +123,7 @@ class ProtoNeoSettings(BaseModel):
     active_models: dict[str, str] = Field(default_factory=dict)
     presets: list[ModelPreset] = Field(default_factory=list)
     active_preset: str = Field(default="", description="Name of the currently active preset")
+    vlm_endpoint: VlmEndpoint = Field(default_factory=VlmEndpoint)
     benchmark_results: list[dict[str, Any]] = Field(default_factory=list)
     discovered_models: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
@@ -403,6 +421,14 @@ def update_settings(patch: dict[str, Any]) -> ProtoNeoSettings:
     updated = ProtoNeoSettings.model_validate(_migrate_settings_data(merged))
     save_settings(updated)
     return updated
+
+
+def build_vlm_config(settings: ProtoNeoSettings | None = None) -> dict[str, Any] | None:
+    """Build a vlm_config dict from settings, or None if no VLM endpoint is configured."""
+    s = settings or load_settings()
+    if not s.vlm_endpoint.url:
+        return None
+    return s.vlm_endpoint.model_dump()
 
 
 # ── Built-in presets ──────────────────────────────────────
