@@ -2320,7 +2320,7 @@ class TestGraphPipeline:
     def test_kernel_stages_constant(self):
         from protoneo.knowledge.pipeline import KERNEL_STAGES
 
-        assert KERNEL_STAGES == ["metadata", "ontology", "extraction", "coref", "verification", "summary"]
+        assert KERNEL_STAGES == ["enrichment", "metadata", "ontology", "extraction", "coref", "verification", "summary"]
 
     def test_stage_checkpoint_model(self):
         from protoneo.deliberation.session import StageCheckpoint
@@ -2416,6 +2416,6 @@ class TestGraphPipeline:
 
         full = KERNEL_STAGES + manifest.pipeline_stages
         assert full == [
-            "metadata", "ontology", "extraction", "coref", "verification", "summary",
+            "enrichment", "metadata", "ontology", "extraction", "coref", "verification", "summary",
             "independent_review", "deliberation", "meta_review", "pc_chair",
         ]
