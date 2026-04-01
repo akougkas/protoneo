@@ -23,7 +23,7 @@ ProtoNeo v0.1.0. Multi-agent deliberation kernel with Paper Review (academic pap
 
 ```bash
 uv sync                                    # Install deps
-uv run pytest tests/ -q                    # Run all tests (229)
+uv run pytest tests/ -q                    # Run all tests (247)
 uv run python run.py                       # Start kernel on :5002
 protoneo                                   # CLI entry point (after pip install)
 cd ui && npm install && npx vite build     # Build frontend
@@ -31,9 +31,11 @@ cd ui && npm install && npx vite build     # Build frontend
 
 ## Key Files
 
-- `protoneo/knowledge/pipeline.py`: GraphPipeline orchestrator (6-step with checkpoint-based resume)
-- `protoneo/knowledge/processor.py`: DocumentProcessor registry with parser fallback chain
-- `protoneo/knowledge/parser.py`: PDF parsing entry point (pdf2md CLI with PyMuPDF fallback)
+- `protoneo/knowledge/pipeline.py`: GraphPipeline orchestrator (7-step with checkpoint-based resume)
+- `protoneo/knowledge/processor.py`: DocumentProcessor registry with parser chain
+- `protoneo/knowledge/parser.py`: PDF parsing entry point (Docling layout analysis)
+- `protoneo/knowledge/enrichment.py`: VLM figure descriptions and LLM text cleanup
+- `protoneo/knowledge/parsers/docling_parser.py`: Docling-based PDF parser with figure extraction
 - `protoneo/export/types.py`: Exporter protocol and ExportRegistry
 - `protoneo/tools/types.py`: Tool protocol and ToolRegistry
 - `protoneo/config/schema.py`: ProtoNeoConfig, AppManifest, AppRegistration
@@ -62,20 +64,25 @@ cd ui && npm install && npx vite build     # Build frontend
 
 ## PDF Processing Pipeline
 
-PDF uploads are converted to markdown via `~/tools/paper-to-md` (pdf2md CLI):
-1. PyMuPDF extracts raw text + images (no CPU ML models)
-2. Rule-based postprocess: citations, sections, figures, bibliography, line number stripping
-3. Nemotron-Cascade-2 on dynamo (LM Studio :1234): author formatting, section detection, equation reconstruction, synthesis
-4. Qwen3-VL-30B on mini (llama-server :8081): figure descriptions via VLM
+PDF uploads are parsed by Docling (IBM, MIT license) for layout-aware extraction:
 
-The `parse_file(path, fast=False)` function in `parser.py` orchestrates this. Set `fast=True` to skip AI and use PyMuPDF only. The resulting `Document.markdown` feeds the graph pipeline and reviewers.
+1. Docling layout analysis classifies page regions (sections, figures, tables, captions, references)
+2. Structured tables extracted via TableFormer (94-98% accuracy on scientific papers)
+3. Figure bounding boxes used to crop images from pages
+4. Rich markdown output with section hierarchy and structural metadata
+
+After Docling extraction, the kernel enrichment step uses local AI:
+5. VLM (via LM Studio/Ollama) describes each extracted figure image
+6. Descriptions inserted into markdown at figure reference locations
+
+The `parse_file(path, fast=False)` function in `parser.py` orchestrates extraction. The enrichment step runs in the GraphPipeline between parse and metadata stages. The resulting `Document.markdown` feeds the graph pipeline and reviewers.
 
 ## Testing
 
-229 tests total: 149 kernel (`test_kernel.py`), 19 OAuth (`test_oauth.py`), 61 paper review (`test_paper_review.py`). Tests mock the LLM client and run without network.
+247 tests total: kernel (`test_kernel.py`), OAuth (`test_oauth.py`), paper review (`test_paper_review.py`). Tests mock the LLM client and run without network.
 
 ## Do Not
 
 - Modify files in `protoneo/` for Paper-Review-specific logic. Keep application logic in `apps/paper_review/`.
 - Import from `apps.*` inside `protoneo.*`. The kernel must not depend on any application.
-- Add Flask, Zep, OASIS, Neo4j, or other legacy dependencies.
+- Add Flask, Zep, OASIS, Neo4j, PyMuPDF, or other legacy dependencies.
