@@ -745,6 +745,13 @@ async def extract_graph(
                 added = _ingest_result(sec_name, sec_graph)
                 batch_nodes += added
                 processed += 1
+                if on_progress:
+                    on_progress("extraction_section_done", {
+                        "section": sec_name,
+                        "nodes_added": added,
+                        "processed": processed,
+                        "total_sections": total_sections,
+                    })
 
             logger.info(
                 "Batch %d: %d sections, +%d nodes (total: %d nodes, %d edges)",
