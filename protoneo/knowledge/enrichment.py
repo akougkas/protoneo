@@ -22,20 +22,30 @@ from ..llm.client import LLMClient
 logger = logging.getLogger("protoneo.knowledge.enrichment")
 
 _FIGURE_SYSTEM = (
-    "You are a scientific document analysis assistant. "
-    "Describe the figure in detail for an expert reader. "
-    "Include: what the figure shows, axis labels, data trends, "
-    "key takeaways, and any statistical patterns. "
-    "If it is a table, reproduce it as a markdown table. "
-    "If it is an equation or formula, write it in LaTeX. "
-    "Be precise and technical."
+    "You are an expert scientific figure analyst. Your descriptions will be read by "
+    "peer reviewers who cannot see the original figures. Be thorough and precise.\n\n"
+    "For charts and plots:\n"
+    "- State the chart type (bar, line, scatter, heatmap, etc.)\n"
+    "- List all axis labels, units, and scale ranges\n"
+    "- Identify every data series, legend entry, and color mapping\n"
+    "- Describe trends, inflection points, outliers, and comparisons between series\n"
+    "- Note any error bars, confidence intervals, or statistical annotations\n\n"
+    "For diagrams and architecture figures:\n"
+    "- Describe every component, box, arrow, and label\n"
+    "- Explain the data flow or process flow\n"
+    "- Note any color coding or visual groupings\n\n"
+    "For tables rendered as images:\n"
+    "- Reproduce the table as a markdown table with all values\n\n"
+    "For equations or formulas:\n"
+    "- Write the equation in LaTeX notation\n\n"
+    "Do not summarize. Describe everything visible in the figure."
 )
 
 _FIGURE_PROMPT = (
-    "Describe this figure from a scientific paper. "
+    "Describe this figure from a scientific paper.\n"
     "Caption: {caption}\n\n"
-    "Provide a detailed, technical description suitable for "
-    "a peer reviewer who cannot see the figure."
+    "Provide a complete, detailed description covering every visual element. "
+    "A peer reviewer will rely on your description to evaluate the paper's claims."
 )
 
 
@@ -46,8 +56,9 @@ class DocumentEnricher:
     Raises RuntimeError if models are unavailable.
     """
 
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, vlm_api_base: str = ""):
         self.llm = llm_client
+        self.vlm_api_base = vlm_api_base
 
     async def enrich_figures(
         self,
@@ -106,11 +117,15 @@ class DocumentEnricher:
         vlm_model: str,
         session_id: str | None = None,
     ) -> str:
-        """Send a figure image to the VLM for description."""
+        """Send a figure image to the VLM for description.
+
+        The vlm_model should be in LiteLLM format: "openai/model-name".
+        The api_base is resolved from the LLMClient's registry or passed
+        via the vlm_api_base attribute.
+        """
         img_bytes = image_path.read_bytes()
         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
-        # Determine image MIME type
         suffix = image_path.suffix.lower()
         mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
         mime_type = mime_map.get(suffix, "image/png")
@@ -133,12 +148,18 @@ class DocumentEnricher:
             },
         ]
 
+        kwargs: dict[str, Any] = {
+            "temperature": 0.1,
+            "top_p": 0.9,
+        }
+        if self.vlm_api_base:
+            kwargs["api_base"] = self.vlm_api_base
+
         response = await self.llm.complete(
             model=vlm_model,
             messages=messages,
             session_id=session_id,
-            temperature=0.2,
-            max_tokens=2048,
+            **kwargs,
         )
 
         return response.content
