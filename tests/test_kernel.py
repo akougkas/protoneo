@@ -1895,35 +1895,6 @@ class TestDocumentProcessor:
         assert "pdf2md" not in all_txt
 
 
-class TestDocumentEnricher:
-    def test_insert_descriptions_into_markdown(self):
-        from protoneo.knowledge.enrichment import DocumentEnricher
-
-        enricher = DocumentEnricher.__new__(DocumentEnricher)
-        markdown = "# Paper\n\n![Figure 1](fig1.png)\n\nSome text.\n\n![Figure 2](fig2.png)"
-        descriptions = {
-            1: "A bar chart showing throughput improvements.",
-            2: "A scatter plot of latency vs load.",
-        }
-        result = enricher.insert_descriptions_into_markdown(markdown, descriptions)
-        assert "Figure 1 Description:" in result
-        assert "bar chart" in result
-        assert "Figure 2 Description:" in result
-        assert "scatter plot" in result
-
-    @pytest.mark.asyncio
-    async def test_enrich_figures_with_missing_images(self):
-        from protoneo.knowledge.enrichment import DocumentEnricher
-
-        client = AsyncMock(spec=LLMClient)
-        enricher = DocumentEnricher(client)
-
-        figures = [{"image_path": "/nonexistent/figure1.png", "caption": "test", "index": 1}]
-        result = await enricher.enrich_figures(figures, vlm_model="test/model")
-        # Should not crash, just skip missing images
-        assert len(result) == 0
-
-
 # ── ExportRegistry ─────────────────────────────────────────
 
 class TestGraphUtilization:
@@ -2389,7 +2360,7 @@ class TestGraphPipeline:
     def test_kernel_stages_constant(self):
         from protoneo.knowledge.pipeline import KERNEL_STAGES
 
-        assert KERNEL_STAGES == ["enrichment", "metadata", "ontology", "extraction", "coref", "verification", "summary"]
+        assert KERNEL_STAGES == ["metadata", "ontology", "extraction", "coref", "verification", "summary"]
 
     def test_stage_checkpoint_model(self):
         from protoneo.deliberation.session import StageCheckpoint
@@ -2485,6 +2456,6 @@ class TestGraphPipeline:
 
         full = KERNEL_STAGES + manifest.pipeline_stages
         assert full == [
-            "enrichment", "metadata", "ontology", "extraction", "coref", "verification", "summary",
+            "metadata", "ontology", "extraction", "coref", "verification", "summary",
             "independent_review", "deliberation", "meta_review", "pc_chair",
         ]

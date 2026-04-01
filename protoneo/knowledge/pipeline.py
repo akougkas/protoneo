@@ -29,7 +29,7 @@ from .types import DomainConfig
 
 logger = logging.getLogger("protoneo.knowledge.pipeline")
 
-KERNEL_STAGES = ["enrichment", "metadata", "ontology", "extraction", "coref", "verification", "summary"]
+KERNEL_STAGES = ["metadata", "ontology", "extraction", "coref", "verification", "summary"]
 
 
 class GraphPipeline:
@@ -143,55 +143,6 @@ class GraphPipeline:
                 completed_at=_time.time(),
             ).model_dump()
             await self.sessions.update(session)
-
-        # ── Step 1.5: Enrichment (VLM figure descriptions) ──
-        if not self._has_checkpoint(session, "enrichment"):
-            figures = document.metadata.get("figures", [])
-            vlm_model = models.get("enrichment_vlm", "")
-            if figures and vlm_model:
-                ctl.enter_step("enrichment")
-                step_start = _time.time()
-                bus.emit("step_started", {
-                    "stage": "pre_review", "step": "enrichment",
-                    "message": f"Generating VLM descriptions for {len(figures)} figures...",
-                })
-
-                from .enrichment import DocumentEnricher
-                enricher = DocumentEnricher(self.llm)
-                descriptions = await enricher.enrich_figures(
-                    figures, vlm_model,
-                    session_id=session_id,
-                    on_progress=lambda evt, data: bus.emit(evt, data),
-                )
-
-                if descriptions and document.markdown:
-                    document.markdown = enricher.insert_descriptions_into_markdown(
-                        document.markdown, descriptions,
-                    )
-
-                session = await self.sessions.get(session_id)
-                if session:
-                    session.pipeline_steps["enrichment"] = StepState(
-                        status="complete", started_at=step_start,
-                        completed_at=_time.time(),
-                        model_used=vlm_model,
-                    ).model_dump()
-                    self._write_checkpoint(session, "enrichment", "")
-                    if document.markdown:
-                        session.document_markdown = document.markdown
-                    await self.sessions.update(session)
-
-                logger.info(
-                    "Enrichment complete: %d/%d figures described",
-                    len(descriptions), len(figures),
-                )
-            else:
-                if not vlm_model:
-                    logger.info("Skipping enrichment (no VLM model configured)")
-                else:
-                    logger.info("Skipping enrichment (no figures extracted)")
-        else:
-            logger.info("Skipping enrichment (checkpoint exists)")
 
         # ── Step 2: Metadata ───────────────────────────────
         if not self._has_checkpoint(session, "metadata"):

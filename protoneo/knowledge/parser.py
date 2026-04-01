@@ -1,21 +1,25 @@
 """
 Document parsing entry point.
 
-Uses Docling for layout-aware PDF extraction with figure bounding boxes,
-structured tables, and section hierarchy. Plain text and markdown files
-are read directly with charset detection.
+Uses Docling for layout-aware PDF extraction with integrated VLM
+figure descriptions. When a VLM endpoint is configured, Docling
+describes every figure inline during parsing in a single pass.
 """
 
 import logging
 import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from ..agents.types import Document
 
 logger = logging.getLogger("protoneo.knowledge.parser")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".html", ".md", ".markdown", ".txt"}
+
+# Lines that are bare numbers (PDF line number artifacts from two-column layouts)
+_BARE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*$")
 
 
 def _resolve_caption(document, element) -> str:
@@ -42,21 +46,13 @@ def _resolve_caption(document, element) -> str:
                     return text
     return ""
 
-# Lines that are bare numbers (PDF line number artifacts from two-column layouts)
-_BARE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*$")
-
 
 def _strip_line_number_pollution(text: str) -> str:
     """Remove bare line numbers from two-column PDF extraction.
 
     ACM and IEEE two-column papers have page-margin line numbers that get
-    extracted as standalone lines (e.g., "1", "2", ... "91"). This removes
-    all bare-number lines that appear to be sequential page line numbers,
-    not just leading/trailing ones.
-
-    Detection heuristic: if a bare-number line is within 3 of the previous
-    bare-number value, it is a sequential line number and gets removed.
-    Isolated bare numbers (e.g., a year "2024") are preserved.
+    extracted as standalone lines. This removes all bare-number lines that
+    appear to be sequential page line numbers.
     """
     lines = text.split("\n")
     result: list[str] = []
@@ -70,7 +66,6 @@ def _strip_line_number_pollution(text: str) -> str:
             except ValueError:
                 result.append(line)
                 continue
-            # Sequential line number: within 3 of the last one
             if abs(num - last_num) <= 3 or (last_num < 0 and num <= 5):
                 last_num = num
                 stripped += 1
@@ -88,6 +83,14 @@ def _strip_line_number_pollution(text: str) -> str:
     return "\n".join(result)
 
 
+def _clean_markdown(md: str) -> str:
+    """Final cleansing pass on Docling markdown output."""
+    md = re.sub(r"\n*<!-- image -->\n*", "\n\n", md)
+    md = re.sub(r"\n{3,}", "\n\n", md)
+    md = "\n".join(line.rstrip() for line in md.split("\n"))
+    return md.strip()
+
+
 def _read_text_with_fallback(file_path: str) -> str:
     """Read a text file with charset detection fallback."""
     data = Path(file_path).read_bytes()
@@ -99,7 +102,6 @@ def _read_text_with_fallback(file_path: str) -> str:
     encoding = None
     try:
         from charset_normalizer import from_bytes
-
         best = from_bytes(data).best()
         if best and best.encoding:
             encoding = best.encoding
@@ -109,7 +111,6 @@ def _read_text_with_fallback(file_path: str) -> str:
     if not encoding:
         try:
             import chardet
-
             result = chardet.detect(data)
             encoding = result.get("encoding") if result else None
         except Exception:
@@ -118,13 +119,67 @@ def _read_text_with_fallback(file_path: str) -> str:
     return data.decode(encoding or "utf-8", errors="replace")
 
 
-def _parse_pdf_docling(file_path: str) -> tuple[str, str, list[dict], str]:
+def _build_docling_pipeline_options(vlm_config: dict[str, Any] | None = None):
+    """Build Docling PdfPipelineOptions with optional VLM integration.
+
+    Args:
+        vlm_config: Optional dict with keys:
+            - url: VLM API endpoint (e.g., "http://host:8081/v1/chat/completions")
+            - model: model name (e.g., "qwen3-vl-8b")
+            - prompt: description prompt
+            - temperature, top_p: inference params
+            - timeout: request timeout in seconds
+    """
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+    opts = PdfPipelineOptions()
+    opts.images_scale = 2.0
+    opts.generate_page_images = False
+    opts.generate_picture_images = True
+    opts.do_ocr = False
+
+    if vlm_config and vlm_config.get("url"):
+        from docling.datamodel.pipeline_options import PictureDescriptionApiOptions
+
+        params: dict[str, Any] = {}
+        if vlm_config.get("model"):
+            params["model"] = vlm_config["model"]
+        if vlm_config.get("temperature") is not None:
+            params["temperature"] = vlm_config["temperature"]
+        if vlm_config.get("top_p") is not None:
+            params["top_p"] = vlm_config["top_p"]
+
+        opts.do_picture_description = True
+        opts.enable_remote_services = True
+        opts.picture_description_options = PictureDescriptionApiOptions(
+            url=vlm_config["url"],
+            params=params,
+            timeout=vlm_config.get("timeout", 300.0),
+            concurrency=vlm_config.get("concurrency", 1),
+            prompt=vlm_config.get("prompt", (
+                "You are an expert scientific figure analyst. "
+                "Describe this figure in 500 words for a peer reviewer who cannot see it. "
+                "Cover: chart type, axes, data series with colors, trends, and key observations."
+            )),
+        )
+        logger.info("Docling VLM enabled: %s (model=%s)", vlm_config["url"], vlm_config.get("model", "default"))
+
+    return opts
+
+
+def _parse_pdf_docling(
+    file_path: str,
+    vlm_config: dict[str, Any] | None = None,
+) -> tuple[str, str, list[dict], str]:
     """Parse a PDF using Docling's layout analysis engine.
+
+    When vlm_config is provided, Docling describes every figure inline
+    during parsing using the configured VLM endpoint. No separate
+    enrichment step needed.
 
     Returns (text, markdown, figures, figures_dir).
     """
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
 
@@ -132,10 +187,7 @@ def _parse_pdf_docling(file_path: str) -> tuple[str, str, list[dict], str]:
     output_dir = path.parent / f"{path.stem}_figures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.images_scale = 2.0
-    pipeline_options.generate_page_images = False
-    pipeline_options.generate_picture_images = True
+    pipeline_options = _build_docling_pipeline_options(vlm_config)
 
     converter = DocumentConverter(
         format_options={
@@ -206,17 +258,25 @@ def _parse_pdf_docling(file_path: str) -> tuple[str, str, list[dict], str]:
     return text, markdown, figures, str(output_dir)
 
 
-def parse_file(file_path: str, fast: bool = False) -> Document:
+def parse_file(
+    file_path: str,
+    fast: bool = False,
+    vlm_config: dict[str, Any] | None = None,
+) -> Document:
     """Parse a single file into a Document.
 
     For PDFs: uses Docling for layout-aware extraction with figure
     bounding boxes, structured tables, and section hierarchy.
 
-    When fast=True, Docling still runs (it is the only parser) but
-    downstream AI enrichment (VLM figure descriptions) is skipped
-    by the pipeline.
+    When vlm_config is provided and fast=False, Docling uses the VLM
+    to describe every figure inline during parsing. No separate
+    enrichment step is needed.
 
-    For .md/.txt files: reads directly with charset detection.
+    Args:
+        file_path: Path to the file.
+        fast: If True, skip VLM enrichment (structure extraction only).
+        vlm_config: Optional VLM endpoint configuration dict with keys:
+            url, model, prompt, temperature, top_p, timeout.
     """
     path = Path(file_path)
     if not path.exists():
@@ -227,12 +287,12 @@ def parse_file(file_path: str, fast: bool = False) -> Document:
         raise ValueError(f"Unsupported file format: {suffix}")
 
     if suffix == ".pdf":
-        text, markdown, figures, figures_dir = _parse_pdf_docling(file_path)
+        effective_vlm = None if fast else vlm_config
+        text, markdown, figures, figures_dir = _parse_pdf_docling(file_path, effective_vlm)
         text = _strip_line_number_pollution(text)
         markdown = _strip_line_number_pollution(markdown)
-        # Collapse runs of 3+ empty lines to 2 (cleaned up after line-number removal)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
+        text = _clean_markdown(text)
+        markdown = _clean_markdown(markdown)
         return Document(
             document_id=uuid.uuid4().hex,
             filename=path.name,

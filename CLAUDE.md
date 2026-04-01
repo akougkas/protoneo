@@ -31,10 +31,9 @@ cd ui && npm install && npx vite build     # Build frontend
 
 ## Key Files
 
-- `protoneo/knowledge/pipeline.py`: GraphPipeline orchestrator (7-step with checkpoint-based resume)
+- `protoneo/knowledge/pipeline.py`: GraphPipeline orchestrator (6-step with checkpoint-based resume)
 - `protoneo/knowledge/processor.py`: DocumentProcessor registry with parser chain
-- `protoneo/knowledge/parser.py`: PDF parsing entry point (Docling layout analysis)
-- `protoneo/knowledge/enrichment.py`: VLM figure descriptions and LLM text cleanup
+- `protoneo/knowledge/parser.py`: PDF parsing entry point (Docling + integrated VLM)
 - `protoneo/knowledge/parsers/docling_parser.py`: Docling-based PDF parser with figure extraction
 - `protoneo/export/types.py`: Exporter protocol and ExportRegistry
 - `protoneo/tools/types.py`: Tool protocol and ToolRegistry
@@ -64,18 +63,15 @@ cd ui && npm install && npx vite build     # Build frontend
 
 ## PDF Processing Pipeline
 
-PDF uploads are parsed by Docling (IBM, MIT license) for layout-aware extraction:
+PDF uploads are parsed by Docling (IBM, MIT license) with integrated VLM in a single pass:
 
 1. Docling layout analysis classifies page regions (sections, figures, tables, captions, references)
 2. Structured tables extracted via TableFormer (94-98% accuracy on scientific papers)
 3. Figure bounding boxes used to crop images from pages
-4. Rich markdown output with section hierarchy and structural metadata
+4. VLM describes every figure inline during parsing via Docling's `PictureDescriptionApiOptions`
+5. Rich markdown output with section hierarchy, figure descriptions, and structural metadata
 
-After Docling extraction, the kernel enrichment step uses local AI:
-5. VLM (via LM Studio/Ollama) describes each extracted figure image
-6. Descriptions inserted into markdown at figure reference locations
-
-The `parse_file(path, fast=False)` function in `parser.py` orchestrates extraction. The enrichment step runs in the GraphPipeline between parse and metadata stages. The resulting `Document.markdown` feeds the graph pipeline and reviewers.
+The `parse_file(path, vlm_config={...})` function in `parser.py` configures Docling with the VLM endpoint (llama-server with mmproj). When `fast=True`, VLM is skipped and only structural extraction runs. The resulting `Document.markdown` feeds the graph pipeline and reviewers.
 
 ## Testing
 
