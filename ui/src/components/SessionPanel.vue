@@ -21,6 +21,9 @@
             :class="['sub-step', stepClass(step.key)]"
           >
             {{ step.label }}
+            <span v-if="step.key === 'deliberation' && deliberationRound.current > 0" class="sub-step-round">
+              R{{ deliberationRound.current }}{{ deliberationRound.total ? '/' + deliberationRound.total : '' }}
+            </span>
             <span v-if="pipelineSteps[step.key]?.model" class="sub-step-model">{{ shortModel(pipelineSteps[step.key].model) }}</span>
             <span v-if="pipelineSteps[step.key]?.duration" class="sub-step-dur">{{ Math.round(pipelineSteps[step.key].duration) }}s</span>
           </span>
@@ -168,7 +171,7 @@
         v-for="agent in agents"
         :key="agent.id"
         :agent="agent"
-        :streaming-text="agentStreams[agent.id] || ''"
+        :streaming-text="displayStreams[agent.id] || ''"
       />
     </div>
 
@@ -192,9 +195,9 @@
     </div>
 
     <!-- PC Chair Review -->
-    <div v-if="pcChairReview" class="pc-chair-section">
+    <div v-if="pcChairReview" class="card-chair-section">
       <h3 class="section-header">PC Chair Review</h3>
-      <div class="pc-chair-content" v-html="md(pcChairReview)"></div>
+      <div class="card-chair-content" v-html="md(pcChairReview)"></div>
     </div>
 
     <!-- Events Log (collapsible) -->
@@ -204,7 +207,7 @@
         <span class="toggle">{{ showEvents ? '−' : '+' }}</span>
       </h3>
       <div v-if="showEvents" class="events-log">
-        <div v-for="(evt, i) in events" :key="i" class="event-entry">
+        <div v-for="evt in events" :key="evt._id" class="event-entry">
           <span class="event-time">{{ evt.time }}</span>
           <span class="event-text">{{ evt.text }}</span>
         </div>
@@ -236,7 +239,7 @@ import { getSession, getReviewPacket, connectStream, pipelineAdvance, pipelinePa
 import { renderMarkdown } from '../utils/markdown.js'
 import AgentCard from './AgentCard.vue'
 import ReviewPacket from './ReviewPacket.vue'
-import FinalReview from './FinalReview.vue'
+import FinalReview from './ResultEditor.vue'
 
 const md = renderMarkdown
 
@@ -283,7 +286,17 @@ const events = ref([])
 const showEvents = ref(true)
 const packet = ref(null)
 const error = ref('')
-const agentStreams = reactive({})
+const _rawStreams = {}
+const displayStreams = reactive({})
+let _streamDirty = false
+function _flushStreams() {
+  _streamDirty = false
+  for (const k in _rawStreams) {
+    if (displayStreams[k] !== _rawStreams[k]) {
+      displayStreams[k] = _rawStreams[k]
+    }
+  }
+}
 const pipelineMessage = ref('')
 const pipelinePaused = ref(false)
 const showGate = ref(false)
@@ -296,6 +309,7 @@ const pipelineSteps = reactive({})
 const stepMeta = reactive({})
 const expandedStep = ref('')
 const deliberationChat = ref([])
+const deliberationRound = ref({ current: 0, total: 0 })
 const pcChairReview = ref('')
 const finalReview = ref(null)
 const finalReviewRef = ref(null)
@@ -388,10 +402,14 @@ function stepClass(key) {
   return 'step-pending'
 }
 
+let _evtId = 0
 function addEvent(text) {
   const now = new Date()
   const time = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  events.value.push({ time, text })
+  events.value.push({ _id: ++_evtId, time, text })
+  if (events.value.length > 200) {
+    events.value = events.value.slice(-200)
+  }
 }
 
 function updateAgent(id, role, agentStatus, extra = {}) {
@@ -595,14 +613,19 @@ function handleStreamEvent(evt) {
       tokens: evt.tokens,
       completionTokens: evt.completion_tokens,
     })
-    delete agentStreams[evt.agent_id]
+    delete _rawStreams[evt.agent_id]
+    delete displayStreams[evt.agent_id]
     const dur = evt.duration_seconds ? ` (${evt.duration_seconds}s)` : ''
     const tok = evt.tokens ? ` [${evt.tokens} tokens]` : ''
     addEvent(`${evt.role || evt.agent_id} finished${dur}${tok}`)
   } else if (evt.type === 'token') {
     const aid = evt.agent_id
-    if (!agentStreams[aid]) agentStreams[aid] = ''
-    agentStreams[aid] += evt.chunk
+    if (!_rawStreams[aid]) _rawStreams[aid] = ''
+    _rawStreams[aid] += evt.chunk
+    if (!_streamDirty) {
+      _streamDirty = true
+      requestAnimationFrame(_flushStreams)
+    }
     return
   } else if (evt.type === 'agent_error') {
     updateAgent(evt.agent_id, evt.role || evt.agent_id, 'error')
@@ -612,7 +635,7 @@ function handleStreamEvent(evt) {
   // ── Deliberation ────────────────────────────────────
   else if (evt.type === 'deliberation_turn') {
     const aid = evt.agent_id
-    const content = evt.content || agentStreams[aid] || ''
+    const content = evt.content || _rawStreams[aid] || ''
     if (content) {
       deliberationChat.value.push({
         role: evt.role || aid,
@@ -622,7 +645,10 @@ function handleStreamEvent(evt) {
       })
     }
   } else if (evt.type === 'round_start') {
-    addEvent(`Deliberation round ${evt.round}`)
+    deliberationRound.value.current = evt.round
+    addEvent(`Deliberation round ${evt.round}${deliberationRound.value.total ? ' of ' + deliberationRound.value.total : ''}`)
+  } else if (evt.type === 'consensus_detected' || evt.type === 'contested_detected') {
+    deliberationRound.value.total = evt.effective_rounds || 0
   }
 
   // ── PC Chair ────────────────────────────────────────
@@ -1307,7 +1333,7 @@ onUnmounted(() => {
 }
 
 /* PC Chair review */
-.pc-chair-section {
+.card-chair-section {
   margin-bottom: 24px;
   border: 2px solid #000;
   border-radius: 6px;
@@ -1315,24 +1341,24 @@ onUnmounted(() => {
   background: #fafafa;
 }
 
-.pc-chair-content {
+.card-chair-content {
   font-size: 14px;
   line-height: 1.7;
   color: #333;
 }
-.pc-chair-content h2, .pc-chair-content h3, .pc-chair-content h4 {
+.card-chair-content h2, .card-chair-content h3, .card-chair-content h4 {
   font-size: 14px; font-weight: 600; margin: 16px 0 8px; color: #222;
 }
-.pc-chair-content strong { font-weight: 600; }
-.pc-chair-content code {
+.card-chair-content strong { font-weight: 600; }
+.card-chair-content code {
   font-family: 'JetBrains Mono', monospace; font-size: 12px;
   background: #f4f4f4; padding: 1px 4px; border-radius: 2px;
 }
-.pc-chair-content li { margin-bottom: 4px; }
-.pc-chair-content p { margin: 0 0 8px; }
-.pc-chair-content .md-table { border-collapse: collapse; font-size: 12px; margin: 8px 0; width: 100%; }
-.pc-chair-content .md-table td { border: 1px solid #ddd; padding: 4px 8px; }
-.pc-chair-content .md-table tr:first-child td { font-weight: 600; background: #f8f8f8; }
+.card-chair-content li { margin-bottom: 4px; }
+.card-chair-content p { margin: 0 0 8px; }
+.card-chair-content .md-table { border-collapse: collapse; font-size: 12px; margin: 8px 0; width: 100%; }
+.card-chair-content .md-table td { border: 1px solid #ddd; padding: 4px 8px; }
+.card-chair-content .md-table tr:first-child td { font-weight: 600; background: #f8f8f8; }
 
 /* Events */
 .events-section {
@@ -1546,6 +1572,13 @@ onUnmounted(() => {
   font-family: 'JetBrains Mono', monospace;
   font-size: 8px;
   opacity: 0.5;
+}
+
+.sub-step-round {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  color: #e8a500;
+  font-weight: 600;
 }
 
 .gate-btn.view-graph:hover { border-color: #000; color: #000; }
