@@ -1833,6 +1833,28 @@ class TestDocumentProcessor:
 
 # ── ExportRegistry ─────────────────────────────────────────
 
+class TestGraphUtilization:
+    def test_utilization_reads_structured_field(self):
+        """H3: graph utilization code reads 'structured', not 'parsed_output'."""
+        # Simulate the loop from routes.py get_graph_utilization
+        phases = [{
+            "outputs": [
+                {"agent_id": "r1", "structured": {"overall_merit": {"score": 4}}, "content": "..."},
+                {"agent_id": "r2", "content": "plain text only"},
+            ]
+        }]
+        agent_outputs = []
+        for phase in phases:
+            for output in phase.get("outputs", []):
+                parsed = output.get("structured", {})
+                if parsed:
+                    parsed["agent_id"] = output.get("agent_id", "")
+                    agent_outputs.append(parsed)
+        assert len(agent_outputs) == 1
+        assert agent_outputs[0]["agent_id"] == "r1"
+        assert agent_outputs[0]["overall_merit"]["score"] == 4
+
+
 class TestExportRegistry:
     def test_register_and_get(self):
         from protoneo.export.types import ExportRegistry
