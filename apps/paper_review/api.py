@@ -1441,6 +1441,11 @@ async def get_review_packet(session_id: str):
     if not session.result:
         raise HTTPException(status_code=404, detail="No result available")
 
+    # Return cached packet if available
+    cached = session.app_data.get("review_packet")
+    if cached:
+        return cached
+
     try:
         result = DeliberationResult.model_validate(session.result)
     except Exception as e:
@@ -1474,6 +1479,11 @@ async def get_review_packet(session_id: str):
 
     data = packet.model_dump(mode="json")
     data["final_review"] = session.result.get("final_review", {})
+
+    # Cache for subsequent requests
+    session.app_data["review_packet"] = data
+    await _session_manager.update(session)
+
     return data
 
 @router.get("/sessions/{session_id}/review-packet.md")
