@@ -131,7 +131,7 @@ class GraphPipeline:
 
         # ── Step 1: Parse ──────────────────────────────────
         ctl.enter_step("parse")
-        step_start = _time.monotonic()
+        step_start = _time.time()
         bus.emit("step_started", {
             "stage": "pre_review", "step": "parse",
             "message": "PDF parsed, extracting structure...",
@@ -140,14 +140,14 @@ class GraphPipeline:
         if session:
             session.pipeline_steps["parse"] = StepState(
                 status="complete", started_at=step_start,
-                completed_at=_time.monotonic(),
+                completed_at=_time.time(),
             ).model_dump()
             await self.sessions.update(session)
 
         # ── Step 2: Metadata ───────────────────────────────
         if not self._has_checkpoint(session, "metadata"):
             ctl.enter_step("metadata")
-            step_start = _time.monotonic()
+            step_start = _time.time()
             bus.emit("step_started", {
                 "stage": "pre_review", "step": "metadata",
                 "message": "Running NLP pre-pass: metadata, citations, equations...",
@@ -184,7 +184,7 @@ class GraphPipeline:
                     session.config.setdefault("metadata", {})["paper_title"] = metadata.title
                 session.pipeline_steps["nlp_prepass"] = StepState(
                     status="complete", started_at=step_start,
-                    completed_at=_time.monotonic(),
+                    completed_at=_time.time(),
                     nodes_added=len(paper_graph.nodes),
                     edges_added=len(paper_graph.edges),
                 ).model_dump()
@@ -198,7 +198,7 @@ class GraphPipeline:
         # ── Step 3: Ontology ───────────────────────────────
         if not self._has_checkpoint(session, "ontology"):
             ctl.enter_step("ontology")
-            step_start = _time.monotonic()
+            step_start = _time.time()
             bus.emit("step_started", {
                 "stage": "pre_review", "step": "ontology",
                 "message": f"Generating ontology for: {metadata.title[:80] if metadata.title else 'document'}...",
@@ -228,7 +228,7 @@ class GraphPipeline:
             if session:
                 session.pipeline_steps["ontology"] = StepState(
                     status="complete", started_at=step_start,
-                    completed_at=_time.monotonic(),
+                    completed_at=_time.time(),
                     model_used=ontology_model,
                     nodes_added=len(paper_graph.nodes),
                     edges_added=len(paper_graph.edges),
@@ -253,7 +253,7 @@ class GraphPipeline:
         # ── Step 4: Extraction ─────────────────────────────
         if not self._has_checkpoint(session, "extraction"):
             ctl.enter_step("extract")
-            step_start = _time.monotonic()
+            step_start = _time.time()
             nodes_before = len(paper_graph.nodes)
             bus.emit("step_started", {
                 "stage": "pre_review", "step": "extract",
@@ -281,7 +281,7 @@ class GraphPipeline:
             if session:
                 session.pipeline_steps["extract"] = StepState(
                     status="complete", started_at=step_start,
-                    completed_at=_time.monotonic(),
+                    completed_at=_time.time(),
                     model_used=extraction_model,
                     nodes_added=len(paper_graph.nodes) - nodes_before,
                     edges_added=len(paper_graph.edges),
@@ -295,7 +295,7 @@ class GraphPipeline:
         # ── Step 5: Coreference Resolution ─────────────────
         if not self._has_checkpoint(session, "coref"):
             ctl.enter_step("coref")
-            step_start = _time.monotonic()
+            step_start = _time.time()
             bus.emit("step_started", {
                 "stage": "pre_review", "step": "coref",
                 "message": "Resolving co-references and linking abbreviations...",
@@ -326,7 +326,7 @@ class GraphPipeline:
             if session:
                 session.pipeline_steps["coref"] = StepState(
                     status="complete", started_at=step_start,
-                    completed_at=_time.monotonic(),
+                    completed_at=_time.time(),
                     model_used=coref_model,
                 ).model_dump()
                 session.graph_after_step["coref"] = paper_graph.snapshot()
@@ -338,7 +338,7 @@ class GraphPipeline:
         # ── Step 6: Verification ───────────────────────────
         if not self._has_checkpoint(session, "verification"):
             ctl.enter_step("verify")
-            step_start = _time.monotonic()
+            step_start = _time.time()
             bus.emit("step_started", {
                 "stage": "pre_review", "step": "verify",
                 "message": "Running 3-check verification audit...",
@@ -373,7 +373,7 @@ class GraphPipeline:
             if session:
                 session.pipeline_steps["verify"] = StepState(
                     status="complete", started_at=step_start,
-                    completed_at=_time.monotonic(),
+                    completed_at=_time.time(),
                     model_used=verification_model,
                     entities_flagged=verification.entities_flagged,
                 ).model_dump()
@@ -386,7 +386,7 @@ class GraphPipeline:
         # ── Step 7: Summary ────────────────────────────────
         if not self._has_checkpoint(session, "summary"):
             ctl.enter_step("summarize")
-            step_start = _time.monotonic()
+            step_start = _time.time()
             bus.emit("step_started", {
                 "stage": "pre_review", "step": "summarize",
                 "message": "Generating graph summary for agents...",
@@ -409,7 +409,7 @@ class GraphPipeline:
                 session.current_stage = "pre_review"
                 session.pipeline_steps["summarize"] = StepState(
                     status="complete", started_at=step_start,
-                    completed_at=_time.monotonic(),
+                    completed_at=_time.time(),
                     nodes_added=len(paper_graph.nodes),
                     edges_added=len(paper_graph.edges),
                 ).model_dump()
