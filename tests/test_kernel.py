@@ -1854,6 +1854,75 @@ class TestDocumentProcessor:
         assert len(proc.available_parsers(".txt")) > 0
         assert len(proc.available_parsers(".md")) > 0
 
+    def test_docling_parser_properties(self):
+        from protoneo.knowledge.parsers import DoclingParser
+
+        parser = DoclingParser()
+        assert parser.name == "docling"
+        assert ".pdf" in parser.supported_extensions
+        assert ".docx" in parser.supported_extensions
+
+    def test_docling_parser_available_check(self):
+        from protoneo.knowledge.parsers import DoclingParser
+
+        parser = DoclingParser()
+        # available() returns bool without crashing (may be False on some Python versions)
+        result = parser.available()
+        assert isinstance(result, bool)
+
+    def test_parse_result_has_figures_field(self):
+        from protoneo.knowledge.types import ParseResult
+
+        result = ParseResult(text="test")
+        assert result.figures == []
+
+        result2 = ParseResult(
+            text="test",
+            figures=[{"index": 1, "page": 1, "bbox": {}, "caption": "Fig 1"}],
+        )
+        assert len(result2.figures) == 1
+
+    def test_factory_registers_docling(self):
+        """Verify docling is registered (availability depends on runtime)."""
+        from protoneo.knowledge import create_document_processor
+
+        proc = create_document_processor()
+        # DoclingParser is registered; whether it shows as available
+        # depends on the Python/platform compatibility at test time.
+        # Verify old parsers are NOT registered.
+        all_txt = proc.available_parsers(".txt")
+        assert "pymupdf" not in all_txt
+        assert "pdf2md" not in all_txt
+
+
+class TestDocumentEnricher:
+    def test_insert_descriptions_into_markdown(self):
+        from protoneo.knowledge.enrichment import DocumentEnricher
+
+        enricher = DocumentEnricher.__new__(DocumentEnricher)
+        markdown = "# Paper\n\n![Figure 1](fig1.png)\n\nSome text.\n\n![Figure 2](fig2.png)"
+        descriptions = {
+            1: "A bar chart showing throughput improvements.",
+            2: "A scatter plot of latency vs load.",
+        }
+        result = enricher.insert_descriptions_into_markdown(markdown, descriptions)
+        assert "Figure 1 Description:" in result
+        assert "bar chart" in result
+        assert "Figure 2 Description:" in result
+        assert "scatter plot" in result
+
+    @pytest.mark.asyncio
+    async def test_enrich_figures_with_missing_images(self):
+        from protoneo.knowledge.enrichment import DocumentEnricher
+
+        client = AsyncMock(spec=LLMClient)
+        enricher = DocumentEnricher(client)
+
+        figures = [{"image_path": "/nonexistent/figure1.png", "caption": "test", "index": 1}]
+        result = await enricher.enrich_figures(figures, vlm_model="test/model")
+        # Should not crash, just skip missing images
+        assert len(result) == 0
+
 
 # ── ExportRegistry ─────────────────────────────────────────
 

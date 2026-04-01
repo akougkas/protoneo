@@ -35,7 +35,7 @@ class DoclingParser:
         try:
             from docling.document_converter import DocumentConverter  # noqa: F401
             return True
-        except ImportError:
+        except Exception:
             return False
 
     async def parse(self, path: Path, options: dict | None = None) -> ParseResult:
