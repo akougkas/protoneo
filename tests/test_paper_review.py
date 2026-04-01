@@ -663,3 +663,37 @@ class TestPdfExport:
         assert len(pdf) > 100
         # PDF magic bytes
         assert pdf[:5] == b"%PDF-"
+
+
+# ── Review Checkpoints ────────────────────────────────────────
+
+class TestReviewCheckpoints:
+    def test_write_review_checkpoint(self):
+        """C4: _write_review_checkpoint appends a StageCheckpoint."""
+        from protoneo.deliberation.session import Session
+        from apps.paper_review.pipeline import _write_review_checkpoint
+
+        session = Session()
+        assert len(session.checkpoints) == 0
+
+        _write_review_checkpoint(session, "independent_review")
+        assert len(session.checkpoints) == 1
+        assert session.checkpoints[0].stage_name == "independent_review"
+        assert session.last_checkpoint == "independent_review"
+
+        # Writing same checkpoint again is idempotent
+        _write_review_checkpoint(session, "independent_review")
+        assert len(session.checkpoints) == 1
+
+    def test_all_review_stages_get_checkpoints(self):
+        """C4: all four review stages can be checkpointed."""
+        from protoneo.deliberation.session import Session
+        from apps.paper_review.pipeline import _write_review_checkpoint
+
+        session = Session()
+        for stage in ["independent_review", "deliberation", "meta_review", "pc_chair"]:
+            _write_review_checkpoint(session, stage)
+
+        assert len(session.checkpoints) == 4
+        names = [cp.stage_name for cp in session.checkpoints]
+        assert names == ["independent_review", "deliberation", "meta_review", "pc_chair"]

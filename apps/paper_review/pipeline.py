@@ -23,7 +23,7 @@ from protoneo.api.routes import (
     get_session_ontologies,
 )
 from protoneo.config.schema import AgentConfig, DeliberationConfig
-from protoneo.deliberation.session import SessionStatus
+from protoneo.deliberation.session import SessionStatus, StageCheckpoint
 from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.graph import KnowledgeGraph
 from .conference import ConferenceProfile
@@ -40,6 +40,18 @@ logger = logging.getLogger("protoneo.paper_review.pipeline")
 # Use kernel-level caches (shared with kernel routes)
 _session_graphs = get_session_graphs()
 _session_ontologies = get_session_ontologies()
+
+
+def _write_review_checkpoint(session, stage_name: str) -> None:
+    """Write a checkpoint for a completed review stage."""
+    from datetime import datetime, timezone
+    if not any(cp.stage_name == stage_name for cp in session.checkpoints):
+        session.checkpoints.append(StageCheckpoint(
+            stage_name=stage_name,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            output_key="result",
+        ))
+        session.last_checkpoint = stage_name
 
 
 async def _run_review_stage(
@@ -104,11 +116,13 @@ async def _run_review_stage(
         on_event=on_event,
     )
 
-    # Store result
+    # Store result and write per-phase review checkpoints
     session = await _session_manager.get(sid)
     if session:
         session.result = result.model_dump(mode="json")
         session.status = SessionStatus.RUNNING
+        for phase in result.phases:
+            _write_review_checkpoint(session, phase.phase_name)
         await _session_manager.update(session)
 
     # Annotate graph with review findings (derive roles from agent configs)
@@ -309,6 +323,7 @@ async def _run_pc_chair_review(
             session.result["pc_chair_review"] = final_review.get(
                 "comments_for_authors", pc_chair_review
             )
+            _write_review_checkpoint(session, "pc_chair")
             await _session_manager.update(session)
 
         bus.emit("pc_chair_review_done", {
