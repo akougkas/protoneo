@@ -17,36 +17,75 @@ logger = logging.getLogger("protoneo.knowledge.parser")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".html", ".md", ".markdown", ".txt"}
 
+
+def _resolve_caption(document, element) -> str:
+    """Resolve caption text from a Docling PictureItem's RefItem references."""
+    captions = getattr(element, "captions", [])
+    if not captions:
+        return ""
+    for cap_ref in captions:
+        cref = getattr(cap_ref, "cref", "")
+        if not cref:
+            continue
+        parts = cref.lstrip("#/").split("/")
+        if len(parts) == 2:
+            collection_name, idx_str = parts
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                continue
+            collection = getattr(document, collection_name, [])
+            if idx < len(collection):
+                item = collection[idx]
+                text = getattr(item, "text", "")
+                if text:
+                    return text
+    return ""
+
 # Lines that are bare numbers (PDF line number artifacts from two-column layouts)
 _BARE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*$")
 
 
 def _strip_line_number_pollution(text: str) -> str:
-    """Remove leading/trailing runs of bare line numbers from PDF extraction.
+    """Remove bare line numbers from two-column PDF extraction.
 
-    Two-column ACM PDFs often have page line numbers extracted as content.
-    This strips consecutive bare-number lines from the start and end of the
-    document while preserving legitimate single-number content in the middle.
+    ACM and IEEE two-column papers have page-margin line numbers that get
+    extracted as standalone lines (e.g., "1", "2", ... "91"). This removes
+    all bare-number lines that appear to be sequential page line numbers,
+    not just leading/trailing ones.
+
+    Detection heuristic: if a bare-number line is within 3 of the previous
+    bare-number value, it is a sequential line number and gets removed.
+    Isolated bare numbers (e.g., a year "2024") are preserved.
     """
     lines = text.split("\n")
+    result: list[str] = []
+    stripped = 0
+    last_num = -100
 
-    start = 0
-    while start < len(lines) and _BARE_NUMBER_RE.match(lines[start]):
-        start += 1
+    for line in lines:
+        if _BARE_NUMBER_RE.match(line):
+            try:
+                num = int(line.strip())
+            except ValueError:
+                result.append(line)
+                continue
+            # Sequential line number: within 3 of the last one
+            if abs(num - last_num) <= 3 or (last_num < 0 and num <= 5):
+                last_num = num
+                stripped += 1
+                continue
+            last_num = num
+            stripped += 1
+            continue
+        else:
+            last_num = -100
+        result.append(line)
 
-    end = len(lines)
-    while end > start and _BARE_NUMBER_RE.match(lines[end - 1]):
-        end -= 1
+    if stripped > 0:
+        logger.info("Stripped %d bare line-number lines from PDF text", stripped)
 
-    if start > 0 or end < len(lines):
-        stripped_leading = start
-        stripped_trailing = len(lines) - end
-        logger.info(
-            "Stripped %d leading and %d trailing line-number lines from PDF text",
-            stripped_leading, stripped_trailing,
-        )
-
-    return "\n".join(lines[start:end])
+    return "\n".join(result)
 
 
 def _read_text_with_fallback(file_path: str) -> str:
@@ -134,11 +173,7 @@ def _parse_pdf_docling(file_path: str) -> tuple[str, str, list[dict], str]:
                             "r": prov.bbox.r, "b": prov.bbox.b,
                         }
 
-                caption = ""
-                for cap in getattr(element, "captions", []):
-                    if hasattr(cap, "text"):
-                        caption = cap.text
-                        break
+                caption = _resolve_caption(conv_res.document, element)
 
                 figures.append({
                     "index": picture_counter,
@@ -194,6 +229,10 @@ def parse_file(file_path: str, fast: bool = False) -> Document:
     if suffix == ".pdf":
         text, markdown, figures, figures_dir = _parse_pdf_docling(file_path)
         text = _strip_line_number_pollution(text)
+        markdown = _strip_line_number_pollution(markdown)
+        # Collapse runs of 3+ empty lines to 2 (cleaned up after line-number removal)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
         return Document(
             document_id=uuid.uuid4().hex,
             filename=path.name,

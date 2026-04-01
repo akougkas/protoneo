@@ -15,6 +15,31 @@ logger = logging.getLogger("protoneo.knowledge.parsers.docling")
 _IMAGE_RESOLUTION_SCALE = 2.0
 
 
+def _resolve_caption(document, element) -> str:
+    """Resolve caption text from a PictureItem's RefItem references."""
+    captions = getattr(element, "captions", [])
+    if not captions:
+        return ""
+    for cap_ref in captions:
+        cref = getattr(cap_ref, "cref", "")
+        if not cref:
+            continue
+        parts = cref.lstrip("#/").split("/")
+        if len(parts) == 2:
+            collection_name, idx_str = parts
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                continue
+            collection = getattr(document, collection_name, [])
+            if idx < len(collection):
+                item = collection[idx]
+                text = getattr(item, "text", "")
+                if text:
+                    return text
+    return ""
+
+
 class DoclingParser:
     """Extracts structured content from PDFs using Docling's layout analysis.
 
@@ -94,12 +119,8 @@ class DoclingParser:
                                 "b": prov.bbox.b,
                             }
 
-                    # Try to find an associated caption
-                    caption = ""
-                    for cap in getattr(element, "captions", []):
-                        if hasattr(cap, "text"):
-                            caption = cap.text
-                            break
+                    # Resolve caption from document reference
+                    caption = _resolve_caption(conv_res.document, element)
 
                     figures.append({
                         "index": picture_counter,
