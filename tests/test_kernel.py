@@ -588,6 +588,30 @@ class TestRoundRobinPattern:
         # 2 agents * 2 rounds = 4 outputs
         assert len(result.outputs) == 4
 
+    @pytest.mark.asyncio
+    async def test_round_robin_events_include_round_metadata(self):
+        """M1: streaming events include round metadata during deliberation."""
+        a1 = _make_mock_agent("a1", "Debater A", "Point A")
+        ctx = SessionContext("s1")
+        # Give a1 an independent review output so deliberation prompt builds
+        from protoneo.agents.types import AgentOutput
+        ctx.add_output(AgentOutput(
+            agent_id="a1", agent_role="Debater A", content="Initial review",
+        ))
+        rules = DeliberationRules(max_rounds=1)
+
+        events = []
+        def capture(evt_type, data):
+            events.append((evt_type, data))
+
+        pattern = RoundRobinPattern()
+        await pattern.execute([a1], ctx, rules, on_event=capture)
+
+        agent_start_events = [(t, d) for t, d in events if t == "agent_start"]
+        assert all("round" in d for _, d in agent_start_events)
+        agent_done_events = [(t, d) for t, d in events if t == "agent_done"]
+        assert all("round" in d for _, d in agent_done_events)
+
 
 class TestIndependentSynthesisPattern:
     @pytest.mark.asyncio
