@@ -88,6 +88,24 @@ def create_app(
     # Serve built UI if available
     ui_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
     if ui_dist.exists():
+        index_html = ui_dist / "index.html"
+
+        # SPA fallback: serve index.html for any non-API, non-file path
+        # so that Vue Router client-side routes work on refresh/bookmark.
+        if index_html.exists():
+            from starlette.responses import HTMLResponse
+
+            _index_content = index_html.read_text()
+
+            @app.get("/{full_path:path}")
+            async def _spa_fallback(full_path: str):
+                # Let static files (JS, CSS, images) fall through to the mount
+                file_candidate = ui_dist / full_path
+                if full_path and file_candidate.exists() and file_candidate.is_file():
+                    from starlette.responses import FileResponse
+                    return FileResponse(file_candidate)
+                return HTMLResponse(_index_content)
+
         app.mount("/", StaticFiles(directory=str(ui_dist), html=True))
 
     return app

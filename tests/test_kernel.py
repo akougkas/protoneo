@@ -2120,6 +2120,51 @@ class TestAppManifest:
             data = resp.json()
             assert any(a["name"] == "dummy" for a in data["apps"])
 
+    def test_spa_fallback_serves_index_for_client_routes(self):
+        """SPA fallback returns index.html for Vue client-side routes."""
+        import tempfile
+        from pathlib import Path
+        from fastapi import FastAPI
+        from fastapi.staticfiles import StaticFiles
+        from fastapi.testclient import TestClient
+        from starlette.responses import HTMLResponse, FileResponse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ui_dist = Path(tmpdir) / "ui" / "dist"
+            ui_dist.mkdir(parents=True)
+            (ui_dist / "index.html").write_text("<html><body>SPA</body></html>")
+            (ui_dist / "assets").mkdir()
+            (ui_dist / "assets" / "app.js").write_text("console.log('app')")
+
+            # Build a minimal app that mirrors the SPA fallback from create_app
+            app = FastAPI()
+            _index = (ui_dist / "index.html").read_text()
+
+            @app.get("/api/health")
+            async def _health():
+                return {"status": "ok"}
+
+            @app.get("/{full_path:path}")
+            async def _spa_fallback(full_path: str):
+                file_candidate = ui_dist / full_path
+                if full_path and file_candidate.exists() and file_candidate.is_file():
+                    return FileResponse(file_candidate)
+                return HTMLResponse(_index)
+
+            app.mount("/", StaticFiles(directory=str(ui_dist), html=True))
+            client = TestClient(app)
+
+            assert client.get("/api/health").status_code == 200
+
+            for route in ["/session/abc123", "/settings", "/batch/xyz"]:
+                resp = client.get(route)
+                assert resp.status_code == 200, f"{route} returned {resp.status_code}"
+                assert "SPA" in resp.text, f"{route} did not return index.html"
+
+            resp = client.get("/assets/app.js")
+            assert resp.status_code == 200
+            assert "console.log" in resp.text
+
 
 # ── GraphPipeline ──────────────────────────────────────────
 
