@@ -71,3 +71,4 @@ reviews-pending/
 # Lock files (use npm)
 bun.lock
 frontend/bun.lock
+data/

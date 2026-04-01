@@ -13,6 +13,7 @@ class ParseResult:
     markdown: str = ""
     figures_dir: str = ""
     metadata: dict = field(default_factory=dict)
+    figures: list[dict] = field(default_factory=list)
 
 
 @runtime_checkable

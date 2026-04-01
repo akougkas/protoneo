@@ -1,5 +1,9 @@
 """
-Document parsing. Reuses the proven extraction logic from the legacy codebase.
+Document parsing entry point.
+
+Uses Docling for layout-aware PDF extraction with figure bounding boxes,
+structured tables, and section hierarchy. Plain text and markdown files
+are read directly with charset detection.
 """
 
 import logging
@@ -11,7 +15,7 @@ from ..agents.types import Document
 
 logger = logging.getLogger("protoneo.knowledge.parser")
 
-SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".html", ".md", ".markdown", ".txt"}
 
 # Lines that are bare numbers (PDF line number artifacts from two-column layouts)
 _BARE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*$")
@@ -26,12 +30,10 @@ def _strip_line_number_pollution(text: str) -> str:
     """
     lines = text.split("\n")
 
-    # Strip leading bare-number lines
     start = 0
     while start < len(lines) and _BARE_NUMBER_RE.match(lines[start]):
         start += 1
 
-    # Strip trailing bare-number lines
     end = len(lines)
     while end > start and _BARE_NUMBER_RE.match(lines[end - 1]):
         end -= 1
@@ -48,6 +50,7 @@ def _strip_line_number_pollution(text: str) -> str:
 
 
 def _read_text_with_fallback(file_path: str) -> str:
+    """Read a text file with charset detection fallback."""
     data = Path(file_path).read_bytes()
     try:
         return data.decode("utf-8")
@@ -76,120 +79,109 @@ def _read_text_with_fallback(file_path: str) -> str:
     return data.decode(encoding or "utf-8", errors="replace")
 
 
-def _extract_pdf(file_path: str) -> str:
-    """Extract plain text from a PDF using PyMuPDF."""
-    import fitz  # PyMuPDF
+def _parse_pdf_docling(file_path: str) -> tuple[str, str, list[dict], str]:
+    """Parse a PDF using Docling's layout analysis engine.
 
-    parts: list[str] = []
-    with fitz.open(file_path) as doc:
-        for page in doc:
-            text = page.get_text()
-            if text.strip():
-                parts.append(text)
-    return "\n\n".join(parts)
-
-
-def _extract_pdf_pdf2md(file_path: str, output_dir: str | None = None) -> tuple[str, str]:
-    """Extract structured markdown from a PDF using the pdf2md CLI tool.
-
-    Calls pdf2md as a subprocess with the local AI pipeline (Nemotron for
-    text reasoning, Qwen3-VL for figure descriptions). Falls back to plain
-    PyMuPDF extraction on failure.
-
-    Returns (markdown, figures_dir_path). The markdown includes proper section
-    headers, linked citations, reflowed paragraphs, and VLM figure descriptions.
+    Returns (text, markdown, figures, figures_dir).
     """
-    import os
-    import subprocess
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
 
-    pdf_path = Path(file_path)
-    if output_dir:
-        out_dir = Path(output_dir)
-    else:
-        # Store pdf2md output alongside session data so figures persist
-        sessions_dir = Path(__file__).resolve().parents[2] / "data" / "sessions" / "pdf2md"
-        sessions_dir.mkdir(parents=True, exist_ok=True)
-        out_dir = sessions_dir
+    path = Path(file_path)
+    output_dir = path.parent / f"{path.stem}_figures"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build environment for pdf2md's local AI endpoints.
-    # Pull from ProtoNeo settings (LAN endpoints) when available,
-    # fall back to hardcoded defaults for the homelab.
-    env = os.environ.copy()
-    try:
-        from ..llm.settings import load_settings, endpoint_map
-        settings = load_settings()
-        endpoints = endpoint_map(settings)
-        dynamo = endpoints.get("lan-dynamo")
-        if dynamo:
-            env.setdefault("LM_STUDIO_HOST", dynamo.url)
-    except Exception:
-        pass
-    env.setdefault("LM_STUDIO_HOST", "http://192.168.86.143:1234/v1")
-    env.setdefault("PDF2MD_TEXT_MODEL", "nemotron-cascade-2-30b-a3b-i1")
-    env.setdefault("PDF2MD_VLM_HOST", "http://192.168.86.141:8080/v1")
-    env.setdefault("PDF2MD_VLM_MODEL", "Qwen3-VL-30B-A3B-Thinking-Q5_K_XL")
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.images_scale = 2.0
+    pipeline_options.generate_page_images = False
+    pipeline_options.generate_picture_images = True
 
-    # Find pdf2md executable
-    pdf2md_repo = Path.home() / "tools" / "paper-to-md"
-    cmd = [
-        str(pdf2md_repo / ".venv" / "bin" / "pdf2md"),
-        "convert",
-        str(pdf_path),
-        str(out_dir),
-        "--depth", "high",
-        "--local",
-        "--keep-raw",
-    ]
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pipeline_options,
+            ),
+        }
+    )
 
-    logger.info("Running pdf2md: %s", " ".join(cmd[:6]))
+    logger.info("Parsing %s with Docling", path.name)
+    conv_res = converter.convert(path)
 
-    try:
-        result = subprocess.run(
-            cmd,
-            env=env,
-            cwd=str(pdf2md_repo),
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+    # Extract figures
+    figures: list[dict] = []
+    picture_counter = 0
+    table_counter = 0
 
-        if result.returncode != 0:
-            logger.warning("pdf2md failed (exit %d): %s", result.returncode, result.stderr[:500])
-            return "", ""
+    for element, _level in conv_res.document.iterate_items():
+        if isinstance(element, PictureItem):
+            picture_counter += 1
+            img = element.get_image(conv_res.document)
+            if img:
+                img_filename = f"{path.stem}-figure-{picture_counter}.png"
+                img_path = output_dir / img_filename
+                img.save(str(img_path), "PNG")
 
-        # Find the output markdown
-        stem = pdf_path.stem
-        md_path = out_dir / stem / f"{stem}.md"
-        if md_path.exists():
-            md = md_path.read_text(encoding="utf-8")
-            figures_dir = str(out_dir / stem / "img")
-            logger.info(
-                "pdf2md produced %d chars of markdown from %s",
-                len(md), pdf_path.name,
-            )
-            return md, figures_dir
+                bbox = {}
+                page_no = 0
+                if element.prov:
+                    prov = element.prov[0]
+                    page_no = prov.page_no
+                    if prov.bbox:
+                        bbox = {
+                            "l": prov.bbox.l, "t": prov.bbox.t,
+                            "r": prov.bbox.r, "b": prov.bbox.b,
+                        }
 
-        logger.warning("pdf2md output not found at %s", md_path)
-        return "", ""
+                caption = ""
+                for cap in getattr(element, "captions", []):
+                    if hasattr(cap, "text"):
+                        caption = cap.text
+                        break
 
-    except subprocess.TimeoutExpired:
-        logger.warning("pdf2md timed out after 600s for %s", pdf_path.name)
-        return "", ""
-    except FileNotFoundError:
-        logger.info("pdf2md not installed at %s", pdf2md_repo)
-        return "", ""
-    except Exception as e:
-        logger.warning("pdf2md failed for %s: %s", pdf_path.name, e)
-        return "", ""
+                figures.append({
+                    "index": picture_counter,
+                    "page": page_no,
+                    "bbox": bbox,
+                    "caption": caption,
+                    "image_path": str(img_path),
+                })
+
+        if isinstance(element, TableItem):
+            table_counter += 1
+            img = element.get_image(conv_res.document)
+            if img:
+                img_filename = f"{path.stem}-table-{table_counter}.png"
+                img_path = output_dir / img_filename
+                img.save(str(img_path), "PNG")
+
+    markdown = conv_res.document.export_to_markdown(
+        image_mode=ImageRefMode.REFERENCED,
+    )
+    text = conv_res.document.export_to_markdown(
+        image_mode=ImageRefMode.PLACEHOLDER,
+    )
+
+    logger.info(
+        "Docling extracted %d figures, %d tables, %d chars markdown from %s",
+        picture_counter, table_counter, len(markdown), path.name,
+    )
+
+    return text, markdown, figures, str(output_dir)
 
 
 def parse_file(file_path: str, fast: bool = False) -> Document:
     """Parse a single file into a Document.
 
-    When fast=True, skip AI extraction and use PyMuPDF only (~2-5 seconds).
-    When fast=False (default), try pdf2md first for structured markdown with
-    AI-powered cleanup, figure descriptions, and section detection.
-    Falls back to plain PyMuPDF text if pdf2md is unavailable.
+    For PDFs: uses Docling for layout-aware extraction with figure
+    bounding boxes, structured tables, and section hierarchy.
+
+    When fast=True, Docling still runs (it is the only parser) but
+    downstream AI enrichment (VLM figure descriptions) is skipped
+    by the pipeline.
+
+    For .md/.txt files: reads directly with charset detection.
     """
     path = Path(file_path)
     if not path.exists():
@@ -199,46 +191,36 @@ def parse_file(file_path: str, fast: bool = False) -> Document:
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported file format: {suffix}")
 
-    markdown = ""
     if suffix == ".pdf":
-        # Check for pre-built markdown from pdf2md batch runs.
-        # The PDF may be uploaded to a temp dir, so check both:
-        #   1. Sibling: same directory as PDF (reviews-pending/paperN/paperN.md)
-        #   2. Known location: reviews-pending/paperN/paperN.md by extracting paper ID from filename
-        stem = path.stem  # e.g., "uuid_hpdc26-paper251" or "hpdc26-paper251"
-        # Extract paper ID: find "paperNNN" anywhere in the filename
-        import re as _re
-        paper_match = _re.search(r"(paper\d+)", stem)
-        paper_id = paper_match.group(1) if paper_match else ""
-
-        prebuilt_md = None
-        if paper_id:
-            # Check sibling first
-            sibling_md = path.parent / f"{paper_id}.md"
-            if sibling_md.exists() and sibling_md.stat().st_size > 1000:
-                prebuilt_md = sibling_md
-            else:
-                # Check reviews-pending/ directory
-                reviews_dir = Path(__file__).resolve().parents[3] / "reviews-pending" / paper_id
-                candidate = reviews_dir / f"{paper_id}.md"
-                if candidate.exists() and candidate.stat().st_size > 1000:
-                    prebuilt_md = candidate
-
-        if prebuilt_md:
-            markdown = _read_text_with_fallback(str(prebuilt_md))
-            logger.info("Using pre-built markdown: %s (%d chars)", prebuilt_md, len(markdown))
-        elif not fast:
-            markdown, _figures_dir = _extract_pdf_pdf2md(file_path)
-        text = _extract_pdf(file_path)
+        text, markdown, figures, figures_dir = _parse_pdf_docling(file_path)
         text = _strip_line_number_pollution(text)
-    else:
-        text = _read_text_with_fallback(file_path)
+        return Document(
+            document_id=uuid.uuid4().hex,
+            filename=path.name,
+            text=text,
+            markdown=markdown,
+            metadata={
+                "figures": figures,
+                "figures_dir": figures_dir,
+                "parser": "docling",
+            },
+        )
 
+    if suffix in {".md", ".markdown"}:
+        content = _read_text_with_fallback(file_path)
+        return Document(
+            document_id=uuid.uuid4().hex,
+            filename=path.name,
+            text=content,
+            markdown=content,
+        )
+
+    # Plain text
+    text = _read_text_with_fallback(file_path)
     return Document(
         document_id=uuid.uuid4().hex,
         filename=path.name,
         text=text,
-        markdown=markdown,
     )
 
 

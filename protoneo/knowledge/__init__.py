@@ -5,7 +5,7 @@ import re
 from .parser import parse_file, parse_files
 from .chunker import chunk_text
 from .processor import DocumentProcessor
-from .parsers import PlainTextParser, MarkdownParser, PyMuPDFParser, Pdf2MdParser
+from .parsers import PlainTextParser, MarkdownParser, DoclingParser
 
 __all__ = [
     "parse_file",
@@ -36,7 +36,6 @@ def create_document_processor() -> DocumentProcessor:
     proc = DocumentProcessor()
     proc.register_parser(PlainTextParser(), priority=0)
     proc.register_parser(MarkdownParser(), priority=0)
-    proc.register_parser(PyMuPDFParser(), priority=10)
-    proc.register_parser(Pdf2MdParser(), priority=20)
+    proc.register_parser(DoclingParser(), priority=20)
     proc.register_post_processor(_strip_line_number_pollution)
     return proc
