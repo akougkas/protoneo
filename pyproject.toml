@@ -1,7 +1,7 @@
 [project]
 name = "protoneo"
 version = "0.1.0"
-description = "ProtoNeo multi-agent deliberation kernel"
+description = "Composable LLM deliberation runtime"
 requires-python = ">=3.12"
 license = { text = "AGPL-3.0" }
 authors = [
@@ -31,6 +31,9 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
 ]
+
+[project.scripts]
+protoneo = "protoneo.cli:main"
 
 [build-system]
 requires = ["hatchling"]

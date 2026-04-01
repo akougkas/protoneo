@@ -7,8 +7,11 @@ registers kernel routes, and mounts application routes.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from ..config.schema import AppManifest, AppRegistration, ProtoNeoConfig
 from ..export import create_export_registry
@@ -70,8 +73,21 @@ def create_app(
             )
             manifest.on_register(reg)
 
-    # Mount Paper Review application routes
-    from apps.paper_review.api import register_paper_review_routes
-    register_paper_review_routes(app)
+    # Startup recovery: mark stale running sessions as stopped
+    @app.on_event("startup")
+    async def _startup_recovery():
+        for m in manifests.values():
+            recover = getattr(
+                __import__(f"apps.{m.name}.api", fromlist=["_recover_stale_sessions"]),
+                "_recover_stale_sessions",
+                None,
+            )
+            if recover:
+                await recover()
+
+    # Serve built UI if available
+    ui_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
+    if ui_dist.exists():
+        app.mount("/", StaticFiles(directory=str(ui_dist), html=True))
 
     return app

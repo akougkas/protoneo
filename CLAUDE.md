@@ -6,11 +6,12 @@ ProtoNeo v0.1.0. Multi-agent deliberation kernel with Paper Review (academic pap
 
 ## Architecture
 
-- `protoneo/` is the **kernel**: agents, deliberation engine, knowledge graph, LLM client, config, tools, API routes
-- `apps/paper_review/` is the **application layer**: conference profiles, review orchestration, pipeline, export
-- `protoneo/api/app.py` contains `create_app()` which mounts both kernel routes and Paper Review routes
-- `protoneo/api/routes.py` contains kernel endpoints plus `SessionEventBus` and `PipelineControl` shared classes
-- `ui/` is Vue 3 + Vite, Paper Review only (no legacy simulation views)
+- `protoneo/` is the **kernel**: agents, deliberation engine, knowledge graph, LLM client, config, tools, export, API routes
+- `apps/paper_review/` is the **application layer**: conference profiles, review orchestration, pipeline, exporters
+- `protoneo/api/app.py` contains `create_app()` which mounts kernel routes and app routes via `AppManifest`
+- `protoneo/api/routes.py` contains kernel endpoints (health, settings, models, providers, sessions, graph, pipeline, export, parsers, tools, manifests)
+- `apps/paper_review/api.py` uses `APIRouter`, mounted at `/api/apps/paper_review/` by the kernel
+- `ui/` is Vue 3 + Vite. Reads branding and config from `/api/manifests` at startup.
 
 ## Import Conventions
 
@@ -22,19 +23,42 @@ ProtoNeo v0.1.0. Multi-agent deliberation kernel with Paper Review (academic pap
 
 ```bash
 uv sync                                    # Install deps
-uv run pytest tests/test_kernel.py -q      # Run tests
+uv run pytest tests/ -q                    # Run all tests (229)
 uv run python run.py                       # Start kernel on :5002
+protoneo                                   # CLI entry point (after pip install)
 cd ui && npm install && npx vite build     # Build frontend
 ```
 
 ## Key Files
 
-- `protoneo/knowledge/parser.py`: PDF parsing entry point. Calls `pdf2md` CLI (subprocess) for AI-powered markdown extraction, falls back to PyMuPDF plain text
-- `protoneo/api/routes.py`: All kernel endpoints (health, settings, models, providers, sessions, WebSocket)
-- `apps/paper_review/api.py`: All Paper Review endpoints (review, batch, graph, pipeline control)
-- `apps/paper_review/pipeline.py`: 7-step graph pipeline and review stage orchestration
-- `apps/paper_review/conference.py`: Conference profile loading (profiles/ directory)
-- `apps/paper_review/prompts.py`: Prompt template loading (prompts/ directory)
+- `protoneo/knowledge/pipeline.py`: GraphPipeline orchestrator (6-step with checkpoint-based resume)
+- `protoneo/knowledge/processor.py`: DocumentProcessor registry with parser fallback chain
+- `protoneo/knowledge/parser.py`: PDF parsing entry point (pdf2md CLI with PyMuPDF fallback)
+- `protoneo/export/types.py`: Exporter protocol and ExportRegistry
+- `protoneo/tools/types.py`: Tool protocol and ToolRegistry
+- `protoneo/config/schema.py`: ProtoNeoConfig, AppManifest, AppRegistration
+- `protoneo/api/routes.py`: All kernel endpoints (health, settings, models, providers, sessions, graph, pipeline, export, parsers, tools, manifests, WebSocket)
+- `protoneo/api/app.py`: App factory with manifest registration, subsystem initialization
+- `protoneo/cli.py`: CLI entry point
+- `apps/paper_review/api.py`: Paper Review endpoints via APIRouter
+- `apps/paper_review/manifest.py`: AppManifest with router, on_register, domain_config
+- `apps/paper_review/pipeline.py`: Review stage orchestration (uses kernel GraphPipeline)
+- `apps/paper_review/domain/`: Entity seeds, prompts, and config YAML files
+
+## API Route Namespacing
+
+- Kernel routes: `/api/health`, `/api/sessions/*`, `/api/models/*`, `/api/settings/*`, `/api/export/*`, `/api/parsers`, `/api/tools`, `/api/manifests`
+- App routes: `/api/apps/{app_name}/*` (e.g., `/api/apps/paper_review/conferences`)
+
+## UI Structure
+
+- `ui/src/views/Home.vue`: Session launcher with upload, conference select, model config
+- `ui/src/views/SessionView.vue`: Session monitor with graph, agents, pipeline, results
+- `ui/src/views/BatchView.vue`: Multi-session management
+- `ui/src/views/SettingsView.vue`: Provider/model configuration
+- `ui/src/components/ResultEditor.vue`: Post-review field refinement
+- `ui/src/components/ReviewPacket.vue`: Structured review output with dynamic export formats
+- `ui/src/api/kernel.js`: Centralized API client for all kernel and app endpoints
 
 ## PDF Processing Pipeline
 
@@ -48,7 +72,7 @@ The `parse_file(path, fast=False)` function in `parser.py` orchestrates this. Se
 
 ## Testing
 
-108 kernel tests in `tests/test_kernel.py`. OAuth tests in `tests/test_oauth.py`. Tests mock the LLM client and run without network.
+229 tests total: 149 kernel (`test_kernel.py`), 19 OAuth (`test_oauth.py`), 61 paper review (`test_paper_review.py`). Tests mock the LLM client and run without network.
 
 ## Do Not
 

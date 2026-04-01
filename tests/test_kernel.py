@@ -1532,3 +1532,697 @@ class TestPipelineStepEndpoints:
     def test_step_run_invalid_step(self, app_client):
         resp = app_client.post("/api/sessions/test/pipeline/step/invalid_step/run")
         assert resp.status_code == 400
+
+
+# ── DocumentProcessor ──────────────────────────────────────
+
+class TestDocumentProcessor:
+    def test_register_parser_and_list(self):
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.parsers import PlainTextParser, MarkdownParser
+
+        proc = DocumentProcessor()
+        proc.register_parser(PlainTextParser(), priority=0)
+        proc.register_parser(MarkdownParser(), priority=5)
+
+        available = proc.available_parsers(".txt")
+        assert "plaintext" in available
+        assert "markdown" not in available
+
+        available_md = proc.available_parsers(".md")
+        assert "markdown" in available_md
+
+    def test_priority_ordering(self):
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.parsers import PlainTextParser
+
+        proc = DocumentProcessor()
+
+        class HighPriorityParser:
+            @property
+            def name(self): return "high"
+            @property
+            def supported_extensions(self): return {".txt"}
+            def available(self): return True
+            async def parse(self, path, options=None):
+                from protoneo.knowledge.types import ParseResult
+                return ParseResult(text="high")
+
+        proc.register_parser(PlainTextParser(), priority=0)
+        proc.register_parser(HighPriorityParser(), priority=100)
+
+        # High priority parser should be listed first
+        available = proc.available_parsers(".txt")
+        assert available[0] == "high"
+        assert available[1] == "plaintext"
+
+    @pytest.mark.asyncio
+    async def test_process_plaintext(self, tmp_path):
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.parsers import PlainTextParser
+
+        proc = DocumentProcessor()
+        proc.register_parser(PlainTextParser(), priority=0)
+
+        f = tmp_path / "test.txt"
+        f.write_text("Hello, world!")
+
+        doc = await proc.process(f)
+        assert doc.text == "Hello, world!"
+        assert doc.filename == "test.txt"
+
+    @pytest.mark.asyncio
+    async def test_process_markdown(self, tmp_path):
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.parsers import MarkdownParser
+
+        proc = DocumentProcessor()
+        proc.register_parser(MarkdownParser(), priority=0)
+
+        f = tmp_path / "test.md"
+        f.write_text("# Title\n\nBody text.")
+
+        doc = await proc.process(f)
+        assert "Title" in doc.text
+        assert doc.markdown == doc.text
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_failure(self, tmp_path):
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.parsers import PlainTextParser
+        from protoneo.knowledge.types import ParseResult
+
+        class FailingParser:
+            @property
+            def name(self): return "failing"
+            @property
+            def supported_extensions(self): return {".txt"}
+            def available(self): return True
+            async def parse(self, path, options=None):
+                raise RuntimeError("Intentional failure")
+
+        proc = DocumentProcessor()
+        proc.register_parser(FailingParser(), priority=100)
+        proc.register_parser(PlainTextParser(), priority=0)
+
+        f = tmp_path / "test.txt"
+        f.write_text("Fallback text")
+
+        doc = await proc.process(f)
+        assert doc.text == "Fallback text"
+
+    @pytest.mark.asyncio
+    async def test_no_parser_raises(self, tmp_path):
+        from protoneo.knowledge.processor import DocumentProcessor
+
+        proc = DocumentProcessor()
+        f = tmp_path / "test.xyz"
+        f.write_text("data")
+
+        with pytest.raises(ValueError, match="No parser available"):
+            await proc.process(f)
+
+    @pytest.mark.asyncio
+    async def test_file_not_found_raises(self):
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.parsers import PlainTextParser
+        from pathlib import Path
+
+        proc = DocumentProcessor()
+        proc.register_parser(PlainTextParser(), priority=0)
+
+        with pytest.raises(FileNotFoundError):
+            await proc.process(Path("/nonexistent/file.txt"))
+
+    @pytest.mark.asyncio
+    async def test_preferred_parser(self, tmp_path):
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.types import ParseResult
+
+        class ParserA:
+            @property
+            def name(self): return "parser_a"
+            @property
+            def supported_extensions(self): return {".txt"}
+            def available(self): return True
+            async def parse(self, path, options=None):
+                return ParseResult(text="from_a")
+
+        class ParserB:
+            @property
+            def name(self): return "parser_b"
+            @property
+            def supported_extensions(self): return {".txt"}
+            def available(self): return True
+            async def parse(self, path, options=None):
+                return ParseResult(text="from_b")
+
+        proc = DocumentProcessor()
+        proc.register_parser(ParserA(), priority=100)
+        proc.register_parser(ParserB(), priority=0)
+
+        f = tmp_path / "test.txt"
+        f.write_text("content")
+
+        # Without preference, high priority wins
+        doc = await proc.process(f)
+        assert doc.text == "from_a"
+
+        # With preference, preferred wins
+        doc = await proc.process(f, preferred_parser="parser_b")
+        assert doc.text == "from_b"
+
+    def test_post_processor_applied(self):
+        import asyncio
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.knowledge.types import ParseResult
+
+        class StubParser:
+            @property
+            def name(self): return "stub"
+            @property
+            def supported_extensions(self): return {".txt"}
+            def available(self): return True
+            async def parse(self, path, options=None):
+                return ParseResult(text="  extra spaces  ")
+
+        proc = DocumentProcessor()
+        proc.register_parser(StubParser(), priority=0)
+        proc.register_post_processor(lambda t: t.strip())
+
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
+            f.write("ignored")
+            fpath = Path(f.name)
+
+        try:
+            doc = asyncio.get_event_loop().run_until_complete(proc.process(fpath))
+            assert doc.text == "extra spaces"
+        finally:
+            fpath.unlink()
+
+    def test_unavailable_parser_skipped(self):
+        from protoneo.knowledge.processor import DocumentProcessor
+
+        class UnavailableParser:
+            @property
+            def name(self): return "unavail"
+            @property
+            def supported_extensions(self): return {".txt"}
+            def available(self): return False
+            async def parse(self, path, options=None):
+                raise RuntimeError("Should not be called")
+
+        proc = DocumentProcessor()
+        proc.register_parser(UnavailableParser(), priority=100)
+
+        assert proc.available_parsers(".txt") == []
+
+    def test_create_document_processor_factory(self):
+        from protoneo.knowledge import create_document_processor
+
+        proc = create_document_processor()
+        # Should have parsers for common extensions
+        assert len(proc.available_parsers(".txt")) > 0
+        assert len(proc.available_parsers(".md")) > 0
+
+
+# ── ExportRegistry ─────────────────────────────────────────
+
+class TestExportRegistry:
+    def test_register_and_get(self):
+        from protoneo.export.types import ExportRegistry
+        from protoneo.export.json_exporter import JsonExporter
+
+        reg = ExportRegistry()
+        exp = JsonExporter()
+        reg.register(exp)
+
+        assert reg.get("json") is exp
+        assert reg.get("nonexistent") is None
+
+    def test_available_formats(self):
+        from protoneo.export.types import ExportRegistry
+        from protoneo.export.json_exporter import JsonExporter
+        from protoneo.export.markdown_exporter import GenericMarkdownExporter
+
+        reg = ExportRegistry()
+        reg.register(JsonExporter())
+        reg.register(GenericMarkdownExporter())
+
+        formats = reg.available_formats()
+        assert len(formats) == 2
+        names = {f["format_name"] for f in formats}
+        assert names == {"json", "markdown"}
+        for f in formats:
+            assert "mime_type" in f
+            assert "file_extension" in f
+
+    def test_create_export_registry_factory(self):
+        from protoneo.export import create_export_registry
+
+        reg = create_export_registry()
+        assert reg.get("json") is not None
+        assert reg.get("markdown") is not None
+
+    @pytest.mark.asyncio
+    async def test_json_exporter_output(self):
+        from protoneo.export.json_exporter import JsonExporter
+
+        exporter = JsonExporter()
+        assert exporter.format_name == "json"
+        assert exporter.mime_type == "application/json"
+        assert exporter.file_extension == ".json"
+
+        session = MagicMock()
+        session.session_id = "test-123"
+        session.status.value = "completed"
+        session.created_at = "2026-01-01"
+        session.result = {"key": "value"}
+        session.config = {}
+
+        data = await exporter.export(session)
+        parsed = json.loads(data)
+        assert parsed["session_id"] == "test-123"
+        assert parsed["result"] == {"key": "value"}
+
+    @pytest.mark.asyncio
+    async def test_markdown_exporter_output(self):
+        from protoneo.export.markdown_exporter import GenericMarkdownExporter
+
+        exporter = GenericMarkdownExporter()
+        assert exporter.format_name == "markdown"
+        assert exporter.mime_type == "text/markdown"
+        assert exporter.file_extension == ".md"
+
+        session = MagicMock()
+        session.session_id = "test-456"
+        session.status = "completed"
+        session.created_at = "2026-01-01"
+        session.result = {
+            "phases": [{
+                "phase_name": "Review",
+                "outputs": [{"agent_role": "Technical", "content": "Good paper."}],
+            }]
+        }
+
+        data = await exporter.export(session)
+        text = data.decode("utf-8")
+        assert "test-456" in text
+        assert "Review" in text
+        assert "Technical" in text
+        assert "Good paper." in text
+
+    def test_register_overwrites_same_format(self):
+        from protoneo.export.types import ExportRegistry
+
+        class CustomJson:
+            @property
+            def format_name(self): return "json"
+            @property
+            def mime_type(self): return "application/json"
+            @property
+            def file_extension(self): return ".json"
+            async def export(self, session, app_data=None): return b"{}"
+
+        reg = ExportRegistry()
+        reg.register(CustomJson())
+        assert reg.get("json") is not None
+        assert len(reg.available_formats()) == 1
+
+
+# ── ToolRegistry ───────────────────────────────────────────
+
+class TestToolRegistry:
+    def test_register_and_get(self):
+        from protoneo.tools.types import ToolRegistry, ToolResult
+
+        class MockTool:
+            @property
+            def name(self): return "mock_tool"
+            @property
+            def description(self): return "A mock tool"
+            def available(self): return True
+            async def execute(self, query, **kwargs): return ToolResult(data={}, source="mock")
+
+        reg = ToolRegistry()
+        tool = MockTool()
+        reg.register(tool)
+
+        assert reg.get("mock_tool") is tool
+        assert reg.get("nonexistent") is None
+
+    def test_available_tools_filters_unavailable(self):
+        from protoneo.tools.types import ToolRegistry, ToolResult
+
+        class AvailTool:
+            @property
+            def name(self): return "avail"
+            @property
+            def description(self): return "Available"
+            def available(self): return True
+            async def execute(self, query, **kwargs): return ToolResult(data={}, source="a")
+
+        class UnavailTool:
+            @property
+            def name(self): return "unavail"
+            @property
+            def description(self): return "Unavailable"
+            def available(self): return False
+            async def execute(self, query, **kwargs): return ToolResult(data={}, source="u")
+
+        reg = ToolRegistry()
+        reg.register(AvailTool())
+        reg.register(UnavailTool())
+
+        available = reg.available_tools()
+        assert len(available) == 1
+        assert available[0]["name"] == "avail"
+        assert available[0]["description"] == "Available"
+
+    def test_create_tool_registry_factory(self):
+        from protoneo.tools import create_tool_registry
+
+        reg = create_tool_registry()
+        # Both built-in tools should be registered (even if unavailable)
+        assert reg.get("semantic_scholar") is not None
+        assert reg.get("web_search") is not None
+
+    def test_tool_result_dataclass(self):
+        from protoneo.tools.types import ToolResult
+
+        result = ToolResult(data={"key": "val"}, source="test")
+        assert result.data == {"key": "val"}
+        assert result.source == "test"
+        assert result.cached is False
+
+        cached = ToolResult(data={}, source="cache", cached=True)
+        assert cached.cached is True
+
+
+# ── DomainConfig ───────────────────────────────────────────
+
+class TestDomainConfig:
+    def test_domain_config_defaults(self):
+        from protoneo.knowledge.types import DomainConfig
+
+        dc = DomainConfig(name="test")
+        assert dc.name == "test"
+        assert dc.base_entity_types == []
+        assert dc.base_edge_types == []
+        assert dc.structural_node_types == {"Document", "Section"}
+        assert dc.structural_edge_types_for_summary == {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
+        assert dc.summary_max_chars == 3000
+
+    def test_domain_config_with_seeds(self):
+        from protoneo.knowledge.types import DomainConfig, SeedEntity, SeedEdge
+
+        entity = SeedEntity(name="Method", description="A research method", examples=["SGD"])
+        edge = SeedEdge(name="USES", description="Uses a method")
+
+        dc = DomainConfig(
+            name="academic",
+            base_entity_types=[entity],
+            base_edge_types=[edge],
+        )
+        assert len(dc.base_entity_types) == 1
+        assert dc.base_entity_types[0].name == "Method"
+        assert len(dc.base_edge_types) == 1
+        assert dc.base_edge_types[0].name == "USES"
+
+    def test_seed_entity_attributes(self):
+        from protoneo.knowledge.types import SeedEntity
+
+        entity = SeedEntity(
+            name="Dataset",
+            description="A benchmark dataset",
+            attributes=[{"name": "size", "type": "int"}],
+            examples=["ImageNet", "CIFAR-10"],
+        )
+        assert entity.name == "Dataset"
+        assert len(entity.attributes) == 1
+        assert len(entity.examples) == 2
+
+    def test_seed_edge_source_targets(self):
+        from protoneo.knowledge.types import SeedEdge
+
+        edge = SeedEdge(
+            name="EVALUATED_ON",
+            description="Model evaluated on dataset",
+            source_targets=[{"source": "Model", "target": "Dataset"}],
+        )
+        assert edge.source_targets[0]["source"] == "Model"
+
+    def test_paper_review_domain_loads(self):
+        """Verify the paper_review app's domain config loads without error."""
+        from apps.paper_review.manifest import domain_config
+
+        assert domain_config.name == "academic_paper"
+        assert len(domain_config.base_entity_types) > 0
+        assert len(domain_config.base_edge_types) > 0
+        assert domain_config.ontology_discovery_prompt != ""
+        assert domain_config.verify_completeness_prompt != ""
+
+    def test_parse_result_defaults(self):
+        from protoneo.knowledge.types import ParseResult
+
+        pr = ParseResult(text="hello")
+        assert pr.text == "hello"
+        assert pr.markdown == ""
+        assert pr.figures_dir == ""
+        assert pr.metadata == {}
+
+
+# ── AppManifest ────────────────────────────────────────────
+
+class TestAppManifest:
+    def test_manifest_fields(self):
+        from protoneo.config.schema import AppManifest
+
+        m = AppManifest(
+            name="test_app",
+            display_name="Test App",
+            version="1.0.0",
+            description="A test application",
+        )
+        assert m.name == "test_app"
+        assert m.display_name == "Test App"
+        assert m.router is None
+        assert m.on_register is None
+        assert m.domain_config is None
+        assert m.pipeline_stages == []
+
+    def test_manifest_with_pipeline_stages(self):
+        from protoneo.config.schema import AppManifest
+
+        m = AppManifest(
+            name="review",
+            display_name="Review",
+            version="1.0.0",
+            description="Review app",
+            pipeline_stages=["step1", "step2", "step3"],
+        )
+        assert m.pipeline_stages == ["step1", "step2", "step3"]
+
+    def test_app_registration_delegates_to_registries(self):
+        from protoneo.config.schema import AppRegistration
+        from protoneo.knowledge.processor import DocumentProcessor
+        from protoneo.export.types import ExportRegistry
+        from protoneo.tools.types import ToolRegistry, ToolResult
+
+        doc_proc = DocumentProcessor()
+        export_reg = ExportRegistry()
+        tool_reg = ToolRegistry()
+
+        reg = AppRegistration(
+            _doc_processor=doc_proc,
+            _tool_registry=tool_reg,
+            _export_registry=export_reg,
+        )
+
+        # Register a custom exporter
+        class CustomExporter:
+            @property
+            def format_name(self): return "custom"
+            @property
+            def mime_type(self): return "text/plain"
+            @property
+            def file_extension(self): return ".txt"
+            async def export(self, session, app_data=None): return b""
+
+        reg.register_exporter(CustomExporter())
+        assert export_reg.get("custom") is not None
+
+        # Register a custom tool
+        class CustomTool:
+            @property
+            def name(self): return "custom_tool"
+            @property
+            def description(self): return "Custom"
+            def available(self): return True
+            async def execute(self, query, **kwargs): return ToolResult(data={}, source="c")
+
+        reg.register_tool(CustomTool())
+        assert tool_reg.get("custom_tool") is not None
+
+    def test_paper_review_manifest(self):
+        """Verify the paper_review manifest loads with all required fields."""
+        from apps.paper_review.manifest import manifest
+
+        assert manifest.name == "paper_review"
+        assert manifest.display_name == "Paper Review"
+        assert manifest.version == "0.1.0"
+        assert manifest.router is not None
+        assert manifest.on_register is not None
+        assert manifest.domain_config is not None
+        assert manifest.profile_dir is not None
+        assert manifest.prompt_dir is not None
+        assert len(manifest.pipeline_stages) == 4
+
+    def test_app_router_mounting(self):
+        """Verify the kernel mounts app routes under /api/apps/{name}/."""
+        import tempfile
+        from protoneo.api.app import create_app
+        from protoneo.config.schema import ProtoNeoConfig
+        from fastapi.testclient import TestClient
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ProtoNeoConfig()
+            config.storage.session_dir = tmpdir
+            app = create_app(config, apps=[])
+            client = TestClient(app)
+            # Kernel routes should work
+            resp = client.get("/api/health")
+            assert resp.status_code == 200
+
+    def test_manifests_endpoint(self):
+        """Verify /api/manifests returns registered apps."""
+        import tempfile
+        from protoneo.api.app import create_app
+        from protoneo.config.schema import AppManifest, ProtoNeoConfig
+        from fastapi.testclient import TestClient
+
+        m = AppManifest(
+            name="dummy",
+            display_name="Dummy App",
+            version="0.0.1",
+            description="Test manifest endpoint",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ProtoNeoConfig()
+            config.storage.session_dir = tmpdir
+            app = create_app(config, apps=[m])
+            client = TestClient(app)
+            resp = client.get("/api/manifests")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert any(a["name"] == "dummy" for a in data["apps"])
+
+
+# ── GraphPipeline ──────────────────────────────────────────
+
+class TestGraphPipeline:
+    def test_kernel_stages_constant(self):
+        from protoneo.knowledge.pipeline import KERNEL_STAGES
+
+        assert KERNEL_STAGES == ["metadata", "ontology", "extraction", "coref", "verification", "summary"]
+
+    def test_stage_checkpoint_model(self):
+        from protoneo.deliberation.session import StageCheckpoint
+
+        cp = StageCheckpoint(stage_name="metadata", completed_at="2026-01-01T00:00:00Z", output_key="graph_after_step.nlp_prepass")
+        assert cp.stage_name == "metadata"
+        assert cp.idempotent is True
+
+    def test_has_checkpoint(self):
+        from protoneo.knowledge.pipeline import GraphPipeline
+        from protoneo.deliberation.session import StageCheckpoint
+
+        pipeline = GraphPipeline(
+            llm_client=MagicMock(),
+            session_manager=MagicMock(),
+        )
+
+        session = MagicMock()
+        session.checkpoints = [
+            StageCheckpoint(stage_name="metadata", completed_at="t1", output_key="k1"),
+            StageCheckpoint(stage_name="ontology", completed_at="t2", output_key="k2"),
+        ]
+
+        assert pipeline._has_checkpoint(session, "metadata") is True
+        assert pipeline._has_checkpoint(session, "ontology") is True
+        assert pipeline._has_checkpoint(session, "extraction") is False
+
+    def test_write_checkpoint(self):
+        from protoneo.knowledge.pipeline import GraphPipeline
+        from protoneo.deliberation.session import StageCheckpoint
+
+        pipeline = GraphPipeline(
+            llm_client=MagicMock(),
+            session_manager=MagicMock(),
+        )
+
+        session = MagicMock()
+        session.checkpoints = []
+        session.last_checkpoint = ""
+
+        pipeline._write_checkpoint(session, "metadata", "graph_after_step.nlp_prepass")
+
+        assert len(session.checkpoints) == 1
+        assert session.checkpoints[0].stage_name == "metadata"
+        assert session.checkpoints[0].output_key == "graph_after_step.nlp_prepass"
+        assert session.last_checkpoint == "metadata"
+
+    def test_session_checkpoint_persistence(self):
+        """Verify checkpoints survive session serialization."""
+        from protoneo.deliberation.session import Session, StageCheckpoint
+
+        session = Session()
+        session.checkpoints.append(
+            StageCheckpoint(stage_name="metadata", completed_at="2026-01-01T00:00:00Z", output_key="k")
+        )
+        session.last_checkpoint = "metadata"
+
+        # Round-trip through JSON
+        serialized = session.model_dump_json()
+        restored = Session.model_validate_json(serialized)
+
+        assert len(restored.checkpoints) == 1
+        assert restored.checkpoints[0].stage_name == "metadata"
+        assert restored.last_checkpoint == "metadata"
+
+    def test_session_app_ownership(self):
+        """Verify session carries app_name and schema_version."""
+        from protoneo.deliberation.session import Session
+
+        session = Session(app_name="paper_review", app_version="0.1.0")
+        assert session.app_name == "paper_review"
+        assert session.app_version == "0.1.0"
+        assert session.schema_version == 1
+
+    def test_session_app_data_namespace(self):
+        """Verify app_data provides a namespace for domain-specific state."""
+        from protoneo.deliberation.session import Session
+
+        session = Session()
+        session.app_data["conference"] = "hpdc26"
+        session.app_data["review_packet"] = {"scores": [8, 7, 6]}
+
+        serialized = session.model_dump_json()
+        restored = Session.model_validate_json(serialized)
+
+        assert restored.app_data["conference"] == "hpdc26"
+        assert restored.app_data["review_packet"]["scores"] == [8, 7, 6]
+
+    def test_full_pipeline_stages_with_app(self):
+        """Verify kernel stages + app stages form the complete pipeline."""
+        from protoneo.knowledge.pipeline import KERNEL_STAGES
+        from apps.paper_review.manifest import manifest
+
+        full = KERNEL_STAGES + manifest.pipeline_stages
+        assert full == [
+            "metadata", "ontology", "extraction", "coref", "verification", "summary",
+            "independent_review", "deliberation", "meta_review", "pc_chair",
+        ]

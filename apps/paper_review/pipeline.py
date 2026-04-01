@@ -445,9 +445,8 @@ async def _run_graph_pipeline(
         # ════════════════════════════════════════════════
         # Stage 1: Pre-Review (kernel graph pipeline)
         # ════════════════════════════════════════════════
-        bus.emit("stage_started", {
-            "stage": "pre_review", "step": "parse",
-            "message": "Starting pre-review analysis...",
+        bus.emit("preflight_started", {
+            "message": "Verifying model availability...",
         })
 
         # Resolve per-step graph models from the model_map.
@@ -492,9 +491,15 @@ async def _run_graph_pipeline(
             list(model_map.keys()), resolved_models,
         )
 
-        # Pre-flight: verify all graph models are reachable
+        # Read existing checkpoints so we can skip pinging models for completed steps
+        session = await _session_manager.get(sid)
+        completed_stages = set()
+        if session and session.checkpoints:
+            completed_stages = {cp.stage_name for cp in session.checkpoints}
+
+        # Pre-flight: verify graph models are configured (all steps, even checkpointed)
         for step_name, model_id in resolved_models.items():
-            if not model_id:
+            if not model_id and step_name not in completed_stages:
                 bus.emit("model_missing", {
                     "step": step_name,
                     "message": f"No model configured for graph step '{step_name}'",
@@ -504,11 +509,21 @@ async def _run_graph_pipeline(
                     "Configure a local endpoint (LM Studio, Ollama) in Settings."
                 )
 
-        checked: set[str] = set()
+        # Build set of models that need pinging (only non-checkpointed steps)
+        models_to_check: dict[str, str] = {}
         for step_name, model_id in resolved_models.items():
-            if model_id in checked:
+            if step_name in completed_stages:
+                logger.info("Skipping pre-flight for '%s' (checkpoint exists)", step_name)
                 continue
-            checked.add(model_id)
+            if model_id and model_id not in models_to_check:
+                models_to_check[model_id] = step_name
+
+        _PREFLIGHT_TIMEOUT = 30.0
+        for model_id, step_name in models_to_check.items():
+            bus.emit("model_checking", {
+                "model": model_id, "step": step_name,
+                "message": f"Checking model '{model_id}'...",
+            })
             try:
                 await asyncio.wait_for(
                     _llm_client.complete(
@@ -516,7 +531,16 @@ async def _run_graph_pipeline(
                         messages=[{"role": "user", "content": "ping"}],
                         max_tokens=1, temperature=0,
                     ),
-                    timeout=15.0,
+                    timeout=_PREFLIGHT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                bus.emit("model_unreachable", {
+                    "model": model_id, "step": step_name,
+                    "error": f"No response within {_PREFLIGHT_TIMEOUT}s (including retries)",
+                })
+                raise RuntimeError(
+                    f"Model '{model_id}' (used by {step_name}) did not respond within "
+                    f"{_PREFLIGHT_TIMEOUT}s after retries. Check that the model server is running."
                 )
             except Exception as ping_err:
                 bus.emit("model_unreachable", {
@@ -525,7 +549,13 @@ async def _run_graph_pipeline(
                 raise RuntimeError(
                     f"Model '{model_id}' (used by {step_name}) is unreachable: {ping_err}"
                 ) from ping_err
-        logger.info("Pre-flight model check passed for %d unique models", len(checked))
+        logger.info("Pre-flight model check passed for %d models (%d skipped via checkpoints)",
+                     len(models_to_check), len(resolved_models) - len(models_to_check))
+
+        bus.emit("stage_started", {
+            "stage": "pre_review", "step": "parse",
+            "message": "Starting pre-review analysis...",
+        })
 
         # Run kernel graph pipeline
         from protoneo.knowledge.pipeline import GraphPipeline

@@ -95,11 +95,17 @@ def _on_register(reg):
     reg.register_exporter(ReviewPdfExporter())
 
 
+def _get_router():
+    from .api import router
+    return router
+
+
 manifest = AppManifest(
     name="paper_review",
     display_name="Paper Review",
     version="0.1.0",
     description="AI peer review panel for academic papers",
+    router=_get_router(),
     on_register=_on_register,
     domain_config=domain_config,
     profile_dir=Path(__file__).resolve().parent / "profiles",
