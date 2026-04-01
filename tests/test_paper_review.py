@@ -697,3 +697,18 @@ class TestReviewCheckpoints:
         assert len(session.checkpoints) == 4
         names = [cp.stage_name for cp in session.checkpoints]
         assert names == ["independent_review", "deliberation", "meta_review", "pc_chair"]
+
+
+# ── App Data ──────────────────────────────────────────────────
+
+class TestAppData:
+    def test_app_data_schema(self):
+        """H1: session.app_data holds conference and final_review after pipeline."""
+        from protoneo.deliberation.session import Session
+        session = Session()
+        assert session.app_data == {}
+
+        session.app_data["conference"] = "hpdc26"
+        session.app_data["final_review"] = {"overall_merit": {"score": 3}}
+        assert session.app_data["conference"] == "hpdc26"
+        assert session.app_data["final_review"]["overall_merit"]["score"] == 3

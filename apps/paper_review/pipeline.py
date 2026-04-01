@@ -324,6 +324,8 @@ async def _run_pc_chair_review(
                 "comments_for_authors", pc_chair_review
             )
             _write_review_checkpoint(session, "pc_chair")
+            session.app_data["conference"] = conference_slug
+            session.app_data["final_review"] = final_review
             await _session_manager.update(session)
 
         bus.emit("pc_chair_review_done", {
