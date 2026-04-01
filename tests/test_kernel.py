@@ -1908,6 +1908,25 @@ class TestExportRegistry:
             assert "mime_type" in f
             assert "file_extension" in f
 
+    def test_app_scoped_export_overrides_global(self):
+        """M2: app-scoped exporters take precedence over global ones."""
+        from protoneo.export.types import ExportRegistry
+        from protoneo.export.json_exporter import JsonExporter
+
+        reg = ExportRegistry()
+        global_json = JsonExporter()
+        reg.register(global_json)
+
+        app_json = JsonExporter()
+        reg.register(app_json, app_name="paper_review")
+
+        # Without app_name, returns global
+        assert reg.get("json") is global_json
+        # With app_name, returns app-scoped
+        assert reg.get("json", app_name="paper_review") is app_json
+        # Unknown app falls through to global
+        assert reg.get("json", app_name="other_app") is global_json
+
     def test_create_export_registry_factory(self):
         from protoneo.export import create_export_registry
 

@@ -1368,17 +1368,17 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         if not _export_registry:
             raise HTTPException(status_code=500, detail="Export registry not initialized")
 
-        exporter = _export_registry.get(format)
+        session = await _session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        exporter = _export_registry.get(format, app_name=session.app_name)
         if not exporter:
-            available = [f["format_name"] for f in _export_registry.available_formats()]
+            available = [f["format_name"] for f in _export_registry.available_formats(app_name=session.app_name)]
             raise HTTPException(
                 status_code=400,
                 detail=f"Unknown format '{format}'. Available: {available}",
             )
-
-        session = await _session_manager.get(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
 
         app_data = session.app_data if session.app_data else None
         data = await exporter.export(session, app_data=app_data)
