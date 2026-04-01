@@ -35,6 +35,7 @@
     <div class="status-line">
       <span :class="['status-dot', statusColor]"></span>
       <span class="status-text">{{ statusText }}</span>
+      <span v-if="tokenSummary.total > 0" class="token-summary">{{ formatTokens(tokenSummary.total) }} tokens</span>
       <span v-if="duration" class="duration">{{ duration }}</span>
     </div>
 
@@ -310,6 +311,7 @@ const stepMeta = reactive({})
 const expandedStep = ref('')
 const deliberationChat = ref([])
 const deliberationRound = ref({ current: 0, total: 0 })
+const tokenSummary = reactive({ total: 0, completion: 0, agents: 0 })
 const pcChairReview = ref('')
 const finalReview = ref(null)
 const finalReviewRef = ref(null)
@@ -334,6 +336,12 @@ function shortModel(m) {
   if (!m) return ''
   const parts = m.split('/')
   return parts[parts.length - 1].slice(0, 24)
+}
+
+function formatTokens(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
+  return String(n)
 }
 const elapsed = ref(0)
 let ws = null
@@ -613,6 +621,11 @@ function handleStreamEvent(evt) {
       tokens: evt.tokens,
       completionTokens: evt.completion_tokens,
     })
+    if (evt.tokens) {
+      tokenSummary.total += evt.tokens
+      tokenSummary.completion += (evt.completion_tokens || 0)
+      tokenSummary.agents += 1
+    }
     delete _rawStreams[evt.agent_id]
     delete displayStreams[evt.agent_id]
     const dur = evt.duration_seconds ? ` (${evt.duration_seconds}s)` : ''
@@ -1028,8 +1041,14 @@ onUnmounted(() => {
 
 .status-text { font-weight: 500; }
 
-.duration {
+.token-summary {
   margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #888;
+}
+.duration {
+  margin-left: 8px;
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   color: #666;
