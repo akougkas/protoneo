@@ -76,12 +76,18 @@ async def _run_review_stage(
         if evt_type == "phase_start":
             phase = data.get("phase", "")
             if phase == "deliberation" and ctl.current_step != "deliberation":
+                bus.emit("step_completed", {
+                    "stage": "review", "step": "independent_reviews",
+                })
                 ctl.enter_step("deliberation")
                 bus.emit("step_started", {
                     "stage": "review", "step": "deliberation",
                     "message": "Starting reviewer deliberation...",
                 })
             elif phase == "meta_review" and ctl.current_step != "meta_review":
+                bus.emit("step_completed", {
+                    "stage": "review", "step": "deliberation",
+                })
                 ctl.enter_step("meta_review")
                 bus.emit("step_started", {
                     "stage": "review", "step": "meta_review",
@@ -115,6 +121,9 @@ async def _run_review_stage(
         user_message=enriched_message,
         on_event=on_event,
     )
+
+    # Emit step_completed for the final review step (meta_review)
+    bus.emit("step_completed", {"stage": "review", "step": "meta_review"})
 
     # Store result and write per-phase review checkpoints
     session = await _session_manager.get(sid)
@@ -328,6 +337,7 @@ async def _run_pc_chair_review(
             session.app_data["final_review"] = final_review
             await _session_manager.update(session)
 
+        bus.emit("step_completed", {"stage": "review", "step": "pc_chair"})
         bus.emit("pc_chair_review_done", {
             "review": final_review, "model": chair_model,
             "duration_seconds": dur,
