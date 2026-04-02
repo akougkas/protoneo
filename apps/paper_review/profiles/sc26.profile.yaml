@@ -4,46 +4,86 @@ conference:
   short_name: "SC '26"
   location: "St. Louis, Missouri, United States"
   dates: "2026-11-15 to 2026-11-20"
+  presentation_dates: "2026-11-17 to 2026-11-19"
   paper_types:
     - id: technical
       label: "Technical Paper"
-    - id: experience
-      label: "Experience Paper"
     - id: state_of_practice
-      label: "State of the Practice"
+      label: "State of the Practice Paper"
 
 scope:
   summary: >-
-    Premier international venue for innovations in HPC, networking, storage,
-    and analysis at the intersection of science and engineering. SC accepts
-    three paper types with distinct evaluation criteria: technical papers
-    (novel contributions), experience papers (lessons from deployment at
-    scale), and state-of-the-practice papers (practical relevance).
+    The SC Papers program is the leading venue for presenting high-quality
+    original research, groundbreaking ideas, and compelling insights on
+    current and future trends in high performance computing, networking,
+    storage, and analysis. Small-scale studies, including single-node
+    studies, are welcome as long as the paper clearly conveys its
+    contribution to high performance computing.
   must_show_scope_connection: true
   topics:
-    - algorithms and applications at scale
-    - architectures and accelerators
-    - cloud and distributed computing
-    - compilers and programming models
-    - data analytics, machine learning, and scientific visualization
-    - emerging technologies (quantum, neuromorphic, photonic)
-    - file and storage systems
-    - networking and communication
-    - operating and runtime systems
-    - performance measurement and modeling
-    - power and energy management
-    - system software and resource management
-    - workflows and reproducibility
+    - "Algorithms (scalable, general-purpose, high performance)"
+    - "Applications (parallel implementations for specific HPC domains)"
+    - "Architecture & Networks (processors, interconnects, memory, I/O)"
+    - "Data Analytics, Visualization, & Storage"
+    - "HPC for Machine Learning (scalable ML utilizing HPC)"
+    - "Performance Measurement, Modeling, & Tools"
+    - "Post-Moore & Quantum Computing"
+    - "Programming Frameworks (compilers, languages, runtimes)"
+    - "State of the Practice (operational HPC infrastructure and insights)"
+    - "System Software & Cloud Computing (HPC/cloud/edge convergence)"
+  areas:
+    - id: algorithms
+      label: "Algorithms"
+      description: "Scalable, general-purpose, high performance algorithms"
+    - id: applications
+      label: "Applications"
+      description: "Algorithms, parallel implementations, models, and software for specific applications requiring HPC"
+    - id: architecture_networks
+      label: "Architecture & Networks"
+      description: "All aspects of high performance hardware including processors and networks"
+    - id: data_analytics_vis_storage
+      label: "Data Analytics, Visualization, & Storage"
+      description: "Data analytics, visualization, storage, and storage I/O related to HPC systems"
+    - id: hpc_for_ml
+      label: "HPC for Machine Learning"
+      description: "Algorithms, systems, and software for scalable ML utilizing HPC technology"
+    - id: performance
+      label: "Performance Measurement, Modeling, & Tools"
+      description: "Novel methods and tools for measuring, evaluating, and analyzing performance"
+    - id: post_moore_quantum
+      label: "Post-Moore & Quantum Computing"
+      description: "Technologies continuing HPC performance scaling beyond Moore's law"
+    - id: programming_frameworks
+      label: "Programming Frameworks"
+      description: "Compilers, languages, libraries, programming models, and runtime systems"
+    - id: state_of_practice
+      label: "State of the Practice"
+      description: "Pragmatic practices of HPC including operational infrastructure, services, and facilities"
+    - id: system_software_cloud
+      label: "System Software & Cloud Computing"
+      description: "Cloud and system software architecture, configuration, optimization, and evaluation"
 
 submission:
-  max_pages_excluding_references: 12
-  camera_ready_extra_pages: 2
-  format: "IEEE"
+  max_pages_excluding_references: 10
+  format: "IEEE proceedings (two-column, U.S. letter 8.5x11)"
   dual_anonymous: true
   require_paper_type_in_title: false
-  optional_appendix:
-    artifact_description_or_evaluation: true
-    max_pages: 4
+  paper_checklist_mandatory: true
+  artifact_description:
+    mandatory: true
+    note: "AD appendix or explanation of why there is no AD is required"
+  artifact_evaluation:
+    mandatory: false
+    note: "AE appendix is optional"
+  appendix_pages_excluded_from_limit: true
+  checklist_excluded_from_limit: true
+  key_dates:
+    abstracts_close: "2026-04-01"
+    papers_close: "2026-04-08"
+    ad_appendix_due: "2026-04-24"
+    review_rebuttal: "2026-06-08 to 2026-06-11"
+    notifications: "2026-07-01"
+    final_paper_due: "2026-08-28"
 
 review_form:
   overall_merit:
@@ -69,13 +109,24 @@ review_form:
     - comments_for_authors
     - comments_for_pc
 
+review_process:
+  type: double_anonymous
+  reviewers_per_paper: "3-4"
+  has_rebuttal: true
+  rebuttal_is_anonymous: true
+  note: >-
+    Papers not respecting submission guidelines are subject to immediate
+    rejection without review. This includes violations of double-anonymous
+    policy, page limit, and missing AD artifacts.
+
 preflight_checks:
   - scope_fit
   - page_limit
   - anonymization
   - required_sections
   - limitations_present
-  - reproducibility_statement
+  - artifact_description_present
+  - paper_checklist_present
   - experimental_scale_appropriate
 
 panel:
@@ -122,17 +173,18 @@ panel:
       focus:
         - synthesis of all reviews into coherent assessment
         - consensus and disagreement analysis
-        - paper type evaluation (technical vs experience vs state-of-practice)
+        - area-appropriate evaluation criteria
         - final recommendation with justification
         - prioritized revision plan for authors
   optional_agents:
     artifact:
       role: "Artifact and Reproducibility Reviewer"
       focus:
-        - artifact description completeness
+        - artifact description completeness (mandatory for SC)
         - reproducibility of reported results
         - code, data, and environment availability
         - whether results can be independently verified
+        - badge eligibility assessment
     scalability:
       role: "Scalability and Performance Reviewer"
       focus:
@@ -141,10 +193,21 @@ panel:
         - communication and synchronization overhead
         - comparison with theoretical performance bounds
 
+awards:
+  - id: best_paper
+    label: "Best Paper (BP)"
+    note: "Nominations made during review"
+  - id: best_student_paper
+    label: "Best Student Paper (BSP)"
+    note: "Nominations made during review"
+  - id: best_reproducibility
+    label: "Best Reproducibility Advancement (BRA)"
+    note: "Nominations made during review"
+
 output:
   author_packet_sections:
     - venue_fit
-    - paper_type_assessment
+    - area_assessment
     - preflight_warnings
     - individual_reviews
     - deliberation_summary
@@ -166,4 +229,5 @@ responsible_ai:
   disclosure_note: >-
     This is a simulated review for author self-improvement before submission.
     Authors remain responsible for correctness, accuracy, and any venue-specific
-    AI disclosure requirements.
+    AI disclosure requirements. SC requires disclosure of AI-generated text
+    in the acknowledgments section.

@@ -28,6 +28,7 @@ from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.graph import KnowledgeGraph
 from .conference import ConferenceProfile
 from .manifest import domain_config as _domain_config
+from .prompts import load_pc_chair_prompt
 from .review import (
     build_deliberation_config,
     build_user_message,
@@ -40,6 +41,111 @@ logger = logging.getLogger("protoneo.paper_review.pipeline")
 # Use kernel-level caches (shared with kernel routes)
 _session_graphs = get_session_graphs()
 _session_ontologies = get_session_ontologies()
+
+
+def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
+    """Generate structured graph analysis for reviewer context.
+
+    Surfaces claim-evidence gaps, baseline coverage, section entity density,
+    and disconnected entities that the narrative briefing does not capture.
+    Reviewers can reference these findings when grounding their assessments.
+    """
+    if not graph.nodes:
+        return ""
+
+    _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+    _STRUCTURAL_RELS = {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
+
+    semantic = [n for n in graph.nodes if n.node_type not in _STRUCTURAL]
+    if not semantic:
+        return ""
+
+    sem_edges = [e for e in graph.edges if e.edge_type not in _STRUCTURAL_RELS]
+
+    # Build adjacency
+    outgoing: dict[str, list[tuple[str, str]]] = {}
+    incoming: dict[str, list[tuple[str, str]]] = {}
+    for e in sem_edges:
+        outgoing.setdefault(e.source_id, []).append((e.edge_type, e.target_id))
+        incoming.setdefault(e.target_id, []).append((e.edge_type, e.source_id))
+
+    typed: dict[str, list] = {}
+    for n in semantic:
+        typed.setdefault(n.node_type, []).append(n)
+
+    lines = ["\n\n## Structured Graph Analysis\n"]
+
+    # 1. Claim-Evidence Gaps
+    claims = typed.get("Claim", [])
+    if claims:
+        _EVIDENCE_RELS = {"SUPPORTS", "EVIDENCED_BY", "EVALUATES_ON"}
+        supported = []
+        unsupported = []
+        for c in claims:
+            has_evidence = any(
+                etype in _EVIDENCE_RELS for etype, _ in incoming.get(c.id, [])
+            ) or any(
+                etype in _EVIDENCE_RELS for etype, _ in outgoing.get(c.id, [])
+            )
+            (supported if has_evidence else unsupported).append(c)
+
+        lines.append("### Claim-Evidence Coverage")
+        lines.append(f"{len(supported)}/{len(claims)} claims have linked evidence.")
+        if unsupported:
+            lines.append("Claims without direct evidence links:")
+            for c in unsupported[:5]:
+                sec = f" [{c.source_section}]" if c.source_section else ""
+                lines.append(f"- {c.label[:80]}{sec}")
+
+    # 2. Baseline Coverage
+    methods = typed.get("Method", [])
+    baselines = typed.get("Baseline", [])
+    if methods:
+        compared = [
+            m for m in methods
+            if any(etype == "COMPARED_AGAINST" for etype, _ in outgoing.get(m.id, []))
+        ]
+        lines.append("\n### Baseline Coverage")
+        lines.append(
+            f"{len(compared)}/{len(methods)} methods have explicit baseline comparisons."
+        )
+        if baselines:
+            names = [b.label.split(":")[0].strip() for b in baselines[:8]]
+            lines.append(f"Known baselines: {', '.join(names)}")
+
+    # 3. Section Entity Density
+    section_counts: dict[str, int] = {}
+    for n in semantic:
+        if n.source_section:
+            section_counts[n.source_section] = section_counts.get(n.source_section, 0) + 1
+
+    if section_counts and graph.section_names:
+        lines.append("\n### Section Coverage")
+        covered_lower = {c.lower() for c in section_counts}
+        empty = [s for s in graph.section_names if s.lower() not in covered_lower]
+        if empty:
+            lines.append(f"Sections with no extracted entities: {', '.join(empty[:5])}")
+        for sec, count in sorted(section_counts.items(), key=lambda x: -x[1])[:6]:
+            lines.append(f"- {sec}: {count} entities")
+
+    # 4. Disconnected Entities
+    connected_ids: set[str] = set()
+    for e in sem_edges:
+        connected_ids.add(e.source_id)
+        connected_ids.add(e.target_id)
+    orphans = [n for n in semantic if n.id not in connected_ids]
+    if orphans:
+        lines.append(f"\n### Disconnected Entities ({len(orphans)})")
+        lines.append(
+            "These entities were extracted but have no relationships to other entities:"
+        )
+        for o in orphans[:5]:
+            lines.append(f"- {o.label} ({o.node_type})")
+
+    result = "\n".join(lines) + "\n"
+    if len(result) > 2000:
+        result = result[:1800].rsplit("\n", 1)[0] + "\n"
+    return result
 
 
 def _write_review_checkpoint(session, stage_name: str) -> None:
@@ -244,37 +350,30 @@ async def _run_pc_chair_review(
             paper_context_parts.append(
                 f"\n{'=' * 60}\nKNOWLEDGE GRAPH SUMMARY\n{'=' * 60}\n\n{graph_summary}"
             )
+        # Add structured analysis for the PC Chair
+        try:
+            restored = KnowledgeGraph.restore_from_snapshot(session.knowledge_graph)
+            analysis = _build_review_graph_analysis(restored)
+            if analysis:
+                paper_context_parts.append(analysis)
+        except Exception:
+            pass
 
     paper_block = "\n".join(paper_context_parts)
 
+    # Load venue-specific PC Chair prompt (externalized to .md file)
+    chair_prompt_template = load_pc_chair_prompt(conference_slug)
+    if not chair_prompt_template:
+        # Fallback for venues without a pc_chair.md
+        chair_prompt_template = (
+            "Produce a single structured review as the PC Chair. "
+            "Synthesize all reviewer assessments into a unified, actionable review. "
+            "Output ONLY a valid JSON object."
+        )
+
     pc_chair_prompt = (
-        "You are the PC Chair producing the unified final review for this paper. "
-        "You have the paper, the knowledge graph analysis, all reviewer assessments, "
-        "the deliberation exchanges, and the meta-review synthesis.\n\n"
-        "Produce a single structured review matching the HotCRP review form. "
-        "This is the unified committee assessment. Synthesize the best insights from all "
-        "reviewers, resolve disagreements, and produce a coherent, actionable review.\n\n"
-        "Return a JSON object with these exact fields:\n\n"
-        "```json\n"
-        "{\n"
-        '  "overall_merit": {"score": <1-5>, "label": "<Reject|Weak reject|Weak accept|Accept|Strong accept>"},\n'
-        '  "reviewer_expertise": {"score": <1-4>, "label": "<No familiarity|Some familiarity|Knowledgeable|Expert>"},\n'
-        '  "paper_summary": "<2-3 paragraph summary of what the paper does and claims>",\n'
-        '  "strengths": "<numbered list of 3-5 substantive strengths, each grounded in evidence>",\n'
-        '  "weaknesses": "<numbered list of 3-5 substantive weaknesses, each specific and actionable>",\n'
-        '  "comments_for_authors": "<detailed constructive feedback synthesizing the committee\'s key concerns>",\n'
-        '  "comments_for_pc": "<internal notes: decision risks, methodology flags, discussion points>",\n'
-        '  "questions_for_authors": "<3-5 questions the committee would like authors to address>",\n'
-        '  "revision_actions": [{"action": "<specific change>", "priority": "<must|should|could>", "expected_impact": "<what improves>"}],\n'
-        '  "submission_readiness": {"status": "<ready|revise_before_submit|major_revision_needed|reject>", "reason": "<1-2 sentence justification>"}\n'
-        "}\n"
-        "```\n\n"
-        "Rules:\n"
-        "- Each text field is plain prose suitable for pasting into HotCRP text boxes.\n"
-        "- Ground every claim in specific sections, figures, tables, or page numbers.\n"
-        "- Be direct and specific. No generic praise or vague criticism.\n"
-        "- Output ONLY the JSON object, no surrounding text.\n\n"
-        + paper_block
+        chair_prompt_template
+        + "\n\n" + paper_block
         + "\n\n" + "=" * 60 + "\nREVIEW COMMITTEE OUTPUTS\n" + "=" * 60 + "\n\n"
         + "\n\n---\n\n".join(review_summaries)
     )
@@ -304,8 +403,8 @@ async def _run_pc_chair_review(
             messages=[
                 {"role": "system", "content": (
                     f"You are the Program Committee Chair for {conference_name}. "
-                    "Produce the unified final review as a JSON object matching "
-                    "the HotCRP review form. Output ONLY valid JSON."
+                    "Follow the instructions in the user message exactly. "
+                    "Output ONLY valid JSON matching the output contract."
                 )},
                 {"role": "user", "content": pc_chair_prompt},
             ],
@@ -626,7 +725,8 @@ async def _run_graph_pipeline(
         })
 
         user_message = build_user_message(doc, profile)
-        enriched_message = user_message + paper_graph.summary
+        graph_analysis = _build_review_graph_analysis(paper_graph)
+        enriched_message = user_message + paper_graph.summary + graph_analysis
 
         # ── Step 1: Independent Reviews ────────────────
         ctl.enter_step("independent_reviews")

@@ -78,7 +78,7 @@ class TestConferenceProfile:
         profile = load_profile("sc26")
         assert profile.slug == "sc26"
         assert "SC" in profile.short_name
-        assert profile.max_pages == 12
+        assert profile.max_pages == 10
         assert len(profile.panel_agents) >= 4
 
 

@@ -1,4 +1,4 @@
-"""Prompt assembly for PC Panel reviewer agents."""
+"""Prompt assembly for Paper Review reviewer agents."""
 
 import yaml
 from pathlib import Path
@@ -26,6 +26,16 @@ def load_shared_prompt(conference_slug: str) -> str:
 def load_role_prompt(conference_slug: str, role: str) -> str:
     """Load a role-specific prompt overlay."""
     path = _prompts_dir(conference_slug) / f"{role}.md"
+    return path.read_text() if path.exists() else ""
+
+
+def load_pc_chair_prompt(conference_slug: str) -> str:
+    """Load the PC Chair prompt for a venue.
+
+    Returns the venue-specific pc_chair.md content, or empty string
+    if no PC Chair prompt exists for this venue.
+    """
+    path = _prompts_dir(conference_slug) / "pc_chair.md"
     return path.read_text() if path.exists() else ""
 
 
