@@ -239,11 +239,11 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
                 lines.append(reason)
             lines.append("")
 
-    # PC Chair Review
+    # Final Review
     if packet.pc_chair_review:
         lines.append("---")
         lines.append("")
-        lines.append("## PC Chair Review")
+        lines.append("## Final Review")
         lines.append("")
 
         chair = packet.pc_chair_review
@@ -343,20 +343,22 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
 
         agents_prov = prov.get("agents", {})
         if agents_prov:
-            lines.append("| Role | Model | Temperature | Top-P | Presence | Frequency |")
-            lines.append("|------|-------|-------------|-------|----------|-----------|")
+            lines.append("| Role | Model | Temperature | Top-P | Top-K | Min-P | Repeat |")
+            lines.append("|------|-------|-------------|-------|-------|-------|--------|")
             for role_id, info in agents_prov.items():
                 model = info.get("model_id", "")
                 temp = info.get("temperature")
                 tp = info.get("top_p")
-                pp = info.get("presence_penalty")
-                fp = info.get("frequency_penalty")
+                tk = info.get("top_k")
+                mp = info.get("min_p")
+                rp = info.get("repeat_penalty")
                 lines.append(
                     f"| {role_id} | `{model}` | "
                     f"{temp if temp is not None else '\u2014'} | "
                     f"{tp if tp is not None else '\u2014'} | "
-                    f"{pp if pp is not None else '\u2014'} | "
-                    f"{fp if fp is not None else '\u2014'} |"
+                    f"{tk if tk is not None else '\u2014'} | "
+                    f"{mp if mp is not None else '\u2014'} | "
+                    f"{rp if rp is not None else '\u2014'} |"
                 )
             lines.append("")
 

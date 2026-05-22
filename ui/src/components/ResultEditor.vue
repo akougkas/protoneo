@@ -12,7 +12,7 @@
         <select v-model.number="fields.overall_merit.score" @change="onScoreChange">
           <option :value="5">5 &ndash; Strong accept</option>
           <option :value="4">4 &ndash; Accept</option>
-          <option :value="3">3 &ndash; Weak accept</option>
+          <option :value="3">3 &ndash; Borderline</option>
           <option :value="2">2 &ndash; Weak reject</option>
           <option :value="1">1 &ndash; Reject</option>
         </select>
@@ -123,10 +123,10 @@ const textFieldDefs = [
   { key: 'comments_for_pc', label: 'Comments for PC', rows: 5 },
 ]
 
-const meritLabels = { 5: 'Strong accept', 4: 'Accept', 3: 'Weak accept', 2: 'Weak reject', 1: 'Reject' }
+const meritLabels = { 5: 'Strong accept', 4: 'Accept', 3: 'Borderline', 2: 'Weak reject', 1: 'Reject' }
 
 const fields = reactive({
-  overall_merit: { score: 3, label: 'Weak accept' },
+  overall_merit: { score: 3, label: 'Borderline' },
   reviewer_expertise: { score: 3, label: 'Knowledgeable' },
   paper_summary: '',
   strengths: '',

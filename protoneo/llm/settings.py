@@ -583,6 +583,24 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         },
     ),
     ModelPreset(
+        name="nemotron-omni-split",
+        description="Nemotron Omni split panel: Dynamo analytical/deterministic, Mini creative/adversarial",
+        assignments={
+            "ontology": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "extraction": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "coref": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "verification": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "technical": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "systems": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "clarity": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "meta_reviewer": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "meta": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "novelty": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "skeptic": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "artifact": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+        },
+    ),
+    ModelPreset(
         name="hpdc26-openai",
         description="HPDC '26 reviews: Nemotron-Cascade-2 graph pipeline, GPT-5.4 for technical/novelty/skeptic/meta, GPT-5.4-mini for clarity",
         assignments={

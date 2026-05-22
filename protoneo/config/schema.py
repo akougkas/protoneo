@@ -44,6 +44,10 @@ class AgentConfig(BaseModel):
     grounding: list[dict[str, Any]] = Field(default_factory=list)
     temperature: float | None = None
     top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    repeat_penalty: float | None = None
+    reasoning_effort: str | None = None
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
 

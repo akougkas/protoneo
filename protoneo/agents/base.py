@@ -35,6 +35,10 @@ class BaseAgent:
         max_tokens: int = 4096,
         temperature: float | None = None,
         top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repeat_penalty: float | None = None,
+        reasoning_effort: str | None = None,
         presence_penalty: float | None = None,
         frequency_penalty: float | None = None,
     ):
@@ -47,6 +51,10 @@ class BaseAgent:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._top_p = top_p
+        self._top_k = top_k
+        self._min_p = min_p
+        self._repeat_penalty = repeat_penalty
+        self._reasoning_effort = reasoning_effort
         self._presence_penalty = presence_penalty
         self._frequency_penalty = frequency_penalty
 
@@ -73,6 +81,19 @@ class BaseAgent:
             kw["temperature"] = self._temperature
         if self._top_p is not None:
             kw["top_p"] = self._top_p
+        local_extra: dict[str, Any] = {}
+        if self._top_k is not None:
+            local_extra["top_k"] = self._top_k
+        if self._min_p is not None:
+            local_extra["min_p"] = self._min_p
+        if self._repeat_penalty is not None:
+            local_extra["repeat_penalty"] = self._repeat_penalty
+        if local_extra:
+            # OpenAI-compatible local servers such as llama-server and LM Studio
+            # accept sampler controls in the raw request body.
+            kw["extra_body"] = local_extra
+        if self._reasoning_effort is not None:
+            kw["reasoning_effort"] = self._reasoning_effort
         if self._presence_penalty is not None:
             kw["presence_penalty"] = self._presence_penalty
         if self._frequency_penalty is not None:
@@ -155,6 +176,11 @@ class BaseAgent:
                 "model": self._model,
                 "usage": response.usage.model_dump(),
                 "temperature": call_kwargs.get("temperature", self._temperature),
+                "top_p": call_kwargs.get("top_p", self._top_p),
+                "top_k": self._top_k,
+                "min_p": self._min_p,
+                "repeat_penalty": self._repeat_penalty,
+                "reasoning_effort": self._reasoning_effort,
             },
         )
 
@@ -206,6 +232,11 @@ class BaseAgent:
                 "model": self._model,
                 "streamed": True,
                 "temperature": call_kwargs.get("temperature", self._temperature),
+                "top_p": call_kwargs.get("top_p", self._top_p),
+                "top_k": self._top_k,
+                "min_p": self._min_p,
+                "repeat_penalty": self._repeat_penalty,
+                "reasoning_effort": self._reasoning_effort,
                 "usage": stream_usage if stream_usage else {},
             },
         )

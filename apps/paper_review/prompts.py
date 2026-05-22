@@ -30,13 +30,19 @@ def load_role_prompt(conference_slug: str, role: str) -> str:
 
 
 def load_pc_chair_prompt(conference_slug: str) -> str:
-    """Load the PC Chair prompt for a venue.
+    """Load a venue final-synthesis prompt.
 
-    Returns the venue-specific pc_chair.md content, or empty string
-    if no PC Chair prompt exists for this venue.
+    The current pipeline uses meta.md as the single Meta-Reviewer/PC Chair
+    synthesis prompt. Older callers may still ask for pc_chair.md, so prefer
+    meta.md and fall back to a venue pc_chair.md only for legacy prompt packs.
     """
+    meta = load_role_prompt(conference_slug, "meta")
+    if meta:
+        return meta
     path = _prompts_dir(conference_slug) / "pc_chair.md"
-    return path.read_text() if path.exists() else ""
+    if path.exists():
+        return path.read_text()
+    return ""
 
 
 def assemble_system_prompt(

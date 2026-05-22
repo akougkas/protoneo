@@ -25,34 +25,73 @@ from .schemas import (
 
 logger = logging.getLogger("protoneo.paper_review.review")
 
-# Provider preferences for automatic model assignment.
-# When multiple providers are available, each role gets the first match.
-# Roles not listed here fall through to the first available model.
-# Uses generic provider names only (no site-specific node names).
+# Provider preferences for automatic model assignment.  Local review defaults
+# deliberately split the panel: Dynamo is the deterministic analytical endpoint;
+# Mini is the more exploratory adversarial endpoint.
 _ROLE_PROVIDER_PREFS: dict[str, list[str]] = {
-    "technical": ["openai"],
-    "systems": ["openai"],
-    "novelty": ["openai"],
-    "clarity": ["openai"],
-    "skeptic": ["openai"],
-    "meta": ["openai"],
-    # anthropic removed from all provider preferences
+    "technical": ["lan-dynamo", "openai"],
+    "systems": ["lan-dynamo", "openai"],
+    "clarity": ["lan-dynamo", "openai"],
+    "meta": ["lan-dynamo", "openai"],
+    "novelty": ["lan-mini", "lan-dynamo", "openai"],
+    "skeptic": ["lan-mini", "lan-dynamo", "openai"],
+    "artifact": ["lan-mini", "lan-dynamo", "openai"],
 }
 
-# Per-role inference parameter defaults.
-# All reviewers use low temperature for structured, grounded evaluation.
-# Local models (Nemotron, Qwen) are especially sensitive to high temperature,
-# producing verbose reasoning instead of structured JSON output.
-# Meta-reviewer gets slightly higher temperature for synthesis flexibility.
+# Per-role inference parameter defaults. These are role-level targets; local
+# endpoint sampler profiles below add request-side top_k/min_p/repeat_penalty.
 _ROLE_INFERENCE_PREFS: dict[str, dict[str, float]] = {
     "technical": {"temperature": 0.2, "top_p": 0.9},
     "systems": {"temperature": 0.2, "top_p": 0.9},
-    "skeptic": {"temperature": 0.15, "top_p": 0.85},
-    "artifact": {"temperature": 0.15, "top_p": 0.85},
-    "novelty": {"temperature": 0.3, "top_p": 0.9},
-    "clarity": {"temperature": 0.3, "top_p": 0.9},
-    "meta": {"temperature": 0.4, "top_p": 0.9},
+    "skeptic": {"temperature": 0.45, "top_p": 0.95},
+    "artifact": {"temperature": 0.35, "top_p": 0.95},
+    "novelty": {"temperature": 0.4, "top_p": 0.95},
+    "clarity": {"temperature": 0.18, "top_p": 0.85},
+    "meta": {"temperature": 0.25, "top_p": 0.9},
 }
+
+_LOCAL_ENDPOINT_INFERENCE_PREFS: dict[str, dict[str, float | int | str]] = {
+    # Analytical, fast, deterministic: tight nucleus, smaller top-k, modest
+    # repeat penalty to keep review JSON stable and evidence-focused.
+    "lan-dynamo": {
+        "temperature": 0.15,
+        "top_p": 0.82,
+        "top_k": 20,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+    },
+    # Creative/adversarial: wider sampler for novelty/skeptic exploration while
+    # still bounded enough for JSON review forms.
+    "lan-mini": {
+        "temperature": 0.45,
+        "top_p": 0.95,
+        "top_k": 80,
+        "min_p": 0.02,
+        "repeat_penalty": 1.08,
+    },
+}
+
+
+def _provider_from_model(model_id: str) -> str:
+    return model_id.split("/", 1)[0] if "/" in model_id else ""
+
+
+def _inference_for(role: str, model_id: str) -> dict[str, float | int | str]:
+    """Merge role calibration with request-side local endpoint sampling."""
+    merged: dict[str, float | int | str] = dict(_ROLE_INFERENCE_PREFS.get(role, {}))
+    provider = _provider_from_model(model_id)
+    if provider in _LOCAL_ENDPOINT_INFERENCE_PREFS:
+        merged.update(_LOCAL_ENDPOINT_INFERENCE_PREFS[provider])
+        if role == "meta":
+            # Final synthesis must remain tight even when routed locally.
+            merged["temperature"] = 0.25
+            merged["top_p"] = 0.9
+            merged["top_k"] = min(int(merged.get("top_k", 40)), 40)
+        elif role in {"technical", "systems", "clarity"} and provider == "lan-dynamo":
+            merged["temperature"] = min(float(merged.get("temperature", 0.2)), 0.18)
+        elif role in {"skeptic", "novelty", "artifact"} and provider == "lan-mini":
+            merged["temperature"] = max(float(merged.get("temperature", 0.4)), 0.45)
+    return merged
 
 
 def _resolve_default_models(roles: list[str] | None = None) -> dict[str, str]:
@@ -188,7 +227,7 @@ def build_agent_configs(
         f"Expertise scale: {profile.expertise_labels()}"
     )
     if user_instructions:
-        conference_context += f"\n\n## PC Chair Instructions\n\n{user_instructions}"
+        conference_context += f"\n\n## Review Chair Instructions\n\n{user_instructions}"
 
     configs: dict[str, AgentConfig] = {}
 
@@ -200,15 +239,20 @@ def build_agent_configs(
         prompt = assemble_system_prompt(
             conference_slug, role, conference_context, agent_focus=focus,
         )
-        inference = _ROLE_INFERENCE_PREFS.get(role, {})
+        model_id = models.get(role, models.get("technical", ""))
+        inference = _inference_for(role, model_id)
         configs[role] = AgentConfig(
             role=agent_def.role if agent_def else role.replace("_", " ").title() + " Reviewer",
-            model=models.get(role, models.get("technical", "")),
+            model=model_id,
             system_prompt=prompt,
             focus=focus,
             max_tokens=32768,
             temperature=inference.get("temperature"),
             top_p=inference.get("top_p"),
+            top_k=inference.get("top_k"),
+            min_p=inference.get("min_p"),
+            repeat_penalty=inference.get("repeat_penalty"),
+            reasoning_effort=inference.get("reasoning_effort"),
             presence_penalty=inference.get("presence_penalty"),
             frequency_penalty=inference.get("frequency_penalty"),
         )
@@ -224,7 +268,7 @@ def build_agent_configs(
     meta_model = (models.get("meta_reviewer")
                   or models.get("meta")
                   or models.get("technical", ""))
-    meta_inference = _ROLE_INFERENCE_PREFS.get("meta", {})
+    meta_inference = _inference_for("meta", meta_model)
     configs["meta"] = AgentConfig(
         role=meta_def.role if meta_def else "Meta-Reviewer",
         model=meta_model,
@@ -233,6 +277,10 @@ def build_agent_configs(
         max_tokens=16384,
         temperature=meta_inference.get("temperature"),
         top_p=meta_inference.get("top_p"),
+        top_k=meta_inference.get("top_k"),
+        min_p=meta_inference.get("min_p"),
+        repeat_penalty=meta_inference.get("repeat_penalty"),
+        reasoning_effort=meta_inference.get("reasoning_effort"),
         presence_penalty=meta_inference.get("presence_penalty"),
         frequency_penalty=meta_inference.get("frequency_penalty"),
     )
@@ -471,6 +519,10 @@ def result_to_packet(
             "model_id": cfg.model,
             "temperature": cfg.temperature,
             "top_p": cfg.top_p,
+            "top_k": cfg.top_k,
+            "min_p": cfg.min_p,
+            "repeat_penalty": cfg.repeat_penalty,
+            "reasoning_effort": cfg.reasoning_effort,
             "presence_penalty": cfg.presence_penalty,
             "frequency_penalty": cfg.frequency_penalty,
         }

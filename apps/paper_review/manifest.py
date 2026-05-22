@@ -110,5 +110,5 @@ manifest = AppManifest(
     domain_config=domain_config,
     profile_dir=Path(__file__).resolve().parent / "profiles",
     prompt_dir=Path(__file__).resolve().parent / "prompts",
-    pipeline_stages=["independent_review", "deliberation", "meta_review", "pc_chair"],
+    pipeline_stages=["independent_review", "deliberation", "meta_review"],
 )

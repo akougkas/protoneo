@@ -51,6 +51,10 @@ class DeliberationEngine:
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             top_p=config.top_p,
+            top_k=config.top_k,
+            min_p=config.min_p,
+            repeat_penalty=config.repeat_penalty,
+            reasoning_effort=config.reasoning_effort,
             presence_penalty=config.presence_penalty,
             frequency_penalty=config.frequency_penalty,
         )

@@ -156,6 +156,31 @@ class TestReviewOrchestration:
         assert configs["technical"].model == "openai/gpt-4o"
         assert configs["meta"].model == "anthropic/claude-opus-4-6"
 
+    def test_local_sampler_split_for_nemotron_omni(self):
+        profile = load_profile("hpdc26")
+        configs = build_agent_configs(
+            profile,
+            "hpdc26",
+            model_map={
+                "technical": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+                "clarity": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+                "meta_reviewer": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+                "novelty": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+                "skeptic": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            },
+        )
+
+        assert configs["technical"].temperature == 0.15
+        assert configs["technical"].top_p == 0.82
+        assert configs["technical"].top_k == 20
+        assert configs["novelty"].temperature == 0.45
+        assert configs["novelty"].top_p == 0.95
+        assert configs["novelty"].top_k == 80
+        assert configs["skeptic"].repeat_penalty == 1.08
+        assert configs["meta"].temperature == 0.25
+        assert configs["meta"].top_p == 0.9
+        assert configs["meta"].top_k == 20
+
     def test_build_agent_configs_with_artifact(self):
         profile = load_profile("hpdc26")
         configs = build_agent_configs(profile, "hpdc26", include_artifact=True)
@@ -279,7 +304,7 @@ class TestOutputParsing:
     def test_parse_meta_review_structured(self):
         content = json.dumps({
             "panel_summary": "Mixed reviews.",
-            "final_recommendation": {"score": 3, "label": "Weak accept"},
+            "final_recommendation": {"score": 3, "label": "Borderline"},
             "consensus": {"level": "moderate"},
             "decision_risk_notes": ["Baseline fairness concern"],
         })
@@ -686,17 +711,17 @@ class TestReviewCheckpoints:
         assert len(session.checkpoints) == 1
 
     def test_all_review_stages_get_checkpoints(self):
-        """C4: all four review stages can be checkpointed."""
+        """C4: all review stages can be checkpointed."""
         from protoneo.deliberation.session import Session
         from apps.paper_review.pipeline import _write_review_checkpoint
 
         session = Session()
-        for stage in ["independent_review", "deliberation", "meta_review", "pc_chair"]:
+        for stage in ["independent_review", "deliberation", "meta_review"]:
             _write_review_checkpoint(session, stage)
 
-        assert len(session.checkpoints) == 4
+        assert len(session.checkpoints) == 3
         names = [cp.stage_name for cp in session.checkpoints]
-        assert names == ["independent_review", "deliberation", "meta_review", "pc_chair"]
+        assert names == ["independent_review", "deliberation", "meta_review"]
 
 
 # ── App Data ──────────────────────────────────────────────────

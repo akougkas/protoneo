@@ -2,14 +2,13 @@
 Pipeline orchestration for Paper Review.
 
 Contains the kernel graph pipeline invocation, review stage orchestration,
-and PC Chair review generation.
+and unified final-review synthesis.
 """
 
 import asyncio
 import json
 import logging
 import re
-import time as _time
 from typing import Any
 
 from protoneo.agents.types import Document
@@ -27,8 +26,6 @@ from protoneo.deliberation.session import SessionStatus, StageCheckpoint
 from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.graph import KnowledgeGraph
 from .conference import ConferenceProfile
-from .manifest import domain_config as _domain_config
-from .prompts import load_pc_chair_prompt
 from .review import (
     build_deliberation_config,
     build_user_message,
@@ -51,14 +48,24 @@ def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
     Reviewers can reference these findings when grounding their assessments.
     """
     if not graph.nodes:
-        return ""
+        return (
+            "\n\n## Structured Graph Analysis\n\n"
+            "No knowledge graph entities are available for this session. "
+            "Treat the manuscript text and inline figure/table annotations as the "
+            "primary evidence source, and explicitly note that graph grounding is unavailable.\n"
+        )
 
     _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
     _STRUCTURAL_RELS = {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
 
     semantic = [n for n in graph.nodes if n.node_type not in _STRUCTURAL]
     if not semantic:
-        return ""
+        return (
+            "\n\n## Structured Graph Analysis\n\n"
+            "The graph contains only structural paper nodes and no semantic claim, "
+            "method, baseline, evidence, result, or dataset entities. Treat this as "
+            "a graph coverage gap when evaluating unsupported claims.\n"
+        )
 
     sem_edges = [e for e in graph.edges if e.edge_type not in _STRUCTURAL_RELS]
 
@@ -146,6 +153,20 @@ def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
     if len(result) > 2000:
         result = result[:1800].rsplit("\n", 1)[0] + "\n"
     return result
+
+
+def _build_enriched_review_message(user_message: str, graph: KnowledgeGraph) -> str:
+    """Append graph summary and structured analysis for all reviewer agents."""
+    parts = [user_message]
+    if graph.summary:
+        parts.append(graph.summary)
+    else:
+        parts.append(
+            "\n\n## Knowledge Graph Summary\n\n"
+            "No reviewer-facing graph summary is available for this session.\n"
+        )
+    parts.append(_build_review_graph_analysis(graph))
+    return "\n\n".join(p.strip() for p in parts if p)
 
 
 def _write_review_checkpoint(session, stage_name: str) -> None:
@@ -253,22 +274,81 @@ async def _run_review_stage(
                     review.model_dump(), agent_id=output.agent_id
                 )
 
+    await _finalize_unified_synthesis(sid, bus, result)
+
     return result
 
 
 def _parse_final_review(raw: str) -> dict[str, Any]:
-    """Extract structured review JSON from the PC Chair's raw output.
+    """Extract structured final-review JSON from the unified synthesis output.
 
     Handles markdown code fences, leading/trailing text, and malformed JSON.
     Falls back to treating the raw output as comments_for_authors.
     """
+    def _fallback() -> dict[str, Any]:
+        return {
+            "overall_merit": {"score": 3, "label": "Borderline"},
+            "reviewer_expertise": {"score": 3, "label": "Knowledgeable"},
+            "paper_summary": "",
+            "strengths": [],
+            "weaknesses": [],
+            "comments_for_authors": raw,
+            "comments_for_pc": "",
+            "questions_for_authors": [],
+            "revision_actions": [],
+            "submission_readiness": {"status": "revise_before_submit", "reason": ""},
+        }
+
+    def _normalize(parsed: dict[str, Any]) -> dict[str, Any]:
+        source = parsed.get("final_review")
+        if not isinstance(source, dict):
+            source = parsed
+
+        final_review: dict[str, Any] = {
+            "overall_merit": source.get("overall_merit")
+            or source.get("final_recommendation")
+            or parsed.get("final_recommendation")
+            or {"score": 3, "label": "Borderline"},
+            "reviewer_expertise": source.get("reviewer_expertise")
+            or source.get("expertise")
+            or parsed.get("expertise")
+            or {"score": 3, "label": "Knowledgeable"},
+            "paper_summary": source.get("paper_summary")
+            or source.get("summary")
+            or parsed.get("author_facing_summary")
+            or parsed.get("panel_summary")
+            or "",
+            "strengths": source.get("strengths", []),
+            "weaknesses": source.get("weaknesses", []),
+            "comments_for_authors": source.get("comments_for_authors")
+            or parsed.get("author_facing_summary")
+            or parsed.get("panel_summary")
+            or "",
+            "comments_for_pc": source.get("comments_for_pc", ""),
+            "internal_committee_concerns": source.get("internal_committee_concerns")
+            or parsed.get("decision_risk_notes", []),
+            "questions_for_authors": source.get("questions_for_authors", []),
+            "revision_actions": source.get("revision_actions")
+            or source.get("prioritized_revision_plan")
+            or parsed.get("prioritized_revision_plan", []),
+            "submission_readiness": source.get("submission_readiness")
+            or parsed.get("submission_readiness")
+            or {"status": "revise_before_submit", "reason": ""},
+        }
+
+        # Preserve any extra final-review fields the prompt/schema may add.
+        for key, value in source.items():
+            final_review.setdefault(key, value)
+
+        return final_review
+
     cleaned = strip_json_fences(raw)
 
     # Try direct parse first
     try:
         parsed = json.loads(cleaned)
         if isinstance(parsed, dict):
-            return parsed
+            return _normalize(parsed)
     except json.JSONDecodeError:
         pass
 
@@ -278,181 +358,60 @@ def _parse_final_review(raw: str) -> dict[str, Any]:
         try:
             parsed = json.loads(match.group())
             if isinstance(parsed, dict):
-                return parsed
+                return _normalize(parsed)
         except json.JSONDecodeError:
             pass
 
     # Fallback: wrap raw text as comments_for_authors
-    return {
-        "overall_merit": {"score": 3, "label": "Weak accept"},
-        "reviewer_expertise": {"score": 3, "label": "Knowledgeable"},
-        "paper_summary": "",
-        "strengths": "",
-        "weaknesses": "",
-        "comments_for_authors": raw,
-        "comments_for_pc": "",
-    }
+    return _fallback()
 
 
-async def _run_pc_chair_review(
-    sid: str, bus: SessionEventBus, ctl: PipelineControl,
+async def _finalize_unified_synthesis(
+    sid: str, bus: SessionEventBus, result: DeliberationResult,
 ) -> None:
-    """PC Chair step: generate structured final review."""
-    _llm_client = get_llm_client()
+    """Persist the meta-reviewer's single synthesis as the final review."""
     _session_manager = get_session_manager()
 
-    ctl.enter_step("pc_chair")
-    bus.emit("step_started", {
-        "stage": "review", "step": "pc_chair",
-        "message": "Generating PC Chair review for author feedback...",
-    })
-
-    session = await _session_manager.get(sid)
-    if not session or not session.result:
-        bus.emit("error", {"detail": "No deliberation result for PC Chair review"})
-        return
-
-    # Derive conference name from session config
-    conference_slug = session.config.get("metadata", {}).get("conference", "")
-    conference_name = conference_slug
-    if conference_slug:
-        try:
-            from .conference import load_profile as _load_profile
-            _profile = _load_profile(conference_slug)
-            conference_name = _profile.name
-        except Exception:
-            pass
-
-    phases_data = session.result.get("phases", [])
-    review_summaries = []
-    for phase in phases_data:
-        for output in phase.get("outputs", []):
-            role = output.get("agent_role", "reviewer")
-            content = output.get("content", "")
-            if content:
-                review_summaries.append(f"[{role}]:\n{content}")
-
-    if not review_summaries:
-        bus.emit("pc_chair_review_done", {"review": ""})
-        return
-
-    # Gather full paper context for the PC Chair
-    paper_context_parts = []
-    paper_md = session.document_markdown or session.document_text
-    if paper_md:
-        paper_context_parts.append(
-            f"{'=' * 60}\nFULL PAPER\n{'=' * 60}\n\n{paper_md}"
-        )
-
-    if session.knowledge_graph:
-        graph_summary = session.knowledge_graph.get("summary", "")
-        if graph_summary:
-            paper_context_parts.append(
-                f"\n{'=' * 60}\nKNOWLEDGE GRAPH SUMMARY\n{'=' * 60}\n\n{graph_summary}"
-            )
-        # Add structured analysis for the PC Chair
-        try:
-            restored = KnowledgeGraph.restore_from_snapshot(session.knowledge_graph)
-            analysis = _build_review_graph_analysis(restored)
-            if analysis:
-                paper_context_parts.append(analysis)
-        except Exception:
-            pass
-
-    paper_block = "\n".join(paper_context_parts)
-
-    # Load venue-specific PC Chair prompt (externalized to .md file)
-    chair_prompt_template = load_pc_chair_prompt(conference_slug)
-    if not chair_prompt_template:
-        # Fallback for venues without a pc_chair.md
-        chair_prompt_template = (
-            "Produce a single structured review as the PC Chair. "
-            "Synthesize all reviewer assessments into a unified, actionable review. "
-            "Output ONLY a valid JSON object."
-        )
-
-    pc_chair_prompt = (
-        chair_prompt_template
-        + "\n\n" + paper_block
-        + "\n\n" + "=" * 60 + "\nREVIEW COMMITTEE OUTPUTS\n" + "=" * 60 + "\n\n"
-        + "\n\n---\n\n".join(review_summaries)
-    )
-
-    agent_cfgs = session.config.get("agents", {})
-    meta_cfg = agent_cfgs.get("meta", {})
-    chair_model = ""
-    if isinstance(meta_cfg, dict):
-        chair_model = meta_cfg.get("model", "")
-    # Fall back to any reviewer model (never silently pick a cloud model)
-    if not chair_model:
-        for cfg in agent_cfgs.values():
-            if isinstance(cfg, dict) and cfg.get("model"):
-                chair_model = cfg["model"]
+    output = result.final_output
+    if not output:
+        for phase in result.phases:
+            if phase.phase_name == "meta_review" and phase.outputs:
+                output = phase.outputs[0]
                 break
-    logger.info("PC Chair using model: %s", chair_model)
+    if not output:
+        bus.emit("final_review_done", {"review": {}})
+        return
 
-    bus.emit("agent_start", {
-        "agent_id": "pc_chair", "role": "PC Chair", "model": chair_model,
-    })
+    final_review = _parse_final_review(output.content)
+    session = await _session_manager.get(sid)
+    if session and session.result:
+        conference_slug = session.config.get("metadata", {}).get("conference", "")
+        session.result["final_review"] = final_review
+        session.result["pc_chair_review"] = final_review
+        session.app_data["conference"] = conference_slug
+        session.app_data["final_review"] = final_review
+        session.app_data.pop("review_packet", None)
+        await _session_manager.update(session)
 
-    chair_start = _time.monotonic()
-    try:
-        pc_chair_review = ""
-        async for chunk in _llm_client.stream(
-            model=chair_model,
-            messages=[
-                {"role": "system", "content": (
-                    f"You are the Program Committee Chair for {conference_name}. "
-                    "Follow the instructions in the user message exactly. "
-                    "Output ONLY valid JSON matching the output contract."
-                )},
-                {"role": "user", "content": pc_chair_prompt},
-            ],
-            session_id=sid,
-        ):
-            pc_chair_review += chunk
-            bus.emit("token", {
-                "agent_id": "pc_chair", "role": "PC Chair", "chunk": chunk,
-            })
+    usage = output.metadata.get("usage", {}) if output.metadata else {}
+    model = output.metadata.get("model", "") if output.metadata else ""
+    dur = 0.0
+    for phase in result.phases:
+        if phase.phase_name == "meta_review":
+            dur = round(phase.duration_seconds, 1)
+            break
 
-        dur = round(_time.monotonic() - chair_start, 1)
-        bus.emit("agent_done", {
-            "agent_id": "pc_chair", "role": "PC Chair",
-            "model": chair_model, "duration_seconds": dur,
-            "tokens": 0, "completion_tokens": 0,
-        })
-
-        # Parse structured JSON from the PC Chair output.
-        final_review = _parse_final_review(pc_chair_review)
-
-        session = await _session_manager.get(sid)
-        if session and session.result:
-            session.result["final_review"] = final_review
-            session.result["pc_chair_review"] = final_review.get(
-                "comments_for_authors", pc_chair_review
-            )
-            _write_review_checkpoint(session, "pc_chair")
-            session.app_data["conference"] = conference_slug
-            session.app_data["final_review"] = final_review
-            await _session_manager.update(session)
-
-        bus.emit("step_completed", {"stage": "review", "step": "pc_chair"})
-        bus.emit("pc_chair_review_done", {
-            "review": final_review, "model": chair_model,
-            "duration_seconds": dur,
-        })
-
-    except Exception as e:
-        logger.error("PC Chair review failed for session %s: %s", sid, e)
-        dur = round(_time.monotonic() - chair_start, 1)
-        bus.emit("agent_done", {
-            "agent_id": "pc_chair", "role": "PC Chair",
-            "model": chair_model, "duration_seconds": dur, "tokens": 0,
-        })
-        session = await _session_manager.get(sid)
-        if session and session.result:
-            session.result["pc_chair_review"] = f"PC Chair review generation failed: {e}"
-            await _session_manager.update(session)
+    payload = {
+        "review": final_review,
+        "model": model,
+        "duration_seconds": dur,
+        "tokens": usage.get("total_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "source_phase": "meta_review",
+    }
+    bus.emit("final_review_done", payload)
+    # Backward-compatible event name consumed by existing UI clients.
+    bus.emit("pc_chair_review_done", payload)
 
 
 async def _run_graph_pipeline(
@@ -536,7 +495,7 @@ async def _run_graph_pipeline(
             })
 
             user_message = build_user_message(doc, profile)
-            enriched_message = user_message
+            enriched_message = _build_enriched_review_message(user_message, paper_graph)
 
             ctl.enter_step("independent_reviews")
             bus.emit("step_started", {
@@ -551,8 +510,6 @@ async def _run_graph_pipeline(
                 sid, agent_configs, fallback_delib,
                 enriched_message, bus, ctl, paper_graph,
             )
-
-            await _run_pc_chair_review(sid, bus, ctl)
 
             session = await _session_manager.get(sid)
             if session:
@@ -585,23 +542,44 @@ async def _run_graph_pipeline(
             return provider in _SUBSCRIPTION_PROVIDERS
 
         def _resolve_graph_model(step_key: str) -> str:
-            m = model_map.get(step_key)
-            if m and not _is_subscription(m):
-                return m
-            m = model_map.get("ontology") or model_map.get("graph")
-            if m and not _is_subscription(m):
-                return m
             try:
                 from protoneo.llm.settings import load_settings as _ls
-                _active = (_ls().active_models or {})
-                for _prov, _mid in _active.items():
-                    if _mid and _prov not in _SUBSCRIPTION_PROVIDERS:
-                        return f"{_prov}/{_mid}"
+                _settings = _ls()
+                _local_providers = {
+                    e.id for e in (
+                        list(_settings.localhost_endpoints)
+                        + list(_settings.lan_endpoints)
+                    )
+                }
             except Exception:
-                pass
-            for c in agent_configs.values():
-                if c.model and not any(c.model.startswith(f"{sp}/") for sp in _SUBSCRIPTION_PROVIDERS):
-                    return c.model
+                _settings = None
+                _local_providers = set()
+
+            def _is_local(model_id: str) -> bool:
+                provider = model_id.split("/", 1)[0] if "/" in model_id else ""
+                if not provider or _is_subscription(model_id):
+                    return False
+                return (
+                    provider in _local_providers
+                    or provider.startswith("lan-")
+                    or provider.startswith("localhost-")
+                    or provider in {"local", "ollama", "lmstudio"}
+                )
+
+            for candidate in (
+                model_map.get(step_key),
+                model_map.get("ontology"),
+                model_map.get("graph"),
+            ):
+                if candidate and _is_local(candidate):
+                    return candidate
+
+            if _settings:
+                for provider, model_id in (_settings.active_models or {}).items():
+                    candidate = f"{provider}/{model_id}" if model_id else ""
+                    if candidate and _is_local(candidate):
+                        return candidate
+
             logger.warning("No local model for graph step '%s'", step_key)
             return ""
 
@@ -685,6 +663,7 @@ async def _run_graph_pipeline(
 
         # Run kernel graph pipeline
         from protoneo.knowledge.pipeline import GraphPipeline
+        from .manifest import domain_config as _domain_config
 
         graph_pipeline = GraphPipeline(_llm_client, _session_manager, _domain_config)
         paper_graph = await graph_pipeline.run(
@@ -725,8 +704,7 @@ async def _run_graph_pipeline(
         })
 
         user_message = build_user_message(doc, profile)
-        graph_analysis = _build_review_graph_analysis(paper_graph)
-        enriched_message = user_message + paper_graph.summary + graph_analysis
+        enriched_message = _build_enriched_review_message(user_message, paper_graph)
 
         # ── Step 1: Independent Reviews ────────────────
         ctl.enter_step("independent_reviews")
@@ -742,9 +720,6 @@ async def _run_graph_pipeline(
             sid, agent_configs, fallback_delib,
             enriched_message, bus, ctl, paper_graph,
         )
-
-        # ── Step 4: PC Chair ───────────────────────────
-        await _run_pc_chair_review(sid, bus, ctl)
 
         # Persist annotated graph
         session = await _session_manager.get(sid)

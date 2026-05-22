@@ -317,7 +317,7 @@
         <textarea
           v-model="userInstructions"
           class="instructions-input"
-          placeholder="Enter any specific instructions for the review panel. These will be injected as PC Chair directives into every reviewer's system prompt.
+          placeholder="Enter any specific instructions for the review panel. These will be injected as review-chair directives into every reviewer's system prompt.
 
 Examples:
 • Focus particularly on scalability claims beyond 1024 nodes
@@ -572,13 +572,13 @@ const activeModelIds = computed(() => {
 // Role-to-provider preference for smart defaults.
 // Maps agent role IDs to preferred providers, tried in order.
 const ROLE_PROVIDER_PREF = {
-  technical: ['dynamo', 'zbook', 'mini'],
-  skeptic: ['dynamo', 'openrouter', 'zbook'],
-  novelty: ['mini', 'openrouter', 'dynamo'],
-  clarity: ['mini', 'zbook', 'dynamo'],
-  meta_reviewer: ['openrouter', 'zbook', 'dynamo'],
-  meta: ['openrouter', 'zbook', 'dynamo'],
-  artifact: ['mini', 'zbook', 'dynamo'],
+  technical: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
+  skeptic: ['lan-mini', 'mini', 'lan-dynamo', 'dynamo', 'zbook'],
+  novelty: ['lan-mini', 'mini', 'lan-dynamo', 'dynamo', 'zbook'],
+  clarity: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
+  meta_reviewer: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
+  meta: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
+  artifact: ['lan-mini', 'mini', 'zbook', 'lan-dynamo', 'dynamo'],
 }
 
 const graphSteps = [

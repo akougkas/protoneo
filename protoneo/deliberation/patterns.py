@@ -751,7 +751,8 @@ class IndependentSynthesisPattern:
             role="user",
             content=(
                 "Below are all reviewer outputs and deliberation messages. "
-                "Synthesize them into a final meta-review.\n\n"
+                "Synthesize them into the final structured review required by "
+                "your system prompt.\n\n"
                 "IMPORTANT: You have the full manuscript below. Verify reviewer claims "
                 "against the actual text. If a reviewer cites a section/figure/table, "
                 "check whether it says what they claim. Flag any reviewer who scores "

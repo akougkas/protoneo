@@ -13,7 +13,7 @@ class PipelineControl:
     STAGES = ["pre_review", "review", "post_review"]
 
     PRE_REVIEW_STEPS = ["parse", "metadata", "ontology", "extract", "coref", "verify", "summarize"]
-    REVIEW_STEPS = ["independent_reviews", "deliberation", "meta_review", "pc_chair"]
+    REVIEW_STEPS = ["independent_reviews", "deliberation", "meta_review"]
 
     def __init__(self):
         self.auto_advance: bool = True

@@ -671,6 +671,20 @@ class TestConfig:
         assert cfg.role == "Reviewer"
         assert cfg.focus == "methodology"
 
+    def test_agent_config_sampler_controls(self):
+        cfg = AgentConfig(
+            role="Reviewer",
+            model="lan-mini/Nemotron",
+            top_k=80,
+            min_p=0.02,
+            repeat_penalty=1.08,
+            reasoning_effort="low",
+        )
+        assert cfg.top_k == 80
+        assert cfg.min_p == 0.02
+        assert cfg.repeat_penalty == 1.08
+        assert cfg.reasoning_effort == "low"
+
     def test_deliberation_config(self):
         cfg = DeliberationConfig(
             pattern="independent_synthesis",
@@ -2266,7 +2280,7 @@ class TestAppManifest:
         assert manifest.domain_config is not None
         assert manifest.profile_dir is not None
         assert manifest.prompt_dir is not None
-        assert len(manifest.pipeline_stages) == 4
+        assert len(manifest.pipeline_stages) == 3
 
     def test_app_router_mounting(self):
         """Verify the kernel mounts app routes under /api/apps/{name}/."""
@@ -2457,5 +2471,5 @@ class TestGraphPipeline:
         full = KERNEL_STAGES + manifest.pipeline_stages
         assert full == [
             "metadata", "ontology", "extraction", "coref", "verification", "summary",
-            "independent_review", "deliberation", "meta_review", "pc_chair",
+            "independent_review", "deliberation", "meta_review",
         ]

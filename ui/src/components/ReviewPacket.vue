@@ -378,7 +378,7 @@ function meritLabel(score) {
   // Use score_fields from manifest if available
   const sf = scoreFields.value.find(f => f.name === 'overall_merit')
   if (sf && sf.labels && sf.labels[score]) return sf.labels[score]
-  const defaults = { 1: 'Reject', 2: 'Weak reject', 3: 'Weak accept', 4: 'Accept', 5: 'Strong accept' }
+  const defaults = { 1: 'Reject', 2: 'Weak reject', 3: 'Borderline', 4: 'Accept', 5: 'Strong accept' }
   return defaults[score] || ''
 }
 

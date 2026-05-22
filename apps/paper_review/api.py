@@ -42,7 +42,6 @@ _APP_VERSION = "0.1.0"
 from .export import packet_to_markdown, packet_to_pdf
 from .pipeline import (
     _run_graph_pipeline,
-    _run_pc_chair_review,
     _run_review_stage,
 )
 from .preflight import run_preflight
@@ -300,6 +299,16 @@ async def start_panel_review(
                 None, lambda: parse_file(str(file_path), fast=fast_parse, vlm_config=vlm),
             )
             doc = chunk_document(doc)
+            session = await _session_manager.get(sid)
+            if session:
+                existing = session.pipeline_steps.get("parse") or {}
+                session.pipeline_steps["parse"] = StepState(
+                    status="completed",
+                    started_at=existing.get("started_at"),
+                    completed_at=_time.monotonic(),
+                    model_used=vlm.get("model", "") if vlm and not fast_parse else "",
+                ).model_dump()
+                await _session_manager.update(session)
         except Exception as e:
             file_path.unlink(missing_ok=True)
             logger.warning("Failed to parse %s: %s", file.filename, e)
@@ -444,6 +453,16 @@ async def start_batch(
                     None, lambda: parse_file(str(fpath), fast=fast_parse, vlm_config=vlm),
                 )
                 doc = chunk_document(doc)
+                session = await _session_manager.get(sid)
+                if session:
+                    existing = session.pipeline_steps.get("parse") or {}
+                    session.pipeline_steps["parse"] = StepState(
+                        status="completed",
+                        started_at=existing.get("started_at"),
+                        completed_at=_time.monotonic(),
+                        model_used=vlm.get("model", "") if vlm and not fast_parse else "",
+                    ).model_dump()
+                    await _session_manager.update(session)
             except Exception as e:
                 fpath.unlink(missing_ok=True)
                 logger.warning("Failed to parse %s: %s", fname, e)
@@ -701,6 +720,16 @@ async def start_batch_review(
                     None, lambda: parse_file(str(fpath), fast=fast_parse, vlm_config=vlm),
                 )
                 doc = chunk_document(doc)
+                session = await _session_manager.get(sid)
+                if session:
+                    existing = session.pipeline_steps.get("parse") or {}
+                    session.pipeline_steps["parse"] = StepState(
+                        status="completed",
+                        started_at=existing.get("started_at"),
+                        completed_at=_time.monotonic(),
+                        model_used=vlm.get("model", "") if vlm and not fast_parse else "",
+                    ).model_dump()
+                    await _session_manager.update(session)
             except Exception as e:
                 fpath.unlink(missing_ok=True)
                 logger.warning("Failed to parse %s: %s", fname, e)
@@ -1018,7 +1047,8 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
     doc_markdown = session.document_markdown or ""
     doc_proxy = _MinimalDoc(doc_text, doc_markdown, session.config.get("metadata", {}).get("filename", "paper.pdf"))
     user_message = build_user_message(doc_proxy, profile)
-    enriched_message = user_message + pg.summary
+    from .pipeline import _build_enriched_review_message
+    enriched_message = _build_enriched_review_message(user_message, pg)
 
     bus = SessionEventBus()
     _event_buses[session_id] = bus
@@ -1046,8 +1076,6 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
                 sid, agent_configs, delib_config,
                 enriched_message, bus, ctl, pg,
             )
-
-            await _run_pc_chair_review(sid, bus, ctl)
 
             sess = await _session_manager.get(sid)
             if sess:
@@ -1146,8 +1174,8 @@ async def refine_field(session_id: str, body: RefineFieldRequest):
     current = body.current_fields.get(body.field, "")
 
     system_prompt = (
-        "You are the PC Chair for HPDC 2026. You are editing one field "
-        "of the unified final review. Output ONLY the revised text for "
+        "You are editing one field of the unified final review. "
+        "Output ONLY the revised text for "
         "this field. No JSON wrapper, no field label, just plain text.\n\n"
         + context
     )
@@ -1214,8 +1242,8 @@ async def score_lightpass(session_id: str, body: ScoreLightpassRequest):
     chat_model = _resolve_chat_model(session)
 
     system_prompt = (
-        "You are the PC Chair for HPDC 2026. The reviewer changed the "
-        "overall merit score. Review the text fields and suggest minimal "
+        "You are calibrating the unified final review after the overall "
+        "merit score changed. Review the text fields and suggest minimal "
         "edits so the tone and substance align with the new score. "
         "Only change fields where the current text contradicts the new score.\n\n"
         + context
@@ -1274,9 +1302,7 @@ async def update_final_review(session_id: str, body: UpdateFinalReviewRequest):
         raise HTTPException(status_code=409, detail="No review results")
 
     session.result["final_review"] = body.final_review
-    session.result["pc_chair_review"] = body.final_review.get(
-        "comments_for_authors", ""
-    )
+    session.result["pc_chair_review"] = body.final_review
     await _session_manager.update(session)
     return {"status": "saved"}
 
@@ -1360,13 +1386,16 @@ async def review_with_graph(
 
     # Build enriched message with paper content (not just graph summary)
     if imported_markdown:
-        enriched_message = (
-            f"{'=' * 60}\nMANUSCRIPT\n{'=' * 60}\n\n"
-            + imported_markdown
-            + "\n\n" + pg.summary
+        doc_proxy = _MinimalDoc(
+            imported_markdown,
+            imported_markdown,
+            graph_data.get("paper_title", "imported-graph"),
         )
+        user_message = build_user_message(doc_proxy, profile)
     else:
-        enriched_message = pg.summary
+        user_message = pg.summary
+    from .pipeline import _build_enriched_review_message
+    enriched_message = _build_enriched_review_message(user_message, pg)
 
     bus = SessionEventBus()
     _event_buses[session.session_id] = bus
@@ -1393,7 +1422,6 @@ async def review_with_graph(
                 sid, agent_configs, delib_config,
                 enriched_message, bus, ctl, pg,
             )
-            await _run_pc_chair_review(sid, bus, ctl)
 
             sess = await _session_manager.get(sid)
             if sess:

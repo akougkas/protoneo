@@ -195,9 +195,9 @@
       </div>
     </div>
 
-    <!-- PC Chair Review -->
+    <!-- Final Review -->
     <div v-if="pcChairReview" class="card-chair-section">
-      <h3 class="section-header">PC Chair Review</h3>
+      <h3 class="section-header">Final Review</h3>
       <div class="card-chair-content" v-html="md(pcChairReview)"></div>
     </div>
 
@@ -269,8 +269,7 @@ const stages = [
     steps: [
       { key: 'independent_reviews', label: 'Reviews' },
       { key: 'deliberation', label: 'Deliberation' },
-      { key: 'meta_review', label: 'Meta-Review' },
-      { key: 'pc_chair', label: 'PC Chair' },
+      { key: 'meta_review', label: 'Final Synthesis' },
     ],
   },
   {
@@ -328,8 +327,7 @@ const stepDescriptions = {
   summarize: 'Generating reviewer-facing summary',
   independent_reviews: 'Reviewers reading paper independently',
   deliberation: 'Reviewers debating assessments',
-  meta_review: 'Synthesizing committee consensus',
-  pc_chair: 'Writing author-facing review letter',
+  meta_review: 'Synthesizing committee consensus and final review',
 }
 
 function shortModel(m) {
@@ -550,7 +548,7 @@ function handleStreamEvent(evt) {
       independent_review: ['review', 'independent_reviews'],
       deliberation: ['review', 'deliberation'],
       meta_review: ['review', 'meta_review'],
-      pc_chair_review: ['review', 'pc_chair'],
+      pc_chair_review: ['review', 'meta_review'],
     }
     const mapped = phaseMap[evt.phase]
     if (mapped) {
@@ -664,8 +662,9 @@ function handleStreamEvent(evt) {
     deliberationRound.value.total = evt.effective_rounds || 0
   }
 
-  // ── PC Chair ────────────────────────────────────────
-  else if (evt.type === 'pc_chair_review_done') {
+  // ── Final synthesis ─────────────────────────────────
+  else if (evt.type === 'final_review_done' || evt.type === 'pc_chair_review_done') {
+    if (evt.type === 'pc_chair_review_done' && evt.source_phase === 'meta_review' && finalReview.value) return
     // evt.review is now a structured dict (or a string for old sessions)
     if (typeof evt.review === 'object' && evt.review !== null) {
       finalReview.value = evt.review
@@ -674,7 +673,7 @@ function handleStreamEvent(evt) {
       pcChairReview.value = evt.review || ''
     }
     if (evt.model) chairModel.value = evt.model
-    addEvent(`PC Chair review complete (${evt.duration_seconds || 0}s)`)
+    addEvent(`Final synthesis complete (${evt.duration_seconds || 0}s)`)
   }
 
   // ── Field Refinement Streaming ─────────────────────
@@ -738,7 +737,9 @@ async function fetchPacket() {
       finalReview.value = res.data.final_review
     }
     if (res.data.pc_chair_review && !pcChairReview.value) {
-      pcChairReview.value = res.data.pc_chair_review
+      pcChairReview.value = typeof res.data.pc_chair_review === 'object'
+        ? (res.data.pc_chair_review.comments_for_authors || '')
+        : res.data.pc_chair_review
     }
   } catch (e) {
     console.error('Failed to fetch review packet:', e)
@@ -1351,7 +1352,7 @@ onUnmounted(() => {
   white-space: pre-wrap;
 }
 
-/* PC Chair review */
+/* Final review */
 .card-chair-section {
   margin-bottom: 24px;
   border: 2px solid #000;
