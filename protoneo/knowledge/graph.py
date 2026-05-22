@@ -368,28 +368,66 @@ class KnowledgeGraph(BaseModel):
         d3_to_pg: dict[str, str] = {}
 
         for nd in data.get("nodes", []):
+            if not isinstance(nd, dict):
+                continue
+            raw_id = nd.get("uuid") or nd.get("id")
+            label = nd.get("name") or nd.get("label") or nd.get("display_name") or raw_id
+            if not raw_id or not label:
+                continue
             labels = nd.get("labels", [])
-            node_type = next((l for l in labels if l != "Entity"), "Concept")
+            node_type = (
+                nd.get("type")
+                or nd.get("node_type")
+                or next((l for l in labels if l != "Entity"), "Concept")
+            )
             attrs = dict(nd.get("attributes", {}))
-            desc = attrs.pop("description", "")
+            desc = attrs.pop("description", nd.get("description", ""))
+            if nd.get("display_name") and "display_name" not in attrs:
+                attrs["display_name"] = nd["display_name"]
             node = self.add_node(
-                label=nd["name"],
-                node_type=node_type,
-                node_id=nd["uuid"],
+                label=str(label),
+                node_type=str(node_type or "Concept"),
+                node_id=str(raw_id),
                 description=desc,
                 attributes=attrs,
             )
-            d3_to_pg[nd["uuid"]] = node.id
+            d3_to_pg[str(raw_id)] = node.id
 
-        for ed in data.get("edges", []):
-            src = d3_to_pg.get(ed.get("source_node_uuid"))
-            tgt = d3_to_pg.get(ed.get("target_node_uuid"))
+        def _edge_endpoint(value: Any) -> str:
+            if isinstance(value, dict):
+                return str(value.get("uuid") or value.get("id") or "")
+            return str(value or "")
+
+        for ed in data.get("edges", data.get("links", [])):
+            if not isinstance(ed, dict):
+                continue
+            source_raw = (
+                ed.get("source_node_uuid")
+                or ed.get("source_id")
+                or _edge_endpoint(ed.get("source"))
+            )
+            target_raw = (
+                ed.get("target_node_uuid")
+                or ed.get("target_id")
+                or _edge_endpoint(ed.get("target"))
+            )
+            src = d3_to_pg.get(str(source_raw))
+            tgt = d3_to_pg.get(str(target_raw))
             if src and tgt:
+                attrs = ed.get("attributes", {}) or {}
+                if not isinstance(attrs, dict):
+                    attrs = {}
                 self.add_edge(
                     source_id=src,
                     target_id=tgt,
-                    edge_type=ed.get("name", "RELATED_TO"),
-                    description=ed.get("attributes", {}).get("description", ""),
+                    edge_type=(
+                        ed.get("name")
+                        or ed.get("fact_type")
+                        or ed.get("edge_type")
+                        or ed.get("type")
+                        or "RELATED_TO"
+                    ),
+                    description=attrs.get("description", ed.get("description", "")),
                 )
 
         self.update_stats()

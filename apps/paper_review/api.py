@@ -8,7 +8,9 @@ export, ontology, and all review-specific session operations.
 import asyncio
 import json
 import logging
+import re
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +57,23 @@ logger = logging.getLogger("protoneo.paper_review.api")
 
 router = APIRouter()
 
+_SAVED_GRAPH_FILENAME_RE = re.compile(
+    r"(?P<session_id>[0-9a-f]{32})(?:_graph|-graph|\.graph)?\.json$",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class ImportedGraphPayload:
+    graph: KnowledgeGraph
+    paper_title: str = ""
+    conference: str = ""
+    document_markdown: str = ""
+    document_text: str = ""
+    source_format: str = "knowledge_graph"
+    source_session_id: str = ""
+    warnings: list[str] = field(default_factory=list)
+
 
 class _MinimalDoc:
     """Lightweight document proxy for build_user_message() when
@@ -66,6 +85,143 @@ class _MinimalDoc:
         self.markdown = markdown
         self.filename = filename
         self.chunks: list[str] = []
+
+
+def _graph_title(pg: KnowledgeGraph, fallback: str = "") -> str:
+    if fallback:
+        return fallback
+    if pg.paper_title:
+        return pg.paper_title
+    root = pg.node_by_id("paper-root")
+    if root:
+        return root.label
+    paper = next((n for n in pg.nodes if n.node_type == "Paper"), None)
+    return paper.label if paper else ""
+
+
+def _extract_source_session_id(filename: str | None, graph_data: dict[str, Any]) -> str:
+    explicit = graph_data.get("session_id") or graph_data.get("source_session_id")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    if not filename:
+        return ""
+    match = _SAVED_GRAPH_FILENAME_RE.search(Path(filename).name)
+    return match.group("session_id") if match else ""
+
+
+def _looks_like_d3_graph(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    nodes = data.get("nodes")
+    if not isinstance(nodes, list):
+        return False
+    if not nodes:
+        return "edges" in data or "links" in data
+    first_node = nodes[0]
+    return isinstance(first_node, dict) and (
+        "uuid" in first_node
+        or "name" in first_node
+        or "display_name" in first_node
+        or "links" in data
+        or ("source_node_uuid" in str(data.get("edges", [])[:1]))
+    )
+
+
+def _should_ingest_as_d3_graph(data: Any) -> bool:
+    if not _looks_like_d3_graph(data):
+        return False
+    nodes = data.get("nodes") or []
+    first_node = nodes[0] if nodes else {}
+    if isinstance(first_node, dict) and any(
+        key in first_node for key in ("uuid", "name", "display_name", "type")
+    ):
+        return True
+    edges = data.get("edges") or data.get("links") or []
+    first_edge = edges[0] if edges else {}
+    return isinstance(first_edge, dict) and any(
+        key in first_edge
+        for key in ("source_node_uuid", "target_node_uuid", "source", "target", "name", "fact_type")
+    )
+
+
+def _parse_imported_graph_payload(
+    graph_data: dict[str, Any],
+    *,
+    filename: str | None = None,
+) -> ImportedGraphPayload:
+    """Normalize supported graph import formats into a KnowledgeGraph.
+
+    Supported inputs:
+    - canonical export wrapper: {schema_version, graph, document_markdown, ...}
+    - raw KnowledgeGraph.model_dump()
+    - GraphPanel/D3 snapshot: {nodes: [{uuid, name, type}], edges: [...]}
+    """
+    if not isinstance(graph_data, dict):
+        raise ValueError("Graph import must be a JSON object")
+
+    wrapped = "graph" in graph_data and isinstance(graph_data.get("graph"), dict)
+    graph_dict = graph_data["graph"] if wrapped else graph_data
+    payload = ImportedGraphPayload(
+        graph=KnowledgeGraph(),
+        paper_title=str(graph_data.get("paper_title") or ""),
+        conference=str(graph_data.get("conference") or ""),
+        document_markdown=str(graph_data.get("document_markdown") or graph_data.get("paper_markdown") or ""),
+        document_text=str(graph_data.get("document_text") or ""),
+        source_session_id=_extract_source_session_id(filename, graph_data),
+    )
+
+    if _should_ingest_as_d3_graph(graph_dict):
+        pg = KnowledgeGraph()
+        pg.ingest_d3_data(graph_dict)
+        payload.graph = pg
+        payload.source_format = "d3_graph_export" if wrapped else "d3_graph"
+    else:
+        try:
+            payload.graph = KnowledgeGraph.model_validate(graph_dict)
+            payload.source_format = "knowledge_graph_export" if wrapped else "knowledge_graph"
+        except Exception as kg_error:
+            raise ValueError(f"Invalid graph data: {kg_error}") from kg_error
+
+    payload.paper_title = _graph_title(payload.graph, payload.paper_title)
+    if payload.paper_title and not payload.graph.paper_title:
+        payload.graph.paper_title = payload.paper_title
+
+    if not payload.graph.summary:
+        payload.graph.summary = payload.graph.to_agent_briefing()
+    if not payload.graph.summary:
+        payload.graph.summary = (
+            f"Imported graph with {len(payload.graph.nodes)} nodes and "
+            f"{len(payload.graph.edges)} edges. No reviewer-facing summary was present."
+        )
+        payload.warnings.append("imported graph did not include semantic summary")
+
+    payload.graph.update_stats()
+    return payload
+
+
+async def _enrich_imported_graph_payload_from_source_session(
+    payload: ImportedGraphPayload,
+    session_manager: Any,
+) -> ImportedGraphPayload:
+    """Recover manuscript text/metadata when a saved graph filename points at a session."""
+    if not payload.source_session_id:
+        return payload
+    source_session = await session_manager.get(payload.source_session_id)
+    if not source_session:
+        return payload
+
+    if not payload.document_markdown:
+        payload.document_markdown = source_session.document_markdown or source_session.document_text
+    if not payload.document_text:
+        payload.document_text = source_session.document_text or source_session.document_markdown
+
+    metadata = source_session.config.get("metadata", {}) if source_session.config else {}
+    if not payload.paper_title:
+        payload.paper_title = metadata.get("paper_title") or metadata.get("filename") or ""
+    if not payload.conference:
+        payload.conference = metadata.get("conference", "")
+    payload.warnings.append(f"recovered manuscript text from session {payload.source_session_id}")
+    return payload
 
 
 def _is_completed(session) -> bool:
@@ -1471,19 +1627,15 @@ async def review_with_graph(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON in graph file")
 
-    if "graph" in graph_data and "schema_version" in graph_data:
-        graph_dict = graph_data["graph"]
-        paper_title = graph_data.get("paper_title", "")
-        imported_markdown = graph_data.get("document_markdown", graph_data.get("paper_markdown", ""))
-    else:
-        graph_dict = graph_data
-        paper_title = ""
-        imported_markdown = ""
-
     try:
-        pg = KnowledgeGraph.model_validate(graph_dict)
+        imported = _parse_imported_graph_payload(graph_data, filename=graph_file.filename)
+        imported = await _enrich_imported_graph_payload_from_source_session(imported, _session_manager)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid graph data: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+    pg = imported.graph
+    paper_title = imported.paper_title
+    imported_markdown = imported.document_markdown or imported.document_text
 
     try:
         model_map = json.loads(model_map_json) if model_map_json else {}
@@ -1507,21 +1659,22 @@ async def review_with_graph(
             "metadata": {
                 "type": "panel_review",
                 "pipeline_mode": "imported_graph_review",
-                "conference": conference,
-                "filename": graph_data.get("paper_title", "imported-graph"),
+                "conference": conference or imported.conference,
+                "filename": paper_title or Path(graph_file.filename or "imported-graph").name,
                 "paper_title": paper_title,
+                "graph_source": "imported",
+                "graph_import_format": imported.source_format,
+                "source_session_id": imported.source_session_id,
+                "graph_import_warnings": imported.warnings,
             },
         },
         app_name=_APP_NAME,
         app_version=_APP_VERSION,
     )
-    session.knowledge_graph = graph_dict
+    session.knowledge_graph = pg.model_dump(mode="json")
     session.document_markdown = imported_markdown
-    session.document_text = imported_markdown
+    session.document_text = imported.document_text or imported_markdown
     session.graph_source = "imported"
-    if not pg.summary:
-        pg.summary = pg.to_agent_briefing()
-        session.knowledge_graph = pg.model_dump(mode="json")
     await _session_manager.update(session)
 
     # Build enriched message with paper content (not just graph summary)
@@ -1529,7 +1682,7 @@ async def review_with_graph(
         doc_proxy = _MinimalDoc(
             imported_markdown,
             imported_markdown,
-            graph_data.get("paper_title", "imported-graph"),
+            paper_title or Path(graph_file.filename or "imported-graph").name,
         )
         user_message = build_user_message(doc_proxy, profile)
     else:
@@ -1575,9 +1728,19 @@ async def review_with_graph(
             bus.emit("stage_complete", {"stage": "review"})
             bus.emit("completed", {"result": sess.result if sess else {}})
         except asyncio.CancelledError:
+            sess = await _session_manager.get(sid)
+            if sess:
+                sess.status = SessionStatus.STOPPED
+                sess.error = "Review cancelled"
+                await _session_manager.update(sess)
             bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
         except Exception as e:
             logger.error("Review failed for session %s: %s", sid, e, exc_info=True)
+            sess = await _session_manager.get(sid)
+            if sess:
+                sess.status = SessionStatus.FAILED
+                sess.error = str(e)
+                await _session_manager.update(sess)
             bus.emit("error", {"detail": str(e)})
         finally:
             get_pipeline_controls().pop(sid, None)
@@ -1589,6 +1752,8 @@ async def review_with_graph(
         "session_id": session.session_id,
         "status": "running",
         "graph_source": "imported",
+        "graph_import_format": imported.source_format,
+        "source_session_id": imported.source_session_id,
         "node_count": len(pg.nodes),
         "edge_count": len(pg.edges),
     }

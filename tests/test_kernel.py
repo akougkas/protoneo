@@ -1666,6 +1666,51 @@ class TestKnowledgeGraphNewMethods:
         assert root is not None
         assert "reference_sample" in root.attributes or meta.reference_count > 0
 
+    def test_ingest_d3_data_accepts_saved_graphpanel_shape(self):
+        from protoneo.knowledge.graph import KnowledgeGraph
+
+        pg = KnowledgeGraph()
+        pg.ingest_d3_data({
+            "nodes": [
+                {"uuid": "paper-root", "name": "Paper", "type": "Paper"},
+                {"uuid": "method", "name": "FastStencil", "type": "Method"},
+            ],
+            "edges": [
+                {
+                    "source_node_uuid": "paper-root",
+                    "target_node_uuid": "method",
+                    "name": "PART_OF",
+                }
+            ],
+        })
+
+        assert pg.node_by_id("method").label == "FastStencil"
+        assert pg.edges[0].edge_type == "PART_OF"
+
+    def test_ingest_d3_data_accepts_link_endpoint_variants(self):
+        from protoneo.knowledge.graph import KnowledgeGraph
+
+        pg = KnowledgeGraph()
+        pg.ingest_d3_data({
+            "nodes": [
+                {"id": "method", "label": "FastStencil", "node_type": "Method"},
+                {"id": "metric", "label": "Speedup", "node_type": "Metric"},
+            ],
+            "links": [
+                {
+                    "source": {"id": "method"},
+                    "target": "metric",
+                    "edge_type": "ACHIEVES",
+                    "description": "reported result",
+                }
+            ],
+        })
+
+        assert len(pg.nodes) == 2
+        assert len(pg.edges) == 1
+        assert pg.edges[0].edge_type == "ACHIEVES"
+        assert pg.edges[0].description == "reported result"
+
 
 class TestCorefResolver:
     def test_parse_coref_response_valid(self):

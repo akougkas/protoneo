@@ -1008,6 +1008,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         export_data = {
             "schema_version": 1,
+            "session_id": session_id,
             "paper_title": session.config.get("metadata", {}).get("paper_title", ""),
             "conference": session.config.get("metadata", {}).get("conference", ""),
             "graph": session.knowledge_graph,

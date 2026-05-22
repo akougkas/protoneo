@@ -201,6 +201,29 @@
               <div class="drop-hint">Skip graph building, go straight to review</div>
             </template>
           </div>
+          <div v-if="uploadMode === 'import' && savedGraphSessions.length > 0" class="saved-graphs">
+            <div class="saved-graphs-header">Saved Graphs</div>
+            <div
+              v-for="sess in savedGraphSessions"
+              :key="sess.session_id"
+              class="saved-graph-row"
+            >
+              <div class="saved-graph-main">
+                <span class="saved-graph-title">{{ graphSessionTitle(sess) }}</span>
+                <span class="saved-graph-meta">
+                  {{ sess.knowledge_graph_stats.node_count }} nodes,
+                  {{ sess.knowledge_graph_stats.edge_count }} edges
+                </span>
+              </div>
+              <button
+                class="saved-graph-btn"
+                :disabled="!selectedConference || launching"
+                @click.stop="launchSavedGraph(sess)"
+              >
+                Review
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -501,7 +524,7 @@ Examples:
 <script setup>
 import { ref, reactive, computed, inject, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getConferences, getConference, getModels, startReview, runPreflight, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, reviewWithGraph, listBatches, getPresets, activatePreset, getParsers } from '../api/kernel.js'
+import { getConferences, getConference, getModels, startReview, runPreflight, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, reviewWithGraph, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
 
 const router = useRouter()
 const activeApp = inject('activeApp', ref(null))
@@ -656,6 +679,14 @@ const uniqueModelCount = computed(() => {
 
 const activeSessions = computed(() => recentSessions.value.filter(s => s.status === 'running' || s.status === 'created'))
 const completedSessions = computed(() => recentSessions.value.filter(s => s.status !== 'running' && s.status !== 'created'))
+const savedGraphSessions = computed(() =>
+  recentSessions.value.filter(s =>
+    s.status !== 'running'
+    && s.status !== 'created'
+    && s.knowledge_graph_stats
+    && s.knowledge_graph_stats.node_count > 0
+  )
+)
 
 const canLaunch = computed(() => {
   if (uploadMode.value === 'single') return selectedConference.value && selectedFile.value
@@ -803,6 +834,20 @@ function modelDetail(modelId) {
   if (tps) parts.push(`${Math.round(tps)} t/s`)
   if (bench.protoneo_class) parts.push(bench.protoneo_class)
   return parts.join(' \u00b7 ')
+}
+
+function buildReviewModelMap() {
+  const enabledMap = {}
+  for (const pa of panelAgents.value) {
+    if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
+  }
+  return enabledMap
+}
+
+function graphSessionTitle(sess) {
+  return sess.config?.metadata?.paper_title
+    || sess.config?.metadata?.filename
+    || sess.session_id.slice(0, 8)
 }
 
 onMounted(async () => {
@@ -1048,10 +1093,7 @@ async function launchImport() {
   launching.value = true
   launchError.value = ''
   try {
-    const enabledMap = {}
-    for (const pa of panelAgents.value) {
-      if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
-    }
+    const enabledMap = buildReviewModelMap()
     const res = await reviewWithGraph(
       importFile.value,
       selectedConference.value,
@@ -1062,6 +1104,33 @@ async function launchImport() {
     router.push({ name: 'Session', params: { sessionId: res.data.session_id } })
   } catch (e) {
     launchError.value = e.response?.data?.detail || e.message || 'Failed to start review'
+  } finally {
+    launching.value = false
+  }
+}
+
+async function launchSavedGraph(sess) {
+  if (!selectedConference.value || !sess?.session_id) return
+  launching.value = true
+  launchError.value = ''
+  try {
+    const enabledMap = buildReviewModelMap()
+    const graphRes = await exportGraph(sess.session_id)
+    const graphFile = new File(
+      [graphRes.data],
+      `${sess.session_id}_graph.json`,
+      { type: 'application/json' }
+    )
+    const res = await reviewWithGraph(
+      graphFile,
+      selectedConference.value,
+      enabledMap,
+      2,
+      userInstructions.value
+    )
+    router.push({ name: 'Session', params: { sessionId: res.data.session_id } })
+  } catch (e) {
+    launchError.value = e.response?.data?.detail || e.message || 'Failed to launch saved graph review'
   } finally {
     launching.value = false
   }
@@ -1728,5 +1797,74 @@ async function launchImport() {
   color: var(--pn-accent);
   margin-top: var(--pn-space-1);
   font-weight: 600;
+}
+
+.saved-graphs {
+  margin-top: var(--pn-space-4);
+  border: 1px solid var(--pn-border);
+}
+
+.saved-graphs-header {
+  padding: var(--pn-space-2) var(--pn-space-3);
+  border-bottom: 1px solid var(--pn-border);
+  font-size: 10px;
+  color: var(--pn-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.saved-graph-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pn-space-3);
+  padding: var(--pn-space-3);
+  border-bottom: 1px solid var(--pn-border);
+}
+
+.saved-graph-row:last-child {
+  border-bottom: 0;
+}
+
+.saved-graph-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.saved-graph-title {
+  color: var(--pn-text);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.saved-graph-meta {
+  color: var(--pn-text-muted);
+  font-size: 10px;
+}
+
+.saved-graph-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--pn-border-strong);
+  background: var(--pn-surface);
+  color: var(--pn-text);
+  padding: var(--pn-space-2) var(--pn-space-3);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.saved-graph-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.saved-graph-btn:not(:disabled):hover {
+  border-color: var(--pn-accent);
+  color: var(--pn-accent);
 }
 </style>

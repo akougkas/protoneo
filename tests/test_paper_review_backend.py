@@ -171,6 +171,69 @@ def test_sanitize_final_review_formats_structured_items_for_editor():
     )
 
 
+def test_imported_graph_payload_accepts_saved_d3_graph():
+    data = {
+        "nodes": [
+            {
+                "uuid": "paper-root",
+                "name": "Test Paper",
+                "type": "Paper",
+                "labels": ["Entity", "Paper"],
+                "attributes": {"description": ""},
+            },
+            {
+                "uuid": "method-1",
+                "name": "FastStencil",
+                "type": "Method",
+                "labels": ["Entity", "Method"],
+                "attributes": {"description": "Stencil generator"},
+            },
+        ],
+        "edges": [
+            {
+                "source_node_uuid": "paper-root",
+                "target_node_uuid": "method-1",
+                "name": "PART_OF",
+                "attributes": {"description": "contribution"},
+            }
+        ],
+    }
+
+    payload = api._parse_imported_graph_payload(
+        data,
+        filename="9db68d3efc504c60b17c2d4895f2b9f2_graph.json",
+    )
+
+    assert payload.source_format == "d3_graph"
+    assert payload.source_session_id == "9db68d3efc504c60b17c2d4895f2b9f2"
+    assert payload.paper_title == "Test Paper"
+    assert len(payload.graph.nodes) == 2
+    assert len(payload.graph.edges) == 1
+    assert payload.graph.summary
+
+
+@pytest.mark.asyncio
+async def test_imported_graph_payload_recovers_document_from_source_session():
+    payload = api.ImportedGraphPayload(
+        graph=KnowledgeGraph(),
+        source_session_id="9db68d3efc504c60b17c2d4895f2b9f2",
+    )
+    source = SimpleNamespace(
+        session_id=payload.source_session_id,
+        document_markdown="paper markdown",
+        document_text="paper text",
+        config={"metadata": {"paper_title": "Recovered Paper", "conference": "sc26"}},
+    )
+    manager = FakeMultiSessionManager({payload.source_session_id: source})
+
+    enriched = await api._enrich_imported_graph_payload_from_source_session(payload, manager)
+
+    assert enriched.document_markdown == "paper markdown"
+    assert enriched.document_text == "paper text"
+    assert enriched.paper_title == "Recovered Paper"
+    assert enriched.conference == "sc26"
+
+
 def test_parse_final_review_strips_leaked_chain_of_thought():
     raw = (
         "Reasoning: private synthesis notes.\n"

@@ -236,8 +236,8 @@ export function retryFailedInBatch(batchId) {
   return kernel.post(`/api/apps/paper_review/batch/${batchId}/retry-failed`)
 }
 
-export function launchReview(sessionId) {
-  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/launch-review`)
+export function launchReview(sessionId, options = null) {
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/launch-review`, options || {})
 }
 
 // Post-review: refine field, score lightpass, persist edits
