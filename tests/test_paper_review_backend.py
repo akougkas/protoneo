@@ -423,7 +423,7 @@ def test_mini_only_graph_routing_ignores_disabled_dynamo(monkeypatch):
     assert model == "lan-mini/mini-reasoning"
 
 
-def test_graph_routing_prefers_non_reasoning_discovered_model_on_same_endpoint(monkeypatch):
+def test_graph_routing_does_not_switch_single_endpoint_to_discovered_model(monkeypatch):
     settings = ProtoNeoSettings(
         lan_endpoints=[
             LocalEndpoint(
@@ -475,7 +475,7 @@ def test_graph_routing_prefers_non_reasoning_discovered_model_on_same_endpoint(m
         phase_policy="fast_structured",
     )
 
-    assert model == "lan-mini/mini-loaded-json"
+    assert model == "lan-mini/mini-reasoning"
 
 
 def test_step_state_normalizes_legacy_completed_status():

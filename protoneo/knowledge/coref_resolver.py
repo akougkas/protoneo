@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from ..llm.client import LLMClient
-from ..llm.structured import sanitize_structured_text
+from ..llm.structured import extract_json_object, sanitize_structured_text
 from .graph import KnowledgeGraph
 
 logger = logging.getLogger("protoneo.knowledge.coref_resolver")
@@ -72,6 +72,14 @@ Only include MERGE and ALIAS decisions. Omit DISTINCT pairs."""
 
 def _parse_coref_response(raw: str) -> dict:
     """Parse the LLM co-reference resolution response."""
+    parsed = extract_json_object(
+        raw,
+        required_keys={"merges", "aliases"},
+        allow_thinking_json=True,
+    )
+    if parsed is not None:
+        return parsed
+
     raw = sanitize_structured_text(raw)
     try:
         return json.loads(raw)

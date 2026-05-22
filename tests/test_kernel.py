@@ -255,6 +255,29 @@ class TestLLMClient:
         assert LLMClient._strip_thinking("<thinking>only private notes</thinking>") == ""
 
     @pytest.mark.asyncio
+    async def test_complete_recovers_json_payload_inside_thinking(self):
+        reg = CapabilityRegistry(load_builtins=False)
+        reg.register(ModelInfo(model_id="test/model", provider="test"))
+        client = LLMClient(registry=reg, api_keys={"test": "sk-test"})
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '<think>private notes {"ok": true}</think>'
+        mock_response.choices[0].message.reasoning_content = None
+        mock_response.usage = None
+        mock_response.model_dump = MagicMock(return_value={})
+
+        with patch("protoneo.llm.client.acompletion", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = mock_response
+            result = await client.complete(
+                "test/model",
+                [{"role": "user", "content": "json"}],
+                phase_policy="fast_structured",
+            )
+
+        assert result.content == '{"ok": true}'
+
+    @pytest.mark.asyncio
     async def test_fast_structured_policy_drops_reasoning_params(self):
         reg = CapabilityRegistry(load_builtins=False)
         reg.register(ModelInfo(
@@ -279,7 +302,11 @@ class TestLLMClient:
 
         assert "phase_policy" not in kwargs
         assert "reasoning_effort" not in kwargs
-        assert kwargs["extra_body"] == {"top_k": 20}
+        assert kwargs["temperature"] == 0.2
+        assert kwargs["extra_body"] == {
+            "top_k": 1,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
 
     @pytest.mark.asyncio
     async def test_deep_review_policy_keeps_supported_reasoning_control(self):
@@ -302,6 +329,58 @@ class TestLLMClient:
         )
 
         assert kwargs["reasoning_effort"] == "medium"
+
+    @pytest.mark.asyncio
+    async def test_deep_review_policy_shapes_local_reasoning_mode_when_budgeted(self):
+        reg = CapabilityRegistry(load_builtins=False)
+        reg.register(ModelInfo(
+            model_id="lan-mini/nemotron-omni",
+            provider="lan-mini",
+            api_base="http://mini/v1",
+            capabilities={ModelCapability.EXTENDED_THINKING},
+        ))
+        client = LLMClient(registry=reg)
+
+        kwargs = await client._build_kwargs_async(
+            "lan-mini/nemotron-omni",
+            [{"role": "user", "content": "review"}],
+            phase_policy="deep_review",
+            max_tokens=20480,
+        )
+
+        assert kwargs["temperature"] == 0.6
+        assert kwargs["top_p"] == 0.95
+        assert kwargs["extra_body"]["thinking_token_budget"] == 17408
+        assert kwargs["extra_body"]["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "reasoning_budget": 16384,
+        }
+
+    @pytest.mark.asyncio
+    async def test_meta_policy_uses_bounded_local_reasoning_budget(self):
+        reg = CapabilityRegistry(load_builtins=False)
+        reg.register(ModelInfo(
+            model_id="lan-mini/nemotron-omni",
+            provider="lan-mini",
+            api_base="http://mini/v1",
+            capabilities={ModelCapability.EXTENDED_THINKING},
+        ))
+        client = LLMClient(registry=reg)
+
+        kwargs = await client._build_kwargs_async(
+            "lan-mini/nemotron-omni",
+            [{"role": "user", "content": "synthesize"}],
+            phase_policy="meta_synthesis",
+            max_tokens=16384,
+        )
+
+        assert kwargs["temperature"] == 0.6
+        assert kwargs["top_p"] == 0.95
+        assert kwargs["extra_body"]["thinking_token_budget"] == 9216
+        assert kwargs["extra_body"]["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "reasoning_budget": 8192,
+        }
 
     def test_session_cost_tracking(self):
         reg = CapabilityRegistry()
@@ -1164,6 +1243,13 @@ class TestGraphExtraction:
         result = _parse_extraction(raw)
         assert len(result.entities) == 1
 
+    def test_parse_recovers_json_inside_thinking(self):
+        from protoneo.knowledge.graph_extractor import _parse_extraction
+        raw = '<thinking>notes {"entities": [{"name": "CNN", "type": "Method", "description": ""}], "relationships": []}</thinking>'
+        result = _parse_extraction(raw)
+        assert len(result.entities) == 1
+        assert result.entities[0].name == "CNN"
+
     def test_parse_invalid_returns_empty(self):
         from protoneo.knowledge.graph_extractor import _parse_extraction
         result = _parse_extraction("This is not JSON at all.")
@@ -1221,6 +1307,14 @@ class TestOntology:
         assert len(ontology.entity_types) == 1
         assert ontology.paper_domain == "machine learning"
         assert len(ontology.key_contributions) == 1
+
+    def test_parse_ontology_recovers_json_inside_thinking(self):
+        from protoneo.knowledge.ontology import _parse_ontology
+        raw = '<think>draft {"entity_types": [{"name": "Method", "description": "Techniques", "attributes": [], "examples": ["CNN"]}], "edge_types": [], "paper_domain": "machine learning"}</think>'
+        ontology = _parse_ontology(raw)
+        assert len(ontology.entity_types) == 1
+        assert ontology.entity_types[0].name == "Method"
+        assert ontology.paper_domain == "machine learning"
 
     def test_validate_adds_fallbacks(self):
         from protoneo.knowledge.ontology import Ontology, EntityType, _validate_ontology
@@ -1593,6 +1687,12 @@ class TestCorefResolver:
         result = _parse_coref_response(raw)
         assert result == {"merges": [], "aliases": []}
 
+    def test_parse_coref_response_recovers_json_inside_thinking(self):
+        from protoneo.knowledge.coref_resolver import _parse_coref_response
+        raw = '<thinking>private merge notes {"merges": [], "aliases": []}</thinking>'
+        result = _parse_coref_response(raw)
+        assert result == {"merges": [], "aliases": []}
+
     def test_parse_coref_response_invalid(self):
         from protoneo.knowledge.coref_resolver import _parse_coref_response
         result = _parse_coref_response("not json at all")
@@ -1621,6 +1721,16 @@ class TestGraphVerifier:
     def test_parse_verification_strips_thinking_variants(self):
         from protoneo.knowledge.graph_verifier import _parse_verification
         raw = '<think>private audit</think>\n{"grounding_issues": [], "missing_concepts": [], "missing_connections": []}'
+        result = _parse_verification(raw)
+        assert result == {
+            "grounding_issues": [],
+            "missing_concepts": [],
+            "missing_connections": [],
+        }
+
+    def test_parse_verification_recovers_json_inside_thinking(self):
+        from protoneo.knowledge.graph_verifier import _parse_verification
+        raw = '<thinking>audit {"grounding_issues": [], "missing_concepts": [], "missing_connections": []}</thinking>'
         result = _parse_verification(raw)
         assert result == {
             "grounding_issues": [],

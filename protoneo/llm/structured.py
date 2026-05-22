@@ -17,6 +17,7 @@ _OPEN_THINKING_RE = re.compile(
 )
 _OUTPUT_TAG_RE = re.compile(r"</?(?:output|final|answer)>", re.IGNORECASE)
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n([\s\S]*?)\n?```", re.IGNORECASE)
+_THINKING_TAG_RE = re.compile(r"</?(?:think|thinking)\b[^>]*>", re.IGNORECASE)
 
 
 def strip_thinking_output(content: str) -> str:
@@ -28,6 +29,13 @@ def strip_thinking_output(content: str) -> str:
     return cleaned.strip()
 
 
+def unwrap_thinking_tags(content: str) -> str:
+    """Remove visible thinking tag markers while preserving inner text."""
+    if not content:
+        return ""
+    return _THINKING_TAG_RE.sub("", content).strip()
+
+
 def sanitize_structured_text(content: str) -> str:
     """Normalize text before structured JSON parsing."""
     cleaned = strip_thinking_output(content)
@@ -35,9 +43,27 @@ def sanitize_structured_text(content: str) -> str:
     return cleaned.strip()
 
 
-def extract_json_value(content: str) -> Any | None:
+def extract_json_value(
+    content: str,
+    *,
+    allow_thinking_json: bool = False,
+) -> Any | None:
     """Best-effort JSON extraction after shared sanitizer cleanup."""
-    cleaned = sanitize_structured_text(content)
+    candidates = [sanitize_structured_text(content)]
+    if allow_thinking_json:
+        unwrapped = _OUTPUT_TAG_RE.sub("", unwrap_thinking_tags(content)).strip()
+        if unwrapped and unwrapped not in candidates:
+            candidates.append(unwrapped)
+
+    for cleaned in candidates:
+        value = _extract_json_value_from_cleaned(cleaned)
+        if value is not None:
+            return value
+
+    return None
+
+
+def _extract_json_value_from_cleaned(cleaned: str) -> Any | None:
     if not cleaned:
         return None
 
@@ -64,9 +90,10 @@ def extract_json_object(
     content: str,
     *,
     required_keys: set[str] | None = None,
+    allow_thinking_json: bool = False,
 ) -> dict[str, Any] | None:
     """Extract a JSON object, optionally requiring at least one key."""
-    value = extract_json_value(content)
+    value = extract_json_value(content, allow_thinking_json=allow_thinking_json)
     if isinstance(value, dict):
         if not required_keys or required_keys.intersection(value.keys()):
             return value

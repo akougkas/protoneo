@@ -160,44 +160,6 @@ def _active_models(settings: Any | None, *, require_local: bool = False) -> dict
     return models
 
 
-def _discovered_model_candidates(
-    settings: Any | None,
-    *,
-    require_local: bool = False,
-) -> list[str]:
-    """Return enabled discovered model IDs for policy-based fallback."""
-    if settings is None:
-        return []
-    discovered = getattr(settings, "discovered_models", {}) or {}
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for provider, entries in discovered.items():
-        if not _candidate_provider_enabled(f"{provider}/placeholder", settings):
-            continue
-        ordered_entries = sorted(
-            entries or [],
-            key=lambda item: 0 if isinstance(item, dict) and item.get("loaded") else 1,
-        )
-        for entry in ordered_entries:
-            if not isinstance(entry, dict):
-                continue
-            raw_id = str(entry.get("id") or entry.get("name") or "").strip()
-            if not raw_id:
-                continue
-            lower_id = raw_id.lower()
-            # llama.cpp exposes multimodal projector artifacts beside text
-            # generation models. They are not valid chat-completion targets.
-            if any(marker in lower_id for marker in ("mmproj", "projector")):
-                continue
-            candidate = f"{provider}/{raw_id}"
-            if require_local and not is_local_model_id(candidate, settings):
-                continue
-            if candidate not in seen:
-                candidates.append(candidate)
-                seen.add(candidate)
-    return candidates
-
-
 def _candidate_provider_enabled(candidate: str, settings: Any | None) -> bool:
     provider = _provider_from_model(candidate)
     if not provider:
@@ -362,29 +324,11 @@ def resolve_paper_review_model(
             logger.info("Model routing note for %s: %s", key, warning)
         return selected
 
-    discovered_candidates = _discovered_model_candidates(
-        settings,
-        require_local=require_local,
-    )
-    selected, warnings = _select_candidate_for_policy(
-        discovered_candidates,
-        registry=registry,
-        policy=policy,
-        settings=settings,
-        require_local=require_local,
-        allow_soft_policy_override=False,
-        source="discovered_models",
-    )
-    if selected:
-        for warning in warnings:
-            logger.info("Model routing note for %s: %s", key, warning)
-        return selected
-
     # Last resort: keep the pipeline runnable, but emit a warning. This matters
     # for single-endpoint local setups where the only loaded model is reasoning
     # capable; prompts and request params still suppress reasoning for graph use.
     selected, warnings = _select_candidate_for_policy(
-        active_candidates + discovered_candidates + preset_candidates,
+        active_candidates + preset_candidates,
         registry=registry,
         policy=policy,
         settings=settings,
@@ -447,7 +391,7 @@ def strip_json_fences(text: str) -> str:
 
 def _extract_json(text: str) -> dict | None:
     """Try to extract a JSON object from LLM output."""
-    parsed = extract_json_object(text)
+    parsed = extract_json_object(text, allow_thinking_json=True)
     if parsed is not None:
         return parsed
 

@@ -30,7 +30,7 @@ from litellm.exceptions import (
 
 from .policies import policy_for_label
 from .registry import CapabilityRegistry
-from .structured import strip_thinking_output
+from .structured import extract_json_value, strip_thinking_output
 from .types import LLMResponse, ModelCapability, ModelInfo, TokenUsage
 
 logger = logging.getLogger("protoneo.llm.client")
@@ -301,7 +301,49 @@ class LLMClient:
             else:
                 filtered.pop("extra_body", None)
 
+        if policy is not None:
+            LLMClient._apply_phase_policy_defaults(info, filtered, policy)
+
         return filtered
+
+    @staticmethod
+    def _apply_phase_policy_defaults(
+        info: ModelInfo,
+        filtered: dict[str, Any],
+        policy,
+    ) -> None:
+        """Apply phase-level request shaping for local OpenAI-compatible models."""
+        is_local_openai_compatible = bool(info.api_base) or info.provider.startswith(("lan-", "localhost-"))
+        if not is_local_openai_compatible:
+            return
+
+        if policy.temperature is not None:
+            filtered["temperature"] = policy.temperature
+        if policy.top_p is not None:
+            filtered["top_p"] = policy.top_p
+
+        extra_body = dict(filtered.get("extra_body") or {})
+        if policy.top_k is not None:
+            extra_body["top_k"] = policy.top_k
+
+        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        if policy.enable_thinking is False:
+            chat_template_kwargs["enable_thinking"] = False
+        elif (
+            policy.enable_thinking is True
+            and ModelCapability.EXTENDED_THINKING in info.capabilities
+            and int(filtered.get("max_tokens") or 0) >= policy.min_reasoning_max_tokens
+        ):
+            chat_template_kwargs["enable_thinking"] = True
+            if policy.reasoning_budget is not None:
+                chat_template_kwargs["reasoning_budget"] = policy.reasoning_budget
+            if policy.thinking_token_budget is not None:
+                extra_body["thinking_token_budget"] = policy.thinking_token_budget
+
+        if chat_template_kwargs:
+            extra_body["chat_template_kwargs"] = chat_template_kwargs
+        if extra_body:
+            filtered["extra_body"] = extra_body
 
     @staticmethod
     def _strip_thinking(content: str) -> str:
@@ -352,6 +394,7 @@ class LLMClient:
         """Send a chat completion request with retry on transient errors."""
         info: ModelInfo = self.registry.get(model)
         provider = info.provider
+        response_policy = policy_for_label(kwargs.get("phase_policy"))
 
         # GPT-5 models only support temperature=1
         if "gpt-5" in model.lower():
@@ -416,9 +459,13 @@ class LLMClient:
 
         msg = response.choices[0].message
         content = msg.content or ""
+        raw_content = content
+        reasoning_content = getattr(msg, "reasoning_content", None)
 
         raw_len = len(content)
         content = self._strip_thinking(content)
+        if not content.strip() and response_policy is not None:
+            content = self._recover_structured_payload(raw_content, reasoning_content)
 
         # Fix 1: Warn when strip_thinking removes all content (model produced
         # only <think> tokens with no final answer)
@@ -440,6 +487,17 @@ class LLMClient:
             usage=usage,
             raw=response.model_dump() if hasattr(response, "model_dump") else {},
         )
+
+    @staticmethod
+    def _recover_structured_payload(*candidates: Any) -> str:
+        """Recover a JSON payload hidden inside thinking/reasoning fields."""
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue
+            value = extract_json_value(candidate, allow_thinking_json=True)
+            if value is not None:
+                return json.dumps(value, ensure_ascii=False)
+        return ""
 
     async def stream(
         self,

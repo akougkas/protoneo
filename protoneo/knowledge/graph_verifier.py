@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
-from ..llm.structured import sanitize_structured_text
+from ..llm.structured import extract_json_object, sanitize_structured_text
 from .graph import KnowledgeGraph
 from .types import DomainConfig
 
@@ -121,6 +121,14 @@ Only flag entities you are confident are NOT in the paper. Include a confidence 
 
 def _parse_verification(raw: str) -> dict:
     """Parse the LLM verification response."""
+    parsed = extract_json_object(
+        raw,
+        required_keys={"grounding_issues", "missing_concepts", "missing_connections"},
+        allow_thinking_json=True,
+    )
+    if parsed is not None:
+        return parsed
+
     raw = sanitize_structured_text(raw)
     try:
         return json.loads(raw)

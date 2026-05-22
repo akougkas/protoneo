@@ -34,7 +34,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
-from ..llm.structured import sanitize_structured_text
+from ..llm.structured import extract_json_object, sanitize_structured_text
 from .types import DomainConfig
 
 logger = logging.getLogger("protoneo.knowledge.ontology")
@@ -676,6 +676,14 @@ async def _ground_ontology(
 
 def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
     """Parse the grounding verification response."""
+    parsed = extract_json_object(
+        raw,
+        required_keys={"verified_types"},
+        allow_thinking_json=True,
+    )
+    if parsed is not None and isinstance(parsed.get("verified_types"), list):
+        return parsed["verified_types"]
+
     cleaned = sanitize_structured_text(raw)
 
     # Try direct JSON
@@ -874,6 +882,14 @@ def _parse_ontology(raw: str) -> Ontology:
     if not raw or not raw.strip():
         logger.warning("Empty ontology response")
         return Ontology()
+
+    parsed = extract_json_object(
+        raw,
+        required_keys={"entity_types", "edge_types", "paper_domain"},
+        allow_thinking_json=True,
+    )
+    if parsed is not None:
+        return Ontology(**parsed)
 
     cleaned = sanitize_structured_text(raw)
 

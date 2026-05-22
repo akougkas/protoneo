@@ -30,6 +30,13 @@ class PhasePolicy(BaseModel):
     prefer_fast: bool = False
     structured_output_required: bool = False
     warning: str = ""
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    enable_thinking: bool | None = None
+    reasoning_budget: int | None = None
+    thinking_token_budget: int | None = None
+    min_reasoning_max_tokens: int = 8192
 
 
 class PolicyEvaluation(BaseModel):
@@ -50,6 +57,9 @@ PHASE_POLICIES: dict[PhasePolicyLabel, PhasePolicy] = {
         require_local=True,
         prefer_fast=True,
         structured_output_required=True,
+        temperature=0.2,
+        top_k=1,
+        enable_thinking=False,
         warning="Reasoning models are discouraged for graph extraction phases.",
     ),
     PhasePolicyLabel.VISION_EXTRACT: PhasePolicy(
@@ -60,6 +70,9 @@ PHASE_POLICIES: dict[PhasePolicyLabel, PhasePolicy] = {
         allow_reasoning=False,
         prefer_non_reasoning=True,
         prefer_fast=True,
+        temperature=0.2,
+        top_k=1,
+        enable_thinking=False,
     ),
     PhasePolicyLabel.DEEP_REVIEW: PhasePolicy(
         label=PhasePolicyLabel.DEEP_REVIEW,
@@ -68,6 +81,12 @@ PHASE_POLICIES: dict[PhasePolicyLabel, PhasePolicy] = {
         allow_reasoning=True,
         prefer_non_reasoning=False,
         prefer_local=False,
+        temperature=0.6,
+        top_p=0.95,
+        enable_thinking=True,
+        reasoning_budget=16384,
+        thinking_token_budget=17408,
+        min_reasoning_max_tokens=20480,
     ),
     PhasePolicyLabel.META_SYNTHESIS: PhasePolicy(
         label=PhasePolicyLabel.META_SYNTHESIS,
@@ -75,6 +94,12 @@ PHASE_POLICIES: dict[PhasePolicyLabel, PhasePolicy] = {
         preferred_capabilities={ModelCapability.STRUCTURED_OUTPUT, ModelCapability.EXTENDED_THINKING},
         allow_reasoning=True,
         prefer_non_reasoning=False,
+        temperature=0.6,
+        top_p=0.95,
+        enable_thinking=True,
+        reasoning_budget=8192,
+        thinking_token_budget=9216,
+        min_reasoning_max_tokens=12288,
     ),
     PhasePolicyLabel.TOOL_USING: PhasePolicy(
         label=PhasePolicyLabel.TOOL_USING,

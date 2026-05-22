@@ -27,7 +27,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
-from ..llm.structured import sanitize_structured_text
+from ..llm.structured import extract_json_object, sanitize_structured_text
 from .metadata import extract_section_texts, extract_section_texts_md
 from .graph import KnowledgeGraph
 from .ontology import Ontology, ontology_to_extraction_prompt
@@ -170,6 +170,14 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
     """Parse LLM output into an ExtractedGraph, handling various formats."""
     if not raw or not raw.strip():
         return ExtractedGraph()
+
+    parsed = extract_json_object(
+        raw,
+        required_keys={"entities", "relationships"},
+        allow_thinking_json=True,
+    )
+    if parsed is not None:
+        return ExtractedGraph(**parsed)
 
     raw = sanitize_structured_text(raw)
 
