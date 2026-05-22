@@ -12,8 +12,10 @@ from apps.paper_review.conference import ConferenceProfile, load_profile, list_p
 from apps.paper_review.prompts import (
     assemble_system_prompt,
     load_prompt_pack,
+    prompt_pack_no_chain_of_thought,
     load_role_prompt,
     load_shared_prompt,
+    strip_chain_of_thought,
 )
 from apps.paper_review.review import (
     _extract_json,
@@ -127,6 +129,7 @@ class TestPrompts:
         assert pack["conference"] == "hpdc26"
         assert "composition" in pack
         assert "technical" in pack["composition"]["roles"]
+        assert prompt_pack_no_chain_of_thought("hpdc26") is True
 
     def test_nonexistent_role_returns_empty(self):
         prompt = load_role_prompt("hpdc26", "nonexistent_role_xyz")
@@ -294,6 +297,34 @@ class TestOutputParsing:
         assert review.overall_merit["score"] == 4
         assert len(review.strengths) == 1
 
+    def test_strip_chain_of_thought_keeps_structured_payload(self):
+        content = (
+            "Reasoning: private deliberation that must not be stored.\n"
+            + json.dumps({"summary": "Visible review."})
+        )
+        cleaned = strip_chain_of_thought(content)
+        assert cleaned == '{"summary": "Visible review."}'
+        assert "private deliberation" not in cleaned
+        assert strip_chain_of_thought("Scratchpad: only private notes") == ""
+
+    def test_parse_review_output_enforces_no_chain_of_thought(self):
+        content = (
+            "<thinking>private scratchpad</thinking>"
+            + json.dumps({
+                "summary": "A grounded review.",
+                "overall_merit": {"score": 3, "label": "Borderline"},
+            })
+        )
+        output = self._make_output(content)
+        review = parse_review_output(
+            output,
+            "technical",
+            no_chain_of_thought=True,
+        )
+        assert review.summary == "A grounded review."
+        assert "private scratchpad" not in review.raw_content
+        assert "<thinking>" not in review.raw_content
+
     def test_parse_unstructured_falls_back(self):
         output = self._make_output("This paper is interesting but has flaws.")
         review = parse_review_output(output, "novelty")
@@ -313,6 +344,19 @@ class TestOutputParsing:
         assert meta.panel_summary == "Mixed reviews."
         assert meta.final_recommendation["score"] == 3
         assert len(meta.decision_risk_notes) == 1
+
+    def test_parse_meta_review_enforces_no_chain_of_thought(self):
+        content = (
+            "Analysis: hidden synthesis notes.\n"
+            + json.dumps({
+                "panel_summary": "Public synthesis.",
+                "final_recommendation": {"score": 4},
+            })
+        )
+        output = self._make_output(content, agent_id="meta_1", role="Meta-Reviewer")
+        meta = parse_meta_review(output, no_chain_of_thought=True)
+        assert meta.panel_summary == "Public synthesis."
+        assert "hidden synthesis" not in meta.raw_content
 
     def test_parse_meta_review_unstructured(self):
         output = self._make_output(
@@ -391,6 +435,59 @@ class TestResultToPacket:
         assert len(packet.deliberation) == 1
         assert packet.meta_review.panel_summary == "Consensus accept."
         assert packet.duration_seconds == 42.5
+
+    def test_result_to_packet_applies_prompt_pack_no_chain_guardrail(self):
+        profile = load_profile("hpdc26")
+        review_content = (
+            "<think>private reviewer notes</think>"
+            + json.dumps({
+                "summary": "Clean review.",
+                "overall_merit": {"score": 4},
+            })
+        )
+        meta_content = (
+            "<thinking>private synthesis notes</thinking>"
+            + json.dumps({
+                "panel_summary": "Clean synthesis.",
+                "final_recommendation": {"score": 4},
+            })
+        )
+        result = DeliberationResult(
+            session_id="test-session",
+            phases=[
+                PhaseResult(
+                    phase_name="independent_review",
+                    mode="parallel",
+                    outputs=[
+                        AgentOutput(
+                            agent_id="technical_1",
+                            agent_role="Technical",
+                            content=review_content,
+                            metadata={"model": "test"},
+                        ),
+                    ],
+                ),
+                PhaseResult(
+                    phase_name="meta_review",
+                    mode="sequential",
+                    outputs=[
+                        AgentOutput(
+                            agent_id="meta_1",
+                            agent_role="Meta-Reviewer",
+                            content=meta_content,
+                            metadata={"model": "test"},
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        packet = result_to_packet(result, profile, paper_title="Test Paper")
+
+        assert packet.reviews[0].summary == "Clean review."
+        assert packet.meta_review.panel_summary == "Clean synthesis."
+        assert "private reviewer" not in packet.reviews[0].raw_content
+        assert "private synthesis" not in packet.meta_review.raw_content
 
 
 # ── Preflight ────────────────────────────────────────────────

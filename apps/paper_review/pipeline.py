@@ -26,6 +26,7 @@ from protoneo.deliberation.session import SessionStatus, StageCheckpoint
 from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.graph import KnowledgeGraph
 from .conference import ConferenceProfile
+from .prompts import apply_output_guardrails, prompt_pack_no_chain_of_thought
 from .review import (
     build_deliberation_config,
     build_user_message,
@@ -265,13 +266,18 @@ async def _run_review_stage(
 
     # Annotate graph with review findings (derive roles from agent configs)
     role_keys = [k for k in agent_configs if k != "meta"]
+    no_chain_of_thought = prompt_pack_no_chain_of_thought(profile.slug)
     for phase in result.phases:
         if phase.phase_name == "independent_review":
             for output in phase.outputs:
                 role_guess = next(
                     (r for r in role_keys if r in output.agent_id), "unknown"
                 )
-                review = parse_review_output(output, role_guess)
+                review = parse_review_output(
+                    output,
+                    role_guess,
+                    no_chain_of_thought=no_chain_of_thought,
+                )
                 paper_graph.annotate_from_review(
                     review.model_dump(), agent_id=output.agent_id
                 )
@@ -287,13 +293,15 @@ def _parse_final_review(raw: str) -> dict[str, Any]:
     Handles markdown code fences, leading/trailing text, and malformed JSON.
     Falls back to treating the raw output as comments_for_authors.
     """
+    guarded_raw = apply_output_guardrails(raw, no_chain_of_thought=True)
+
     def _fallback() -> dict[str, Any]:
-        return sanitize_final_review({}, fallback_comments=raw)
+        return sanitize_final_review({}, fallback_comments=guarded_raw)
 
     def _normalize(parsed: dict[str, Any]) -> dict[str, Any]:
         return sanitize_final_review(parsed)
 
-    cleaned = strip_json_fences(raw)
+    cleaned = strip_json_fences(guarded_raw)
 
     # Try direct parse first
     try:

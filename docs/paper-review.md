@@ -137,6 +137,26 @@ The Paper Review app contributes two export formats:
 
 Export through the kernel endpoint: `GET /api/sessions/{id}/export?format=review-markdown`
 
+## Multi-Paper Quality Comparison
+
+Use the comparison harness to audit completed review sessions across multiple
+papers and produce repeatable quality metrics:
+
+```bash
+.venv/bin/python scripts/paper_review_quality_compare.py \
+  --latest-completed 3 \
+  --json data/reports/paper-review-quality.json \
+  --markdown data/reports/paper-review-quality.md
+```
+
+The report compares reviewer count, score spread, final-review presence,
+graph size, figure/table context, malformed reviewer JSON, revision-action
+coverage, and hidden-reasoning guardrail violations. Reports under `data/`
+are local session artifacts and are intentionally ignored by git.
+
+For CI-style gating on already completed review sessions, add
+`--fail-on-hidden-reasoning --fail-on-missing-final`.
+
 ## Preflight Checks
 
 Before running a full review, the preflight system checks:

@@ -126,6 +126,23 @@ def test_parse_final_review_sanitizes_malformed_fields_for_export():
     assert "Final Review" in packet_to_markdown(packet)
 
 
+def test_parse_final_review_strips_leaked_chain_of_thought():
+    raw = (
+        "Reasoning: private synthesis notes.\n"
+        + json.dumps({
+            "final_review": {
+                "paper_summary": "Public final review.",
+                "comments_for_authors": "Visible author comments.",
+            }
+        })
+    )
+
+    final_review = _parse_final_review(raw)
+
+    assert final_review["paper_summary"] == "Public final review."
+    assert "private synthesis" not in final_review["comments_for_authors"]
+
+
 @pytest.mark.asyncio
 async def test_update_final_review_sanitizes_and_invalidates_cached_packet(monkeypatch):
     session = SimpleNamespace(

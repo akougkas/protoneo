@@ -1,7 +1,23 @@
 """Prompt assembly for Paper Review reviewer agents."""
 
-import yaml
+import re
 from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+_THINKING_BLOCK_RE = re.compile(
+    r"<(?:think|thinking)\b[^>]*>[\s\S]*?</(?:think|thinking)>",
+    re.IGNORECASE,
+)
+_LEADING_REASONING_RE = re.compile(
+    r"^\s*(?:chain[-_\s]*of[-_\s]*thought|reasoning|analysis|scratchpad)\s*:",
+    re.IGNORECASE,
+)
+_FINAL_MARKER_RE = re.compile(
+    r"(?ims)^\s*(?:final(?:\s+(?:answer|review))?|answer|review)\s*:\s*(.+)$"
+)
 
 
 def _prompts_dir(conference_slug: str) -> Path:
@@ -15,6 +31,63 @@ def load_prompt_pack(conference_slug: str) -> dict:
     if not pack_path.exists():
         raise FileNotFoundError(f"Prompt pack not found for {conference_slug}")
     return yaml.safe_load(pack_path.read_text())
+
+
+def load_prompt_guardrails(conference_slug: str) -> dict[str, Any]:
+    """Return guardrail metadata declared by the venue prompt pack."""
+    pack = load_prompt_pack(conference_slug)
+    guardrails = pack.get("guardrails", {})
+    return guardrails if isinstance(guardrails, dict) else {}
+
+
+def prompt_pack_no_chain_of_thought(conference_slug: str) -> bool:
+    """Whether the venue prompt pack forbids chain-of-thought output."""
+    try:
+        return bool(load_prompt_guardrails(conference_slug).get("no_chain_of_thought"))
+    except FileNotFoundError:
+        return False
+
+
+def strip_chain_of_thought(text: str) -> str:
+    """Remove common private-reasoning wrappers from LLM output.
+
+    Prompt packs already instruct reviewers not to reveal chain-of-thought. This
+    cleanup enforces that metadata at parse time without changing normal review
+    prose or JSON payloads.
+    """
+    if not text:
+        return ""
+
+    cleaned = _THINKING_BLOCK_RE.sub("", text).strip()
+    if not _LEADING_REASONING_RE.match(cleaned):
+        return cleaned
+
+    # If the model leaked a scratchpad before the structured payload, preserve
+    # only the JSON object so the normal parser can still validate it.
+    first_json = cleaned.find("{")
+    if first_json >= 0:
+        return cleaned[first_json:].strip()
+
+    final_match = _FINAL_MARKER_RE.search(cleaned)
+    if final_match:
+        return final_match.group(1).strip()
+
+    return ""
+
+
+def apply_output_guardrails(
+    text: str,
+    *,
+    no_chain_of_thought: bool = False,
+    guardrails: dict[str, Any] | None = None,
+) -> str:
+    """Apply prompt-pack output guardrails to model text."""
+    active_no_cot = no_chain_of_thought or bool(
+        guardrails and guardrails.get("no_chain_of_thought")
+    )
+    if active_no_cot:
+        return strip_chain_of_thought(text)
+    return text
 
 
 def load_shared_prompt(conference_slug: str) -> str:

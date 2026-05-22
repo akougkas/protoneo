@@ -14,7 +14,11 @@ from protoneo.agents.types import Document
 from protoneo.config.schema import AgentConfig, DeliberationConfig, PhaseConfig
 from protoneo.deliberation.types import DeliberationResult
 from .conference import ConferenceProfile
-from .prompts import assemble_system_prompt
+from .prompts import (
+    apply_output_guardrails,
+    assemble_system_prompt,
+    prompt_pack_no_chain_of_thought,
+)
 from .schemas import (
     DeliberationRound,
     IndividualReview,
@@ -444,9 +448,14 @@ def parse_review_output(
     role: str,
     agent_config: AgentConfig | None = None,
     prompt_pack_version: str = "",
+    no_chain_of_thought: bool = False,
 ) -> IndividualReview:
     """Parse an agent output into a structured IndividualReview."""
-    parsed = _extract_json(output.content)
+    content = apply_output_guardrails(
+        output.content,
+        no_chain_of_thought=no_chain_of_thought,
+    )
+    parsed = _extract_json(content)
     model = output.metadata.get("model", "")
 
     # Build per-reviewer provenance from agent config
@@ -481,7 +490,7 @@ def parse_review_output(
             confidence=parsed.get("confidence", {}),
             revision_actions=parsed.get("revision_actions", []),
             citations=parsed.get("citations", []),
-            raw_content=output.content,
+            raw_content=content,
             provenance=provenance,
         )
 
@@ -489,8 +498,8 @@ def parse_review_output(
         reviewer_role=role,
         agent_id=output.agent_id,
         model=model,
-        comments_for_authors=output.content,
-        raw_content=output.content,
+        comments_for_authors=content,
+        raw_content=content,
         provenance=provenance,
     )
 
@@ -510,9 +519,13 @@ def _validate_score_distribution(scores: dict, max_score: int = 5) -> dict:
     return cleaned
 
 
-def parse_meta_review(output) -> MetaReview:
+def parse_meta_review(output, no_chain_of_thought: bool = False) -> MetaReview:
     """Parse the meta-reviewer output."""
-    parsed = _extract_json(output.content)
+    content = apply_output_guardrails(
+        output.content,
+        no_chain_of_thought=no_chain_of_thought,
+    )
+    parsed = _extract_json(content)
 
     if parsed:
         # Fix 13: Validate score_distribution to prevent hallucinated values
@@ -532,12 +545,12 @@ def parse_meta_review(output) -> MetaReview:
                 "prioritized_revision_plan", []
             ),
             submission_readiness=parsed.get("submission_readiness", {}),
-            raw_content=output.content,
+            raw_content=content,
         )
 
     return MetaReview(
-        author_facing_summary=output.content,
-        raw_content=output.content,
+        author_facing_summary=content,
+        raw_content=content,
     )
 
 
@@ -556,6 +569,7 @@ def result_to_packet(
 
     # Derive role keys from the profile so any conference works
     role_keys = _reviewer_roles_from_profile(profile, include_optional=True)
+    no_chain_of_thought = prompt_pack_no_chain_of_thought(profile.slug)
 
     _agent_configs = agent_configs or {}
 
@@ -572,6 +586,7 @@ def result_to_packet(
                     output, role_guess,
                     agent_config=_agent_configs.get(role_guess),
                     prompt_pack_version=prompt_pack_version,
+                    no_chain_of_thought=no_chain_of_thought,
                 ))
 
         elif phase.phase_name == "deliberation":
@@ -606,7 +621,10 @@ def result_to_packet(
 
         elif phase.phase_name == "meta_review":
             if phase.outputs:
-                meta = parse_meta_review(phase.outputs[0])
+                meta = parse_meta_review(
+                    phase.outputs[0],
+                    no_chain_of_thought=no_chain_of_thought,
+                )
 
     # Build packet-level provenance for reproducibility
     provenance: dict[str, Any] = {
