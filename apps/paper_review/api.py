@@ -28,56 +28,32 @@ from protoneo.api.routes import (
 )
 from protoneo.config.schema import AgentConfig, DeliberationConfig
 from protoneo.deliberation.session import SessionStatus, StepState
-from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.chunker import chunk_document
 from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.knowledge.parser import parse_file
 from protoneo.llm.settings import build_vlm_config
 
 from .conference import ConferenceProfile, list_profiles, load_profile
-from .manifest import domain_config as _domain_config
-
 _APP_NAME = "paper_review"
 _APP_VERSION = "0.1.0"
 from .export import packet_to_markdown, packet_to_pdf
 from .pipeline import (
+    _build_enriched_review_message,
     _run_graph_pipeline,
     _run_review_stage,
 )
 from .preflight import run_preflight
-from .prompts import load_prompt_pack
 from .review import (
     build_agent_configs,
     build_deliberation_config,
     build_user_message,
-    result_to_packet,
+    session_to_review_packet,
 )
+from .schemas import sanitize_final_review
 
 logger = logging.getLogger("protoneo.paper_review.api")
 
 router = APIRouter()
-
-
-def _extract_provenance_args(session) -> dict:
-    """Extract agent_configs and prompt_pack_version from a stored session."""
-    from protoneo.config.schema import AgentConfig as _AC
-    agent_configs = {}
-    for aid, cfg_dict in session.config.get("agents", {}).items():
-        if isinstance(cfg_dict, dict):
-            try:
-                agent_configs[aid] = _AC.model_validate(cfg_dict)
-            except Exception:
-                pass
-
-    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
-    prompt_pack_version = ""
-    try:
-        pack = load_prompt_pack(conference_slug)
-        prompt_pack_version = pack.get("version", "")
-    except Exception:
-        pass
-
-    return {"agent_configs": agent_configs, "prompt_pack_version": prompt_pack_version}
 
 
 class _MinimalDoc:
@@ -95,6 +71,115 @@ class _MinimalDoc:
 def _is_completed(session) -> bool:
     """Check if a session has completed, handling both enum and string status."""
     return session.status in (SessionStatus.COMPLETED, SessionStatus.COMPLETED.value)
+
+
+def _session_pipeline_mode(session) -> str:
+    """Infer intended pipeline mode for retry/resume compatibility."""
+    metadata = session.config.get("metadata", {})
+    mode = metadata.get("pipeline_mode", "")
+    if mode in {"graph_only", "full_review", "imported_graph_review"}:
+        return mode
+    if getattr(session, "graph_source", "") == "imported":
+        return "imported_graph_review"
+    if session.config.get("deliberation"):
+        return "full_review"
+    return "graph_only"
+
+
+def _parse_provenance(
+    doc,
+    *,
+    fast_parse: bool,
+    vlm: dict[str, Any] | None,
+    duration_seconds: float,
+) -> dict[str, Any]:
+    """Build app-owned parse provenance from parser metadata."""
+    metadata = getattr(doc, "metadata", {}) or {}
+    figures = metadata.get("figures") or []
+    figure_image_paths = [
+        f.get("image_path", "")
+        for f in figures
+        if isinstance(f, dict) and f.get("image_path")
+    ]
+    return {
+        "parser": metadata.get("parser", ""),
+        "fast_parse": fast_parse,
+        "vlm": {
+            "enabled": bool(vlm and not fast_parse),
+            "endpoint": (vlm or {}).get("url", ""),
+            "model": (vlm or {}).get("model", ""),
+            "temperature": (vlm or {}).get("temperature"),
+            "top_p": (vlm or {}).get("top_p"),
+            "timeout": (vlm or {}).get("timeout"),
+            "concurrency": (vlm or {}).get("concurrency"),
+        },
+        "figure_count": len(figures) if isinstance(figures, list) else 0,
+        "figure_image_paths": figure_image_paths,
+        "table_count": metadata.get("table_count", 0),
+        "figures_dir": metadata.get("figures_dir", ""),
+        "duration_seconds": round(duration_seconds, 3),
+    }
+
+
+async def _run_review_only_pipeline(
+    sid: str,
+    profile: ConferenceProfile,
+    agent_configs: dict[str, AgentConfig],
+    delib_config: DeliberationConfig,
+    bus: SessionEventBus,
+    ctl: PipelineControl,
+) -> None:
+    """Run only review stages for sessions with an existing graph."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(sid)
+    if not session or not session.knowledge_graph:
+        raise RuntimeError("Session has no graph. Build or import a graph first.")
+
+    pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+    doc_text = session.document_text or session.document_markdown or pg.summary
+    doc_markdown = session.document_markdown or doc_text
+    doc_proxy = _MinimalDoc(
+        doc_text,
+        doc_markdown,
+        session.config.get("metadata", {}).get("filename", "paper.pdf"),
+    )
+    user_message = build_user_message(doc_proxy, profile)
+    enriched_message = _build_enriched_review_message(user_message, pg)
+
+    ctl.enter_stage("review")
+    bus.emit("stage_started", {
+        "stage": "review",
+        "step": "independent_reviews",
+        "message": "Starting peer review...",
+    })
+    ctl.enter_step("independent_reviews")
+    bus.emit("step_started", {
+        "stage": "review",
+        "step": "independent_reviews",
+        "message": "Starting independent peer reviews...",
+    })
+
+    await _run_review_stage(
+        sid,
+        agent_configs,
+        delib_config,
+        enriched_message,
+        bus,
+        ctl,
+        pg,
+    )
+
+    session = await _session_manager.get(sid)
+    if session:
+        session.knowledge_graph = pg.model_dump(mode="json")
+        session.current_stage = "review"
+        session.status = SessionStatus.COMPLETED
+        await _session_manager.update(session)
+
+    get_session_graphs()[sid] = pg.to_d3_format()
+    ctl.stage_done("review")
+    bus.emit("stage_complete", {"stage": "review"})
+    bus.emit("completed", {"result": session.result if session else {}})
 
 
 async def _recover_stale_sessions() -> None:
@@ -203,6 +288,8 @@ async def preflight_check(
 
 # ── Review Sessions ────────────────────────────────────
 
+@router.post("/start-review")
+@router.post("/sessions/upload")
 @router.post("/review")
 async def start_panel_review(
     file: UploadFile = File(...),
@@ -260,6 +347,7 @@ async def start_panel_review(
             "deliberation": delib_config.model_dump(),
             "metadata": {
                 "type": "panel_review",
+                "pipeline_mode": "full_review",
                 "conference": conference,
                 "filename": file.filename,
                 "paper_title": "",
@@ -302,12 +390,20 @@ async def start_panel_review(
             session = await _session_manager.get(sid)
             if session:
                 existing = session.pipeline_steps.get("parse") or {}
+                completed_at = _time.monotonic()
                 session.pipeline_steps["parse"] = StepState(
-                    status="completed",
+                    status="complete",
                     started_at=existing.get("started_at"),
-                    completed_at=_time.monotonic(),
+                    completed_at=completed_at,
                     model_used=vlm.get("model", "") if vlm and not fast_parse else "",
                 ).model_dump()
+                started_at = existing.get("started_at") or completed_at
+                session.app_data["parse"] = _parse_provenance(
+                    doc,
+                    fast_parse=fast_parse,
+                    vlm=vlm,
+                    duration_seconds=completed_at - float(started_at),
+                )
                 await _session_manager.update(session)
         except Exception as e:
             file_path.unlink(missing_ok=True)
@@ -397,6 +493,7 @@ async def start_batch(
                 "agents": {k: v.model_dump() for k, v in agent_configs.items()},
                 "metadata": {
                     "type": "panel_review",
+                    "pipeline_mode": "graph_only",
                     "conference": conference,
                     "filename": file.filename,
                     "paper_title": "",
@@ -456,12 +553,20 @@ async def start_batch(
                 session = await _session_manager.get(sid)
                 if session:
                     existing = session.pipeline_steps.get("parse") or {}
+                    completed_at = _time.monotonic()
                     session.pipeline_steps["parse"] = StepState(
-                        status="completed",
+                        status="complete",
                         started_at=existing.get("started_at"),
-                        completed_at=_time.monotonic(),
+                        completed_at=completed_at,
                         model_used=vlm.get("model", "") if vlm and not fast_parse else "",
                     ).model_dump()
+                    started_at = existing.get("started_at") or completed_at
+                    session.app_data["parse"] = _parse_provenance(
+                        doc,
+                        fast_parse=fast_parse,
+                        vlm=vlm,
+                        duration_seconds=completed_at - float(started_at),
+                    )
                     await _session_manager.update(session)
             except Exception as e:
                 fpath.unlink(missing_ok=True)
@@ -667,6 +772,7 @@ async def start_batch_review(
                 "deliberation": delib_config.model_dump(),
                 "metadata": {
                     "type": "panel_review",
+                    "pipeline_mode": "full_review",
                     "conference": conference,
                     "filename": file.filename,
                     "paper_title": "",
@@ -723,12 +829,20 @@ async def start_batch_review(
                 session = await _session_manager.get(sid)
                 if session:
                     existing = session.pipeline_steps.get("parse") or {}
+                    completed_at = _time.monotonic()
                     session.pipeline_steps["parse"] = StepState(
-                        status="completed",
+                        status="complete",
                         started_at=existing.get("started_at"),
-                        completed_at=_time.monotonic(),
+                        completed_at=completed_at,
                         model_used=vlm.get("model", "") if vlm and not fast_parse else "",
                     ).model_dump()
+                    started_at = existing.get("started_at") or completed_at
+                    session.app_data["parse"] = _parse_provenance(
+                        doc,
+                        fast_parse=fast_parse,
+                        vlm=vlm,
+                        duration_seconds=completed_at - float(started_at),
+                    )
                     await _session_manager.update(session)
             except Exception as e:
                 fpath.unlink(missing_ok=True)
@@ -825,19 +939,20 @@ async def retry_session(session_id: str):
     agent_configs_raw = session.config.get("agents", {})
     agent_configs = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
     delib_config = DeliberationConfig(**session.config.get("deliberation", {}))
+    pipeline_mode = _session_pipeline_mode(session)
 
     # Reconstruct document from persisted data
-    doc_text = session.document_text
+    doc_text = session.document_text or session.document_markdown
     doc_md = session.document_markdown or ""
     filename = session.config.get("metadata", {}).get("filename", "paper.pdf")
-    if not doc_text:
+    if not doc_text and pipeline_mode != "imported_graph_review":
         raise HTTPException(status_code=400, detail="No paper text stored. Cannot retry.")
 
     from protoneo.agents.types import Document as _Doc
     doc = _Doc(
         document_id=uuid.uuid4().hex,
         filename=filename,
-        text=doc_text,
+        text=doc_text or "",
         markdown=doc_md,
     )
 
@@ -859,14 +974,28 @@ async def retry_session(session_id: str):
     ctl = PipelineControl()
     _pipeline_controls[session_id] = ctl
 
-    # Determine if graph pipeline already completed (checkpoint-based, not stage-based).
-    # If the summary checkpoint exists, graph is done; retry runs review stages.
-    graph_complete = any(cp.stage_name == "summary" for cp in session.checkpoints)
+    if pipeline_mode == "imported_graph_review" and session.knowledge_graph:
+        task = asyncio.create_task(_run_review_only_pipeline(
+            session_id,
+            profile,
+            agent_configs,
+            delib_config,
+            bus,
+            ctl,
+        ))
+        ctl.set_task(task)
+        return {"session_id": session_id, "status": "running", "action": "retry"}
+
+    # Full-review retries should continue through the review stage without
+    # stopping at the pre-review gate.
+    graph_only = pipeline_mode == "graph_only"
+    if not graph_only:
+        ctl.skip_gate = True
     task = asyncio.create_task(_run_graph_pipeline(
         session_id, doc, profile, model_map_raw,
         agent_configs, bus, ctl,
         delib_config=delib_config,
-        graph_only=(not graph_complete),
+        graph_only=graph_only,
     ))
     ctl.set_task(task)
 
@@ -918,16 +1047,17 @@ async def retry_failed_in_batch(batch_id: str):
             agent_configs_raw = session.config.get("agents", {})
             ac = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
             dc = DeliberationConfig(**session.config.get("deliberation", {}))
+            pipeline_mode = _session_pipeline_mode(session)
 
-            doc_text = session.document_text
-            if not doc_text:
+            doc_text = session.document_text or session.document_markdown
+            if not doc_text and pipeline_mode != "imported_graph_review":
                 continue
 
             from protoneo.agents.types import Document as _Doc
             doc = _Doc(
                 document_id=uuid.uuid4().hex,
                 filename=session.config.get("metadata", {}).get("filename", "paper.pdf"),
-                text=doc_text,
+                text=doc_text or "",
                 markdown=session.document_markdown or "",
             )
 
@@ -947,14 +1077,20 @@ async def retry_failed_in_batch(batch_id: str):
 
             ctl = PipelineControl()
             _pipeline_controls[sid] = ctl
+            graph_only = pipeline_mode == "graph_only"
+            if not graph_only:
+                ctl.skip_gate = True
 
             try:
-                await _run_graph_pipeline(
-                    sid, doc, profile, model_map_raw,
-                    ac, bus, ctl,
-                    delib_config=dc,
-                    graph_only=(session.current_stage == "pre_review"),
-                )
+                if pipeline_mode == "imported_graph_review" and session.knowledge_graph:
+                    await _run_review_only_pipeline(sid, profile, ac, dc, bus, ctl)
+                else:
+                    await _run_graph_pipeline(
+                        sid, doc, profile, model_map_raw,
+                        ac, bus, ctl,
+                        delib_config=dc,
+                        graph_only=graph_only,
+                    )
                 batch_bus.emit("paper_complete", {
                     "session_id": sid, "index": i + 1,
                     "total": len(failed_sids),
@@ -1301,8 +1437,11 @@ async def update_final_review(session_id: str, body: UpdateFinalReviewRequest):
     if not session.result:
         raise HTTPException(status_code=409, detail="No review results")
 
-    session.result["final_review"] = body.final_review
-    session.result["pc_chair_review"] = body.final_review
+    final_review = sanitize_final_review(body.final_review)
+    session.result["final_review"] = final_review
+    session.result["pc_chair_review"] = final_review
+    session.app_data["final_review"] = final_review
+    session.app_data.pop("review_packet", None)
     await _session_manager.update(session)
     return {"status": "saved"}
 
@@ -1367,6 +1506,7 @@ async def review_with_graph(
             "deliberation": delib_config.model_dump(),
             "metadata": {
                 "type": "panel_review",
+                "pipeline_mode": "imported_graph_review",
                 "conference": conference,
                 "filename": graph_data.get("paper_title", "imported-graph"),
                 "paper_title": paper_title,
@@ -1479,38 +1619,14 @@ async def get_review_packet(session_id: str):
         return cached
 
     try:
-        result = DeliberationResult.model_validate(session.result)
+        packet = session_to_review_packet(session)
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Failed to parse stored result: {e}"
+            status_code=500, detail=f"Failed to build review packet: {e}"
         )
 
-    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
-    try:
-        profile = load_profile(conference_slug)
-    except FileNotFoundError:
-        profile = ConferenceProfile(slug=conference_slug, name=conference_slug)
-
-    paper_title = session.config.get("metadata", {}).get("paper_title", "")
-    final_review = session.result.get("final_review", {})
-    prov_args = _extract_provenance_args(session)
-    packet = result_to_packet(result, profile, paper_title, final_review=final_review, **prov_args)
-
-    if session.knowledge_graph:
-        try:
-            pg = KnowledgeGraph.model_validate(session.knowledge_graph)
-            packet.graph_summary = pg.summary
-            packet.graph_node_count = len(pg.nodes)
-            packet.graph_edge_count = len(pg.edges)
-
-            if packet.reviews:
-                review_dicts = [r.model_dump() for r in packet.reviews]
-                packet.graph_utilization = pg.compute_utilization(review_dicts)
-        except Exception:
-            pass
-
     data = packet.model_dump(mode="json")
-    data["final_review"] = session.result.get("final_review", {})
+    data["final_review"] = data.get("pc_chair_review", {})
 
     # Cache for subsequent requests
     session.app_data["review_packet"] = data
@@ -1536,22 +1652,11 @@ async def get_review_packet_md(session_id: str):
         raise HTTPException(status_code=404, detail="No result available")
 
     try:
-        result = DeliberationResult.model_validate(session.result)
+        packet = session_to_review_packet(session)
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Failed to parse stored result: {e}"
+            status_code=500, detail=f"Failed to build review packet: {e}"
         )
-
-    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
-    try:
-        profile = load_profile(conference_slug)
-    except FileNotFoundError:
-        profile = ConferenceProfile(slug=conference_slug, name=conference_slug)
-
-    paper_title = session.config.get("metadata", {}).get("paper_title", "")
-    final_review = session.result.get("final_review", {})
-    prov_args = _extract_provenance_args(session)
-    packet = result_to_packet(result, profile, paper_title, final_review=final_review, **prov_args)
     md = packet_to_markdown(packet)
 
     return Response(
@@ -1580,22 +1685,11 @@ async def get_review_packet_pdf(session_id: str):
         raise HTTPException(status_code=404, detail="No result available")
 
     try:
-        result = DeliberationResult.model_validate(session.result)
+        packet = session_to_review_packet(session)
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Failed to parse stored result: {e}"
+            status_code=500, detail=f"Failed to build review packet: {e}"
         )
-
-    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
-    try:
-        profile = load_profile(conference_slug)
-    except FileNotFoundError:
-        profile = ConferenceProfile(slug=conference_slug, name=conference_slug)
-
-    paper_title = session.config.get("metadata", {}).get("paper_title", "")
-    final_review = session.result.get("final_review", {})
-    prov_args = _extract_provenance_args(session)
-    packet = result_to_packet(result, profile, paper_title, final_review=final_review, **prov_args)
     pdf_bytes = packet_to_pdf(packet)
 
     return Response(

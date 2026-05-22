@@ -206,7 +206,7 @@ def _parse_pdf_docling(
     during parsing using the configured VLM endpoint. No separate
     enrichment step needed.
 
-    Returns (text, markdown, figures, figures_dir).
+    Returns (text, markdown, figures, figures_dir, table_count).
     """
     from docling.datamodel.base_models import InputFormat
     from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -284,7 +284,7 @@ def _parse_pdf_docling(
         picture_counter, table_counter, len(markdown), path.name,
     )
 
-    return text, markdown, figures, str(output_dir)
+    return text, markdown, figures, str(output_dir), table_counter
 
 
 def parse_file(
@@ -317,7 +317,10 @@ def parse_file(
 
     if suffix == ".pdf":
         effective_vlm = None if fast else vlm_config
-        text, markdown, figures, figures_dir = _parse_pdf_docling(file_path, effective_vlm)
+        text, markdown, figures, figures_dir, table_count = _parse_pdf_docling(
+            file_path,
+            effective_vlm,
+        )
         text = _strip_line_number_pollution(text)
         markdown = _strip_line_number_pollution(markdown)
         text = _clean_markdown(text)
@@ -329,6 +332,7 @@ def parse_file(
             markdown=markdown,
             metadata={
                 "figures": figures,
+                "table_count": table_count,
                 "figures_dir": figures_dir,
                 "parser": "docling",
             },

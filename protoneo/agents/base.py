@@ -204,6 +204,11 @@ class BaseAgent:
 
         # Merge per-agent inference params; caller kwargs take precedence
         call_kwargs = {**self._inference_kwargs(), **kwargs}
+        stream_usage: dict[str, int] = {}
+
+        def _capture_usage(usage: dict[str, int]) -> None:
+            stream_usage.clear()
+            stream_usage.update(usage)
 
         chunks: list[str] = []
         async for chunk in self._llm_client.stream(
@@ -211,6 +216,7 @@ class BaseAgent:
             messages=msgs,
             session_id=sid,
             max_tokens=call_kwargs.pop("max_tokens", self._max_tokens),
+            usage_callback=_capture_usage,
             **call_kwargs,
         ):
             chunks.append(chunk)
@@ -220,9 +226,6 @@ class BaseAgent:
         content = "".join(chunks)
         # Strip thinking tags the same way complete() does
         content = self._llm_client._strip_thinking(content)
-
-        # Capture usage from the final streaming chunk when available
-        stream_usage = getattr(self._llm_client, "_last_stream_usage", {})
 
         return Message(
             role="assistant",

@@ -248,7 +248,7 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
 
         chair = packet.pc_chair_review
         if chair.get("overall_merit"):
-            merit = chair["overall_merit"]
+            merit = chair["overall_merit"] if isinstance(chair["overall_merit"], dict) else {}
             score = merit.get("score", "")
             label = merit.get("label", "")
             if score or label:
@@ -256,7 +256,7 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
                 lines.append("")
 
         if chair.get("reviewer_expertise"):
-            exp = chair["reviewer_expertise"]
+            exp = chair["reviewer_expertise"] if isinstance(chair["reviewer_expertise"], dict) else {}
             score = exp.get("score", "")
             label = exp.get("label", "")
             if score or label:

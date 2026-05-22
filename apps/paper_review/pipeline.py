@@ -30,8 +30,10 @@ from .review import (
     build_deliberation_config,
     build_user_message,
     parse_review_output,
+    resolve_paper_review_model,
     strip_json_fences,
 )
+from .schemas import sanitize_final_review
 
 logger = logging.getLogger("protoneo.paper_review.pipeline")
 
@@ -286,61 +288,10 @@ def _parse_final_review(raw: str) -> dict[str, Any]:
     Falls back to treating the raw output as comments_for_authors.
     """
     def _fallback() -> dict[str, Any]:
-        return {
-            "overall_merit": {"score": 3, "label": "Borderline"},
-            "reviewer_expertise": {"score": 3, "label": "Knowledgeable"},
-            "paper_summary": "",
-            "strengths": [],
-            "weaknesses": [],
-            "comments_for_authors": raw,
-            "comments_for_pc": "",
-            "questions_for_authors": [],
-            "revision_actions": [],
-            "submission_readiness": {"status": "revise_before_submit", "reason": ""},
-        }
+        return sanitize_final_review({}, fallback_comments=raw)
 
     def _normalize(parsed: dict[str, Any]) -> dict[str, Any]:
-        source = parsed.get("final_review")
-        if not isinstance(source, dict):
-            source = parsed
-
-        final_review: dict[str, Any] = {
-            "overall_merit": source.get("overall_merit")
-            or source.get("final_recommendation")
-            or parsed.get("final_recommendation")
-            or {"score": 3, "label": "Borderline"},
-            "reviewer_expertise": source.get("reviewer_expertise")
-            or source.get("expertise")
-            or parsed.get("expertise")
-            or {"score": 3, "label": "Knowledgeable"},
-            "paper_summary": source.get("paper_summary")
-            or source.get("summary")
-            or parsed.get("author_facing_summary")
-            or parsed.get("panel_summary")
-            or "",
-            "strengths": source.get("strengths", []),
-            "weaknesses": source.get("weaknesses", []),
-            "comments_for_authors": source.get("comments_for_authors")
-            or parsed.get("author_facing_summary")
-            or parsed.get("panel_summary")
-            or "",
-            "comments_for_pc": source.get("comments_for_pc", ""),
-            "internal_committee_concerns": source.get("internal_committee_concerns")
-            or parsed.get("decision_risk_notes", []),
-            "questions_for_authors": source.get("questions_for_authors", []),
-            "revision_actions": source.get("revision_actions")
-            or source.get("prioritized_revision_plan")
-            or parsed.get("prioritized_revision_plan", []),
-            "submission_readiness": source.get("submission_readiness")
-            or parsed.get("submission_readiness")
-            or {"status": "revise_before_submit", "reason": ""},
-        }
-
-        # Preserve any extra final-review fields the prompt/schema may add.
-        for key, value in source.items():
-            final_review.setdefault(key, value)
-
-        return final_review
+        return sanitize_final_review(parsed)
 
     cleaned = strip_json_fences(raw)
 
@@ -532,56 +483,16 @@ async def _run_graph_pipeline(
             "message": "Verifying model availability...",
         })
 
-        # Resolve per-step graph models from the model_map.
-        # Graph pipeline steps MUST use local models only. Subscription
-        # tokens are reserved for review roles to avoid rate limits.
-        _SUBSCRIPTION_PROVIDERS = {"openai"}
-
-        def _is_subscription(model_id: str) -> bool:
-            provider = model_id.split("/", 1)[0] if "/" in model_id else ""
-            return provider in _SUBSCRIPTION_PROVIDERS
-
         def _resolve_graph_model(step_key: str) -> str:
-            try:
-                from protoneo.llm.settings import load_settings as _ls
-                _settings = _ls()
-                _local_providers = {
-                    e.id for e in (
-                        list(_settings.localhost_endpoints)
-                        + list(_settings.lan_endpoints)
-                    )
-                }
-            except Exception:
-                _settings = None
-                _local_providers = set()
-
-            def _is_local(model_id: str) -> bool:
-                provider = model_id.split("/", 1)[0] if "/" in model_id else ""
-                if not provider or _is_subscription(model_id):
-                    return False
-                return (
-                    provider in _local_providers
-                    or provider.startswith("lan-")
-                    or provider.startswith("localhost-")
-                    or provider in {"local", "ollama", "lmstudio"}
-                )
-
-            for candidate in (
-                model_map.get(step_key),
-                model_map.get("ontology"),
-                model_map.get("graph"),
-            ):
-                if candidate and _is_local(candidate):
-                    return candidate
-
-            if _settings:
-                for provider, model_id in (_settings.active_models or {}).items():
-                    candidate = f"{provider}/{model_id}" if model_id else ""
-                    if candidate and _is_local(candidate):
-                        return candidate
-
-            logger.warning("No local model for graph step '%s'", step_key)
-            return ""
+            resolved = resolve_paper_review_model(
+                step_key,
+                model_map,
+                fallback_keys=("ontology", "graph"),
+                require_local=True,
+            )
+            if not resolved:
+                logger.warning("No local model for graph step '%s'", step_key)
+            return resolved
 
         resolved_models = {
             "ontology": _resolve_graph_model("ontology"),

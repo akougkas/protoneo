@@ -117,7 +117,9 @@ All routes are under `/api/apps/paper_review/`:
 GET  /conferences                    # List available conference profiles
 GET  /conferences/{slug}             # Get specific profile
 POST /preflight                      # Run pre-submission checks
-POST /start-review                   # Start a single-paper review session
+POST /review                         # Start a single-paper review session
+POST /start-review                   # Backward-compatible review alias
+POST /sessions/upload                # Backward-compatible upload alias
 POST /batch-review                   # Start batch review of multiple papers
 GET  /batch/{id}                     # Get batch status
 GET  /batches                        # List all batches

@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..agents.types import AgentOutput, Document, Message
 
@@ -39,6 +39,13 @@ class StepState(BaseModel):
     nodes_added: int = 0
     edges_added: int = 0
     entities_flagged: int = 0
+
+    @field_validator("status")
+    @classmethod
+    def normalize_status(cls, value: str) -> str:
+        if value == "completed":
+            return "complete"
+        return value
 
 
 class SessionContext:

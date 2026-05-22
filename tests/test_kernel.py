@@ -394,14 +394,14 @@ class TestBaseAgent:
     async def test_process_stream_includes_usage_in_metadata(self):
         """C3: streamed responses include usage dict in metadata."""
         client = AsyncMock(spec=LLMClient)
-        client._last_stream_usage = {
-            "prompt_tokens": 100,
-            "completion_tokens": 50,
-            "total_tokens": 150,
-        }
         client._strip_thinking = LLMClient._strip_thinking
 
         async def _fake_stream(**kwargs):
+            kwargs["usage_callback"]({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+            })
             for chunk in ["Hello", " world"]:
                 yield chunk
 

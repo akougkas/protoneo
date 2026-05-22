@@ -16,7 +16,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Callable
 
 import httpx
 import litellm
@@ -418,6 +418,10 @@ class LLMClient:
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
         """Stream a chat completion, yielding content chunks."""
+        usage_callback: Callable[[dict[str, int]], None] | None = kwargs.pop(
+            "usage_callback",
+            None,
+        )
         info: ModelInfo = self.registry.get(model)
         provider = info.provider
 
@@ -445,6 +449,12 @@ class LLMClient:
                     max_tokens=max_tokens,
                     **kwargs,
                 )
+                if usage_callback:
+                    usage_callback({
+                        "prompt_tokens": response.usage.prompt_tokens,
+                        "completion_tokens": response.usage.completion_tokens,
+                        "total_tokens": response.usage.total_tokens,
+                    })
                 if response.content:
                     yield response.content
                 return
@@ -461,19 +471,17 @@ class LLMClient:
 
         response = await acompletion(**call_kwargs)
 
-        # Track usage from the final streaming chunk when the provider
-        # sends it (OpenAI, LM Studio, and others that honor stream_options).
-        self._last_stream_usage: dict[str, int] = {}
-
         async for chunk in response:
             # Capture usage from the final chunk (choices may be empty)
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage:
-                self._last_stream_usage = {
+                usage = {
                     "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
                     "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
                     "total_tokens": getattr(chunk_usage, "total_tokens", 0) or 0,
                 }
+                if usage_callback:
+                    usage_callback(usage)
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield delta.content

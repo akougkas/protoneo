@@ -21,6 +21,7 @@ from .schemas import (
     MetaReview,
     ReviewerProvenance,
     ReviewPacket,
+    sanitize_final_review,
 )
 
 logger = logging.getLogger("protoneo.paper_review.review")
@@ -37,6 +38,19 @@ _ROLE_PROVIDER_PREFS: dict[str, list[str]] = {
     "skeptic": ["lan-mini", "lan-dynamo", "openai"],
     "artifact": ["lan-mini", "lan-dynamo", "openai"],
 }
+
+_GRAPH_STEPS = {"ontology", "extraction", "coref", "verification"}
+_SUBSCRIPTION_PROVIDERS = {"openai"}
+_GRAPH_PROVIDER_PREFS = [
+    "lan-dynamo",
+    "localhost-dynamo",
+    "localhost-lmstudio",
+    "local",
+    "ollama",
+    "lmstudio",
+    "lan-mini",
+    "localhost-ollama",
+]
 
 # Per-role inference parameter defaults. These are role-level targets; local
 # endpoint sampler profiles below add request-side top_k/min_p/repeat_penalty.
@@ -76,6 +90,109 @@ def _provider_from_model(model_id: str) -> str:
     return model_id.split("/", 1)[0] if "/" in model_id else ""
 
 
+def is_local_model_id(model_id: str, settings: Any | None = None) -> bool:
+    """Return True when a provider-prefixed model resolves to a local endpoint."""
+    provider = _provider_from_model(model_id)
+    if not provider or provider in _SUBSCRIPTION_PROVIDERS:
+        return False
+
+    local_providers: set[str] = set()
+    if settings is not None:
+        local_providers = {
+            e.id for e in (
+                list(getattr(settings, "localhost_endpoints", []))
+                + list(getattr(settings, "lan_endpoints", []))
+            )
+        }
+
+    return (
+        provider in local_providers
+        or provider.startswith("lan-")
+        or provider.startswith("localhost-")
+        or provider in {"local", "ollama", "lmstudio"}
+    )
+
+
+def _load_settings_context() -> tuple[Any | None, dict[str, str]]:
+    try:
+        from protoneo.llm.settings import load_settings, resolve_preset
+
+        settings = load_settings()
+        preset = (
+            resolve_preset(settings.active_preset, settings)
+            if settings.active_preset
+            else None
+        )
+        assignments = dict(preset.assignments) if preset else {}
+        return settings, assignments
+    except Exception as e:
+        logger.warning("Failed to resolve paper review model settings: %s", e)
+        return None, {}
+
+
+def _active_models(settings: Any | None, *, require_local: bool = False) -> dict[str, str]:
+    if settings is None:
+        return {}
+    models = {}
+    for provider, model_id in (settings.active_models or {}).items():
+        candidate = f"{provider}/{model_id}" if model_id else ""
+        if candidate and (not require_local or is_local_model_id(candidate, settings)):
+            models[provider] = candidate
+    return models
+
+
+def resolve_paper_review_model(
+    key: str,
+    model_map: dict[str, str] | None = None,
+    *,
+    fallback_keys: tuple[str, ...] = (),
+    require_local: bool = False,
+) -> str:
+    """Resolve one paper-review model assignment.
+
+    Resolution order:
+    1. explicit request model_map
+    2. active preset assignment
+    3. role/provider preference fallback over active_models
+    4. first acceptable active model
+    """
+    settings, preset_assignments = _load_settings_context()
+
+    def acceptable(candidate: str | None) -> str:
+        if not candidate:
+            return ""
+        if require_local and not is_local_model_id(candidate, settings):
+            return ""
+        return candidate
+
+    lookup_keys = (key, *fallback_keys)
+    explicit = model_map or {}
+    for lookup_key in lookup_keys:
+        candidate = acceptable(explicit.get(lookup_key))
+        if candidate:
+            return candidate
+
+    for lookup_key in lookup_keys:
+        candidate = acceptable(preset_assignments.get(lookup_key))
+        if candidate:
+            return candidate
+
+    available = _active_models(settings, require_local=require_local)
+    if not available:
+        return ""
+
+    prefs = (
+        _GRAPH_PROVIDER_PREFS
+        if require_local or key in _GRAPH_STEPS
+        else _ROLE_PROVIDER_PREFS.get(key, [])
+    )
+    for provider in prefs:
+        if provider in available:
+            return available[provider]
+
+    return next(iter(available.values()), "")
+
+
 def _inference_for(role: str, model_id: str) -> dict[str, float | int | str]:
     """Merge role calibration with request-side local endpoint sampling."""
     merged: dict[str, float | int | str] = dict(_ROLE_INFERENCE_PREFS.get(role, {}))
@@ -95,40 +212,20 @@ def _inference_for(role: str, model_id: str) -> dict[str, float | int | str]:
 
 
 def _resolve_default_models(roles: list[str] | None = None) -> dict[str, str]:
-    """Build default model assignments from settings active_models.
+    """Build default model assignments from active preset and active_models.
 
-    Returns a dict mapping role names to provider-prefixed model IDs.
-    Roles without explicit provider preferences get the first available model.
+    Returns a dict mapping role names to provider-prefixed model IDs. The active
+    preset is authoritative when it assigns a role; active_models only provide
+    safe role/provider fallbacks.
     """
-    try:
-        from protoneo.llm.settings import load_settings
-        settings = load_settings()
-        active = settings.active_models or {}
-        if not active:
-            return {}
-
-        available = {prov: f"{prov}/{mid}" for prov, mid in active.items() if mid}
-        if not available:
-            return {}
-
-        first_model = next(iter(available.values()))
-        target_roles = roles or list(_ROLE_PROVIDER_PREFS.keys())
-
-        result = {}
-        for role in target_roles:
-            prefs = _ROLE_PROVIDER_PREFS.get(role, [])
-            assigned = False
-            for prov in prefs:
-                if prov in available:
-                    result[role] = available[prov]
-                    assigned = True
-                    break
-            if not assigned:
-                result[role] = first_model
-        return result
-    except Exception as e:
-        logger.warning("Failed to resolve default models from settings: %s", e)
-        return {}
+    target_roles = roles or list(_ROLE_PROVIDER_PREFS.keys())
+    result: dict[str, str] = {}
+    for role in target_roles:
+        fallback_keys = ("meta_reviewer",) if role == "meta" else ()
+        model = resolve_paper_review_model(role, fallback_keys=fallback_keys)
+        if model:
+            result[role] = model
+    return result
 
 
 def strip_json_fences(text: str) -> str:
@@ -357,6 +454,10 @@ def parse_review_output(
         model_id=model,
         temperature=output.metadata.get("temperature") if agent_config is None else agent_config.temperature,
         top_p=agent_config.top_p if agent_config else None,
+        top_k=agent_config.top_k if agent_config else None,
+        min_p=agent_config.min_p if agent_config else None,
+        repeat_penalty=agent_config.repeat_penalty if agent_config else None,
+        reasoning_effort=agent_config.reasoning_effort if agent_config else None,
         presence_penalty=agent_config.presence_penalty if agent_config else None,
         frequency_penalty=agent_config.frequency_penalty if agent_config else None,
         prompt_pack_version=prompt_pack_version,
@@ -534,8 +635,74 @@ def result_to_packet(
         reviews=reviews,
         deliberation=deliberation_rounds,
         meta_review=meta,
-        pc_chair_review=final_review or {},
+        pc_chair_review=sanitize_final_review(final_review or {}),
         duration_seconds=result.duration_seconds,
         total_cost=result.total_cost,
         provenance_metadata=provenance,
     )
+
+
+def session_to_review_packet(session: Any) -> ReviewPacket:
+    """Build the canonical ReviewPacket for API and exporter outputs."""
+    if not session.result:
+        raise ValueError("Session has no result to export")
+
+    result = DeliberationResult.model_validate(session.result)
+
+    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+    try:
+        from .conference import load_profile
+
+        profile = load_profile(conference_slug)
+    except FileNotFoundError:
+        profile = ConferenceProfile(slug=conference_slug, name=conference_slug)
+
+    paper_title = session.config.get("metadata", {}).get("paper_title", "")
+    final_review = sanitize_final_review(session.result.get("final_review", {}))
+
+    agent_configs: dict[str, AgentConfig] = {}
+    for aid, cfg_dict in session.config.get("agents", {}).items():
+        if isinstance(cfg_dict, dict):
+            try:
+                agent_configs[aid] = AgentConfig.model_validate(cfg_dict)
+            except Exception:
+                pass
+
+    prompt_pack_version = ""
+    try:
+        from .prompts import load_prompt_pack
+
+        pack = load_prompt_pack(conference_slug)
+        prompt_pack_version = pack.get("version", "")
+    except Exception:
+        pass
+
+    packet = result_to_packet(
+        result,
+        profile,
+        paper_title,
+        final_review=final_review,
+        agent_configs=agent_configs,
+        prompt_pack_version=prompt_pack_version,
+    )
+
+    if session.knowledge_graph:
+        try:
+            from protoneo.knowledge.graph import KnowledgeGraph
+
+            pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+            packet.graph_summary = pg.summary
+            packet.graph_node_count = len(pg.nodes)
+            packet.graph_edge_count = len(pg.edges)
+
+            if packet.reviews:
+                review_dicts = [r.model_dump() for r in packet.reviews]
+                packet.graph_utilization = pg.compute_utilization(review_dicts)
+        except Exception:
+            pass
+
+    parse_provenance = session.app_data.get("parse") if session.app_data else None
+    if parse_provenance:
+        packet.provenance_metadata["parse"] = parse_provenance
+
+    return packet
