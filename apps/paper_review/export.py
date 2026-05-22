@@ -8,7 +8,7 @@ import io
 import markdown
 from weasyprint import HTML
 
-from .schemas import ReviewPacket
+from .schemas import ReviewPacket, format_review_item
 
 
 def _fmt_list(items: list, ordered: bool = False) -> str:
@@ -17,17 +17,9 @@ def _fmt_list(items: list, ordered: bool = False) -> str:
     for i, item in enumerate(items, 1):
         prefix = f"{i}." if ordered else "-"
         if isinstance(item, dict):
-            point = item.get("point", item.get("action", str(item)))
-            evidence = item.get("evidence", "")
-            severity = item.get("severity", item.get("importance", item.get("priority", "")))
-            line = f"{prefix} **{point}**"
-            if severity:
-                line += f" [{severity}]"
-            if evidence:
-                line += f"\n   _{evidence}_"
-            lines.append(line)
+            lines.append(f"{prefix} {format_review_item(item)}")
         else:
-            lines.append(f"{prefix} {item}")
+            lines.append(f"{prefix} {format_review_item(item)}")
     return "\n".join(lines)
 
 

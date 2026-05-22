@@ -152,11 +152,11 @@
             <ul class="tagged-list strengths">
               <li v-for="(s, si) in review.strengths" :key="review.reviewer_role + '-str-' + si">
                 <template v-if="typeof s === 'object'">
-                  <strong v-if="s.point">{{ s.point }}</strong>
-                  <span v-if="s.evidence" class="evidence">{{ s.evidence }}</span>
-                  <span v-if="s.importance" class="tag">{{ s.importance }}</span>
+                  <strong>{{ itemPrimary(s) }}</strong>
+                  <span v-if="itemEvidence(s)" class="evidence">{{ itemEvidence(s) }}</span>
+                  <span v-for="tag in itemTags(s)" :key="tag" :class="['tag', tagClass(tag)]">{{ tag }}</span>
                 </template>
-                <template v-else>{{ s }}</template>
+                <template v-else>{{ formatReviewItem(s) }}</template>
               </li>
             </ul>
           </div>
@@ -167,11 +167,11 @@
             <ul class="tagged-list weaknesses">
               <li v-for="(w, wi) in review.weaknesses" :key="review.reviewer_role + '-weak-' + wi">
                 <template v-if="typeof w === 'object'">
-                  <strong v-if="w.point">{{ w.point }}</strong>
-                  <span v-if="w.evidence" class="evidence">{{ w.evidence }}</span>
-                  <span v-if="w.severity" :class="['tag', w.severity]">{{ w.severity }}</span>
+                  <strong>{{ itemPrimary(w) }}</strong>
+                  <span v-if="itemEvidence(w)" class="evidence">{{ itemEvidence(w) }}</span>
+                  <span v-for="tag in itemTags(w)" :key="tag" :class="['tag', tagClass(tag)]">{{ tag }}</span>
                 </template>
-                <template v-else>{{ w }}</template>
+                <template v-else>{{ formatReviewItem(w) }}</template>
               </li>
             </ul>
           </div>
@@ -180,7 +180,9 @@
           <div v-if="review.questions_for_authors && review.questions_for_authors.length" class="review-field">
             <h4>Questions for Authors</h4>
             <ol>
-              <li v-for="(q, qi) in review.questions_for_authors" :key="review.reviewer_role + '-q-' + qi">{{ q }}</li>
+              <li v-for="(q, qi) in review.questions_for_authors" :key="review.reviewer_role + '-q-' + qi">
+                {{ formatReviewItem(q) }}
+              </li>
             </ol>
           </div>
 
@@ -195,7 +197,9 @@
             class="review-field concerns">
             <h4>Decision Risk Notes</h4>
             <ul>
-              <li v-for="(c, ci) in review.internal_committee_concerns" :key="review.reviewer_role + '-concern-' + ci">{{ c }}</li>
+              <li v-for="(c, ci) in review.internal_committee_concerns" :key="review.reviewer_role + '-concern-' + ci">
+                {{ formatReviewItem(c) }}
+              </li>
             </ul>
           </div>
 
@@ -206,7 +210,7 @@
               <span :class="['priority-tag', ra.priority || 'should']">
                 {{ ra.priority || 'should' }}
               </span>
-              <span class="revision-text">{{ ra.action || ra }}</span>
+              <span class="revision-text">{{ revisionText(ra) }}</span>
               <span v-if="ra.target_section" class="revision-target">
                 &rarr; {{ ra.target_section }}
               </span>
@@ -246,14 +250,14 @@
       <div v-if="meta.agreements && meta.agreements.length" class="meta-field">
         <h4>Points of Agreement</h4>
         <ul>
-          <li v-for="(a, ai) in meta.agreements" :key="'agree-' + ai">{{ a }}</li>
+          <li v-for="(a, ai) in meta.agreements" :key="'agree-' + ai">{{ formatReviewItem(a) }}</li>
         </ul>
       </div>
 
       <div v-if="meta.disagreements && meta.disagreements.length" class="meta-field">
         <h4>Points of Disagreement</h4>
         <div v-for="(d, di) in meta.disagreements" :key="'disagree-' + di" class="disagreement-item">
-          <strong>{{ d.issue || d }}</strong>
+          <strong>{{ itemPrimary(d) }}</strong>
           <p v-if="d.why_reviewers_disagree">{{ d.why_reviewers_disagree }}</p>
           <p v-if="d.your_resolution" class="resolution">
             Resolution: {{ d.your_resolution }}
@@ -264,7 +268,7 @@
       <div v-if="meta.decision_risk_notes && meta.decision_risk_notes.length" class="meta-field concerns">
         <h4>Decision Risk Notes</h4>
         <ul>
-          <li v-for="(n, ni) in meta.decision_risk_notes" :key="'risk-' + ni">{{ n }}</li>
+          <li v-for="(n, ni) in meta.decision_risk_notes" :key="'risk-' + ni">{{ formatReviewItem(n) }}</li>
         </ul>
       </div>
 
@@ -275,7 +279,7 @@
           <span :class="['priority-tag', item.priority || 'should']">
             {{ item.priority || 'should' }}
           </span>
-          <span class="revision-text">{{ item.action || item }}</span>
+          <span class="revision-text">{{ revisionText(item) }}</span>
           <span v-if="item.target_section" class="revision-target">
             &rarr; {{ item.target_section }}
           </span>
@@ -386,6 +390,58 @@ function scoreTier(score) {
   if (score >= 4) return 'high'
   if (score >= 3) return 'mid'
   return 'low'
+}
+
+function formatReviewItem(value) {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value !== 'object') return String(value)
+  if (Array.isArray(value)) return value.map(formatReviewItem).filter(Boolean).join('; ')
+
+  const primary = itemPrimary(value)
+  const details = []
+  if (value.evidence) details.push(`Evidence: ${formatReviewItem(value.evidence)}`)
+  if (value.target_section) details.push(`Target: ${formatReviewItem(value.target_section)}`)
+  if (value.why_it_matters) details.push(`Why it matters: ${formatReviewItem(value.why_it_matters)}`)
+  if (value.expected_review_impact) details.push(`Expected impact: ${formatReviewItem(value.expected_review_impact)}`)
+  return [primary, ...itemTags(value).map(t => `[${t}]`), ...details].filter(Boolean).join(' — ')
+}
+
+function itemPrimary(value) {
+  if (value === null || value === undefined) return ''
+  if (typeof value !== 'object') return String(value)
+  if (Array.isArray(value)) return formatReviewItem(value)
+  return value.point || value.action || value.question || value.concern ||
+    value.issue || value.claim || value.text || value.description ||
+    value.summary || value.recommendation ||
+    Object.entries(value)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '')
+      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${formatReviewItem(v)}`)
+      .join('; ')
+}
+
+function itemEvidence(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value.evidence || '')
+    : ''
+}
+
+function itemTags(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  return ['severity', 'importance', 'priority', 'fixability']
+    .filter(k => value[k])
+    .map(k => `${k.replace(/_/g, ' ')}: ${formatReviewItem(value[k])}`)
+}
+
+function tagClass(tag) {
+  return String(tag).toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+}
+
+function revisionText(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value) && value.action) {
+    return value.action
+  }
+  return formatReviewItem(value)
 }
 
 function toggleReview(idx) {

@@ -14,7 +14,7 @@ from apps.paper_review.review import (
     resolve_paper_review_model,
     session_to_review_packet,
 )
-from apps.paper_review.schemas import ReviewPacket
+from apps.paper_review.schemas import ReviewPacket, sanitize_final_review
 from protoneo.agents.base import BaseAgent
 from protoneo.agents.types import AgentOutput, Message
 from protoneo.api.pipeline_control import PipelineControl
@@ -127,6 +127,48 @@ def test_parse_final_review_sanitizes_malformed_fields_for_export():
         pc_chair_review=final_review,
     )
     assert "Final Review" in packet_to_markdown(packet)
+
+
+def test_sanitize_final_review_formats_structured_items_for_editor():
+    final_review = sanitize_final_review({
+        "strengths": [
+            {
+                "point": "Strong evaluation on current GPUs",
+                "evidence": "Section VII reports H100 and MI300 results.",
+                "importance": "high",
+            }
+        ],
+        "weaknesses": [
+            {
+                "point": "Missing artifact appendix",
+                "severity": "high",
+                "fixability": "medium",
+            }
+        ],
+        "revision_actions": [
+            {
+                "priority": "must",
+                "action": "Add artifact details",
+                "target_section": "Artifact Description",
+                "why_it_matters": "SC requires reproducibility details.",
+            }
+        ],
+    })
+
+    assert final_review["strengths"] == [
+        "Strong evaluation on current GPUs [importance: high] — Evidence: Section VII reports H100 and MI300 results."
+    ]
+    assert final_review["weaknesses"] == [
+        "Missing artifact appendix [severity: high; fixability: medium]"
+    ]
+    assert final_review["revision_actions"] == [
+        "Add artifact details [priority: must] — Target: Artifact Description Why it matters: SC requires reproducibility details."
+    ]
+    assert "[object Object]" not in "\n".join(
+        final_review["strengths"]
+        + final_review["weaknesses"]
+        + final_review["revision_actions"]
+    )
 
 
 def test_parse_final_review_strips_leaked_chain_of_thought():

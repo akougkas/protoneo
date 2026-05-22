@@ -152,13 +152,50 @@ function shortModel(m) {
   return parts[parts.length - 1].slice(0, 28)
 }
 
+function formatReviewItem(value) {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value !== 'object') return String(value)
+  if (Array.isArray(value)) return value.map(formatReviewItem).filter(Boolean).join('\n')
+
+  const primary = value.point || value.action || value.question || value.concern ||
+    value.issue || value.claim || value.text || value.description ||
+    value.summary || value.recommendation || ''
+  const tags = ['severity', 'importance', 'priority', 'fixability']
+    .filter(k => value[k])
+    .map(k => `${k.replace(/_/g, ' ')}: ${formatReviewItem(value[k])}`)
+  const details = [
+    ['evidence', 'Evidence'],
+    ['target_section', 'Target'],
+    ['why_it_matters', 'Why it matters'],
+    ['expected_review_impact', 'Expected impact'],
+    ['your_resolution', 'Resolution'],
+    ['why_reviewers_disagree', 'Why reviewers disagree'],
+  ]
+    .filter(([k]) => value[k])
+    .map(([k, label]) => `${label}: ${formatReviewItem(value[k])}`)
+
+  let text = primary || Object.entries(value)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${formatReviewItem(v)}`)
+    .join('; ')
+  if (tags.length) text += ` [${tags.join('; ')}]`
+  if (details.length) text += ` — ${details.join(' ')}`
+  return text.trim()
+}
+
+function formatEditorText(value) {
+  if (Array.isArray(value)) return value.map(formatReviewItem).filter(Boolean).join('\n')
+  return formatReviewItem(value)
+}
+
 // Initialize from prop
 function loadReview(data) {
   if (!data || typeof data !== 'object') return
   if (data.overall_merit) fields.overall_merit = { ...fields.overall_merit, ...data.overall_merit }
   if (data.reviewer_expertise) fields.reviewer_expertise = { ...fields.reviewer_expertise, ...data.reviewer_expertise }
   for (const key of Object.keys(fieldLabels)) {
-    if (data[key] !== undefined) fields[key] = data[key]
+    if (data[key] !== undefined) fields[key] = formatEditorText(data[key])
   }
 }
 loadReview(props.initialReview)

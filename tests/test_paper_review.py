@@ -382,6 +382,7 @@ class TestResultToPacket:
         meta_content = json.dumps({
             "panel_summary": "Consensus accept.",
             "final_recommendation": {"score": 4, "label": "Accept"},
+            "score_distribution": {"reviewer_1": 4, "reviewer_2": 2},
         })
 
         result = DeliberationResult(
@@ -436,6 +437,7 @@ class TestResultToPacket:
         assert packet.reviews[0].overall_merit["score"] == 4
         assert len(packet.deliberation) == 1
         assert packet.meta_review.panel_summary == "Consensus accept."
+        assert packet.meta_review.score_distribution == {"technical_1": 4}
         assert packet.duration_seconds == 42.5
 
     def test_result_to_packet_applies_prompt_pack_no_chain_guardrail(self):

@@ -777,6 +777,16 @@ def result_to_packet(
                     no_chain_of_thought=no_chain_of_thought,
                 )
 
+    review_scores = {
+        review.agent_id or review.reviewer_role: review.overall_merit.get("score")
+        for review in reviews
+        if review.overall_merit.get("score") is not None
+    }
+    if review_scores:
+        # The meta-reviewer occasionally invents reviewer_N keys. The actual
+        # individual reviews are the source of truth for score distribution.
+        meta.score_distribution = review_scores
+
     # Build packet-level provenance for reproducibility
     provenance: dict[str, Any] = {
         "prompt_pack_version": prompt_pack_version,

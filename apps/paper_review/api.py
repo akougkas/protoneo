@@ -1613,11 +1613,8 @@ async def get_review_packet(session_id: str):
     if not session.result:
         raise HTTPException(status_code=404, detail="No result available")
 
-    # Return cached packet if available
-    cached = session.app_data.get("review_packet")
-    if cached:
-        return cached
-
+    # Rebuild from the canonical session result so parser/schema hardening
+    # applies to existing sessions instead of serving stale cached packets.
     try:
         packet = session_to_review_packet(session)
     except Exception as e:

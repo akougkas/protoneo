@@ -1,5 +1,6 @@
 """Output schemas for Paper Review review packets."""
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -122,6 +123,8 @@ def _coerce_text(value: Any) -> str:
         return ""
     if isinstance(value, str):
         return value
+    if isinstance(value, (dict, list, tuple)):
+        return format_review_item(value)
     return str(value)
 
 
@@ -143,6 +146,100 @@ def _coerce_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def format_review_item(value: Any) -> str:
+    """Render a structured review item as readable author/PC text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return "; ".join(
+            text for text in (format_review_item(item) for item in value) if text
+        )
+    if not isinstance(value, dict):
+        return str(value)
+
+    primary_keys = (
+        "point",
+        "action",
+        "question",
+        "concern",
+        "issue",
+        "claim",
+        "text",
+        "description",
+        "summary",
+        "recommendation",
+    )
+    primary = next(
+        (
+            _coerce_text(value.get(key)).strip()
+            for key in primary_keys
+            if value.get(key)
+        ),
+        "",
+    )
+
+    tags = []
+    for key in ("severity", "importance", "priority", "fixability"):
+        if value.get(key):
+            label = key.replace("_", " ")
+            tags.append(f"{label}: {_coerce_text(value[key]).strip()}")
+
+    details = []
+    detail_labels = {
+        "evidence": "Evidence",
+        "target_section": "Target",
+        "why_it_matters": "Why it matters",
+        "expected_review_impact": "Expected impact",
+        "your_resolution": "Resolution",
+        "why_reviewers_disagree": "Why reviewers disagree",
+    }
+    for key, label in detail_labels.items():
+        if value.get(key):
+            details.append(f"{label}: {_coerce_text(value[key]).strip()}")
+
+    if not primary:
+        ignored = set(primary_keys) | set(detail_labels) | {
+            "severity",
+            "importance",
+            "priority",
+            "fixability",
+        }
+        primary = "; ".join(
+            f"{key.replace('_', ' ')}: {_coerce_text(val).strip()}"
+            for key, val in value.items()
+            if key not in ignored and _coerce_text(val).strip()
+        )
+
+    text = primary or "; ".join(details)
+    if tags:
+        text = f"{text} [{'; '.join(tags)}]" if text else f"[{'; '.join(tags)}]"
+    if details and primary:
+        text = f"{text} — {' '.join(details)}"
+    return text.strip()
+
+
+def _split_review_lines(value: str) -> list[str]:
+    lines = []
+    for line in value.splitlines():
+        cleaned = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return lines
+
+
+def _coerce_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _split_review_lines(value) or ([value.strip()] if value.strip() else [])
+    texts = [format_review_item(item) for item in _coerce_list(value)]
+    return [text for text in texts if text]
 
 
 def _coerce_string_map(value: Any, default: dict[str, Any]) -> dict[str, str]:
@@ -229,19 +326,19 @@ def sanitize_final_review(payload: Any, fallback_comments: str = "") -> dict[str
         "paper_summary": _coerce_text(
             source.get("paper_summary", defaults["paper_summary"])
         ),
-        "strengths": _coerce_list(source.get("strengths")),
-        "weaknesses": _coerce_list(source.get("weaknesses")),
+        "strengths": _coerce_text_list(source.get("strengths")),
+        "weaknesses": _coerce_text_list(source.get("weaknesses")),
         "comments_for_authors": _coerce_text(
             source.get("comments_for_authors") or fallback_comments
         ),
         "comments_for_pc": _coerce_text(source.get("comments_for_pc")),
-        "internal_committee_concerns": _coerce_list(
+        "internal_committee_concerns": _coerce_text_list(
             source.get("internal_committee_concerns")
         ),
-        "questions_for_authors": [
-            _coerce_text(v) for v in _coerce_list(source.get("questions_for_authors"))
-        ],
-        "revision_actions": _coerce_list(source.get("revision_actions")),
+        "questions_for_authors": _coerce_text_list(
+            source.get("questions_for_authors")
+        ),
+        "revision_actions": _coerce_text_list(source.get("revision_actions")),
         "submission_readiness": _coerce_string_map(
             source.get("submission_readiness"),
             defaults["submission_readiness"],
