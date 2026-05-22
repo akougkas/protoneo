@@ -34,12 +34,12 @@
         :key="sess.session_id"
         :class="['paper-card', sess.status]"
       >
-        <div class="pc-header">
-          <div class="pc-header-left">
-            <span class="pc-id">{{ sess.session_id.slice(0, 8) }}</span>
-            <span class="pc-title">{{ sess.paper_title || sess.filename || 'Untitled' }}</span>
+        <div class="card-header">
+          <div class="card-header-left">
+            <span class="card-id">{{ sess.session_id.slice(0, 8) }}</span>
+            <span class="card-title">{{ sess.paper_title || sess.filename || 'Untitled' }}</span>
           </div>
-          <span :class="['pc-status', sess.status]">{{ statusLabel(sess) }}</span>
+          <span :class="['card-status', sess.status]">{{ statusLabel(sess) }}</span>
         </div>
 
         <!-- Pipeline steps row -->
@@ -56,36 +56,36 @@
         </div>
 
         <!-- Stats row (when graph exists) -->
-        <div v-if="sess.node_count" class="pc-stats">
+        <div v-if="sess.node_count" class="card-stats">
           <span>{{ sess.node_count }} nodes</span>
           <span>{{ sess.edge_count }} edges</span>
         </div>
 
         <!-- Actions -->
-        <div class="pc-actions">
+        <div class="card-actions">
           <button
             v-if="sess.status === 'running' || sess.status === 'created'"
-            class="pc-btn stop-btn"
+            class="card-btn stop-btn"
             @click="doCancel(sess.session_id)"
           >Stop</button>
           <button
-            class="pc-btn view-btn"
+            class="card-btn view-btn"
             :disabled="sess.status === 'created'"
             @click="openSession(sess.session_id)"
           >View Graph</button>
           <button
-            class="pc-btn review-btn"
+            class="card-btn review-btn"
             :disabled="sess.status !== 'completed'"
             @click="showReviewConfig(sess)"
           >Launch Review</button>
           <button
             v-if="sess.status === 'failed' || sess.status === 'stopped'"
-            class="pc-btn retry-btn"
+            class="card-btn retry-btn"
             @click="doRetrySession(sess.session_id)"
           >Retry</button>
           <button
             v-if="sess.status === 'completed'"
-            class="pc-btn export-btn"
+            class="card-btn export-btn"
             @click="doExportGraph(sess.session_id)"
           >Export</button>
         </div>
@@ -116,8 +116,8 @@
         <textarea v-model="reviewInstructions" class="modal-textarea" rows="3" placeholder="Additional reviewer instructions..."></textarea>
 
         <div class="modal-actions">
-          <button class="pc-btn" @click="reviewModal = null">Cancel</button>
-          <button class="pc-btn review-btn" @click="doLaunchReview" :disabled="reviewLaunching">
+          <button class="card-btn" @click="reviewModal = null">Cancel</button>
+          <button class="card-btn review-btn" @click="doLaunchReview" :disabled="reviewLaunching">
             {{ reviewLaunching ? 'Launching...' : 'Start Review' }}
           </button>
         </div>
@@ -289,7 +289,7 @@ function handleWsEvent(sid, msg) {
 }
 
 function openSession(sid) {
-  router.push({ name: 'PanelReview', params: { sessionId: sid } })
+  router.push({ name: 'Session', params: { sessionId: sid } })
 }
 
 function showReviewConfig(sess) {
@@ -315,8 +315,8 @@ async function doLaunchReview() {
       conference: reviewConference.value,
       user_instructions: reviewInstructions.value,
     }
-    await kernel.post(`/api/sessions/${reviewModal.value.session_id}/launch-review`, body)
-    router.push({ name: 'PanelReview', params: { sessionId: reviewModal.value.session_id } })
+    await kernel.post(`/api/apps/paper_review/sessions/${reviewModal.value.session_id}/launch-review`, body)
+    router.push({ name: 'Session', params: { sessionId: reviewModal.value.session_id } })
   } catch (e) {
     error.value = e.response?.data?.detail || e.message
   } finally {
@@ -484,28 +484,28 @@ onUnmounted(() => {
 .paper-card.stopped { border-left: 3px solid #bbb; }
 .paper-card.created { border-left: 3px solid #90caf9; }
 
-.pc-header {
+.card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 10px;
 }
 
-.pc-header-left {
+.card-header-left {
   display: flex;
   align-items: baseline;
   gap: 10px;
   min-width: 0;
 }
 
-.pc-id {
+.card-id {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   color: #aaa;
   flex-shrink: 0;
 }
 
-.pc-title {
+.card-title {
   font-size: 14px;
   font-weight: 600;
   color: #111;
@@ -514,7 +514,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-.pc-status {
+.card-status {
   font-size: 10px;
   font-weight: 700;
   padding: 1px 8px;
@@ -524,11 +524,11 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.pc-status.completed { background: #e8f5e9; color: #2a2; }
-.pc-status.running { background: #fff8e1; color: #a07000; }
-.pc-status.failed { background: #ffebee; color: #900; }
-.pc-status.created { background: #e3f2fd; color: #1565c0; }
-.pc-status.stopped { background: #f5f5f5; color: #888; }
+.card-status.completed { background: #e8f5e9; color: #2a2; }
+.card-status.running { background: #fff8e1; color: #a07000; }
+.card-status.failed { background: #ffebee; color: #900; }
+.card-status.created { background: #e3f2fd; color: #1565c0; }
+.card-status.stopped { background: #f5f5f5; color: #888; }
 
 /* Pipeline steps visualization */
 .pipeline-steps {
@@ -586,7 +586,7 @@ onUnmounted(() => {
 .step-pip.complete .step-label { color: #4a4; }
 .step-pip.running .step-label { color: #a07000; }
 
-.pc-stats {
+.card-stats {
   display: flex;
   gap: 12px;
   font-size: 12px;
@@ -595,12 +595,12 @@ onUnmounted(() => {
   font-family: 'JetBrains Mono', monospace;
 }
 
-.pc-actions {
+.card-actions {
   display: flex;
   gap: 8px;
 }
 
-.pc-btn {
+.card-btn {
   font-size: 11px;
   font-weight: 600;
   padding: 5px 12px;
@@ -612,8 +612,8 @@ onUnmounted(() => {
   transition: all 0.15s;
 }
 
-.pc-btn:hover:not(:disabled) { border-color: #000; color: #000; }
-.pc-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.card-btn:hover:not(:disabled) { border-color: #000; color: #000; }
+.card-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .review-btn { border-color: #000; background: #000; color: #fff; }
 .review-btn:hover:not(:disabled) { background: #222; }

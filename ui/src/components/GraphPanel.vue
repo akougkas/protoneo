@@ -353,6 +353,7 @@ const closeDetailPanel = () => {
 let currentSimulation = null
 let linkLabelsRef = null
 let linkLabelBgRef = null
+let labelBboxCache = null
 
 const renderGraph = () => {
   if (!graphSvg.value || !props.graphData) return
@@ -497,6 +498,7 @@ const renderGraph = () => {
 
   // Simulation - Dynamically adjust node spacing based on number of edges
   const simulation = d3.forceSimulation(nodes)
+    .alphaDecay(0.03)
     .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
       // Dynamically adjust distance based on number of edges between this pair of nodes
       // Base distance 150, add 40 for each additional edge
@@ -674,6 +676,14 @@ const renderGraph = () => {
   linkLabelsRef = linkLabels
   linkLabelBgRef = linkLabelBg
 
+  // Cache label bboxes once after initial render to avoid expensive
+  // getBBox() calls on every simulation tick
+  labelBboxCache = new Map()
+  linkLabels.each(function(d, i) {
+    const bbox = this.getBBox()
+    labelBboxCache.set(i, { width: bbox.width, height: bbox.height })
+  })
+
   // Nodes group
   const nodeGroup = g.append('g').attr('class', 'nodes')
   
@@ -792,11 +802,11 @@ const renderGraph = () => {
         .attr('transform', '') // Remove rotation, keep horizontal
     })
     
-    // Update edge label background
+    // Update edge label background using cached bbox dimensions
     linkLabelBg.each(function(d, i) {
       const mid = getLinkMidpoint(d)
-      const textEl = linkLabels.nodes()[i]
-      const bbox = textEl.getBBox()
+      const bbox = labelBboxCache.get(i)
+      if (!bbox) return
       d3.select(this)
         .attr('x', mid.x - bbox.width / 2 - 4)
         .attr('y', mid.y - bbox.height / 2 - 2)
@@ -824,9 +834,15 @@ const renderGraph = () => {
   })
 }
 
-watch(() => props.graphData, () => {
+const graphVersion = computed(() => {
+  const d = props.graphData
+  if (!d) return ''
+  return `${d.nodes?.length || 0}-${d.edges?.length || 0}`
+})
+
+watch(graphVersion, () => {
   nextTick(renderGraph)
-}, { deep: true })
+})
 
 // Watch edge label visibility toggle
 watch(showEdgeLabels, (newVal) => {

@@ -1,25 +1,25 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import PanelHome from '../views/PanelHome.vue'
-import PanelReviewView from '../views/PanelReviewView.vue'
-import BatchDashboard from '../views/BatchDashboard.vue'
+import Home from '../views/Home.vue'
+import SessionView from '../views/SessionView.vue'
+import BatchView from '../views/BatchView.vue'
 import SettingsView from '../views/SettingsView.vue'
 
 const routes = [
   {
     path: '/',
-    name: 'Panel',
-    component: PanelHome
+    name: 'Home',
+    component: Home
   },
   {
-    path: '/review/:sessionId',
-    name: 'PanelReview',
-    component: PanelReviewView,
+    path: '/session/:sessionId',
+    name: 'Session',
+    component: SessionView,
     props: true
   },
   {
     path: '/batch/:batchId',
-    name: 'BatchDashboard',
-    component: BatchDashboard,
+    name: 'Batch',
+    component: BatchView,
     props: true
   },
   {

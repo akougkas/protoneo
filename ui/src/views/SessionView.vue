@@ -4,7 +4,7 @@
     <header class="app-header">
       <div class="header-left">
         <div class="brand" @click="goHome">PROTONEO</div>
-        <span class="product-tag">PC Panel</span>
+        <span class="product-tag">{{ appDisplayName }}</span>
         <span v-if="paperTitle" class="paper-title-header" :title="paperTitle">{{ paperTitle.length > 50 ? paperTitle.slice(0, 50) + '...' : paperTitle }}</span>
       </div>
 
@@ -65,7 +65,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, inject, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import SessionPanel from '../components/SessionPanel.vue'
@@ -73,6 +73,8 @@ import { getSession, getSessionGraph, extractGraph, getGraphAtStep } from '../ap
 
 const route = useRoute()
 const router = useRouter()
+const activeApp = inject('activeApp', ref(null))
+const appDisplayName = computed(() => activeApp.value?.display_name || 'Paper Review')
 
 const sessionId = computed(() => route.params.sessionId)
 const conference = computed(() => route.query.conference || 'hpdc26')
@@ -141,7 +143,7 @@ const toggleMaximize = (target) => {
 }
 
 function goHome() {
-  router.push({ name: 'Panel' })
+  router.push({ name: 'Home' })
 }
 
 function onStageChanged({ stage, step }) {
@@ -270,28 +272,27 @@ onUnmounted(() => {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #FFF;
+  background: var(--pn-bg);
   overflow: hidden;
-  font-family: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
 }
 
-/* Header */
+/* ── Header ── */
 .app-header {
-  height: 56px;
-  border-bottom: 1px solid #EAEAEA;
+  height: 48px;
+  border-bottom: 1px solid var(--pn-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 24px;
-  background: #FFF;
+  padding: 0 var(--pn-space-5);
+  background: var(--pn-surface);
   z-index: 100;
   position: relative;
 }
 
 .header-left {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: var(--pn-space-3);
 }
 
 .header-center {
@@ -301,96 +302,107 @@ onUnmounted(() => {
 }
 
 .brand {
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 800;
-  font-size: 18px;
-  letter-spacing: 1px;
+  font-family: var(--pn-mono);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.18em;
   cursor: pointer;
+  color: var(--pn-text);
+  transition: color var(--pn-duration) var(--pn-ease);
 }
+.brand:hover { color: var(--pn-accent); }
 
 .product-tag {
-  font-size: 11px;
-  font-weight: 600;
-  background: #000;
-  color: #fff;
-  padding: 2px 8px;
-  border-radius: 3px;
-  letter-spacing: 0.5px;
+  font-family: var(--pn-serif);
+  font-size: 12px;
+  font-weight: 500;
+  font-style: italic;
+  color: var(--pn-text-secondary);
 }
 
 .view-switcher {
   display: flex;
-  background: #F5F5F5;
-  padding: 3px;
-  border-radius: 6px;
-  gap: 3px;
+  border: 1px solid var(--pn-border);
+  gap: 0;
 }
 
 .switch-btn {
   border: none;
+  border-right: 1px solid var(--pn-border);
   background: transparent;
-  padding: 5px 14px;
-  font-size: 12px;
+  padding: var(--pn-space-1) var(--pn-space-4);
+  font-family: var(--pn-mono);
+  font-size: 10px;
   font-weight: 600;
-  color: #666;
-  border-radius: 4px;
+  color: var(--pn-text-muted);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all var(--pn-duration) var(--pn-ease);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
+.switch-btn:last-child { border-right: none; }
 
 .switch-btn.active {
-  background: #FFF;
-  color: #000;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  background: var(--pn-text);
+  color: var(--pn-bg);
+}
+
+.switch-btn:hover:not(.active) {
+  background: var(--pn-bg);
+  color: var(--pn-text);
 }
 
 .header-right {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: var(--pn-space-3);
 }
 
 .session-phase {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--pn-space-2);
 }
 
 .phase-label {
-  font-size: 13px;
+  font-family: var(--pn-mono);
+  font-size: 11px;
   font-weight: 600;
-  color: #333;
+  color: var(--pn-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .step-divider {
   width: 1px;
   height: 14px;
-  background-color: #E0E0E0;
+  background-color: var(--pn-border);
 }
 
 .status-indicator {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: #666;
+  gap: var(--pn-space-2);
+  font-family: var(--pn-mono);
+  font-size: 10px;
+  color: var(--pn-text-muted);
   font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: #CCC;
+  background: var(--pn-border-strong);
 }
 
-.status-indicator.processing .dot { background: #FF5722; animation: pulse 1s infinite; }
-.status-indicator.completed .dot { background: #4CAF50; }
-.status-indicator.error .dot { background: #F44336; }
+.status-indicator.processing .dot { background: var(--pn-warn); animation: pn-pulse 1.8s ease-in-out infinite; }
+.status-indicator.completed .dot { background: var(--pn-ok); }
+.status-indicator.error .dot { background: var(--pn-err); }
 
-@keyframes pulse { 50% { opacity: 0.5; } }
-
-/* Content */
+/* ── Content ── */
 .content-area {
   flex: 1;
   display: flex;
@@ -401,23 +413,25 @@ onUnmounted(() => {
 .panel-wrapper {
   height: 100%;
   overflow: hidden;
-  transition: width 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease, transform 0.3s ease;
+  transition: width 0.4s var(--pn-ease), opacity 0.3s var(--pn-ease), transform 0.3s var(--pn-ease);
   will-change: width, opacity, transform;
 }
 
 .panel-wrapper.left {
-  border-right: 1px solid #EAEAEA;
+  border-right: 1px solid var(--pn-border);
 }
 
 .paper-title-header {
+  font-family: var(--pn-serif);
   font-size: 12px;
-  color: #666;
+  font-style: italic;
+  color: var(--pn-text-secondary);
   max-width: 350px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-left: 8px;
-  padding-left: 8px;
-  border-left: 1px solid #ddd;
+  margin-left: var(--pn-space-2);
+  padding-left: var(--pn-space-3);
+  border-left: 1px solid var(--pn-border);
 }
 </style>

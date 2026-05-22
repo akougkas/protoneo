@@ -244,7 +244,7 @@ def build_deliberation_config(
     reviewer_ids: list[str] | None = None,
     max_rounds: int = 2,
 ) -> DeliberationConfig:
-    """Build the standard 3-phase deliberation config for PC Panel.
+    """Build the standard 3-phase deliberation config for Paper Review.
 
     When reviewer_ids is None, falls back to HPDC26 defaults for backward
     compatibility. Callers should pass the actual reviewer IDs from the profile.

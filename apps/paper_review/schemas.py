@@ -1,4 +1,4 @@
-"""Output schemas for PC Panel review packets."""
+"""Output schemas for Paper Review review packets."""
 
 from datetime import datetime
 from typing import Any

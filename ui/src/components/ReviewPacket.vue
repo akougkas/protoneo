@@ -111,7 +111,7 @@
     <!-- Individual Reviews -->
     <div class="reviews-section">
       <h3>Individual Reviews</h3>
-      <div v-for="(review, idx) in packet.reviews" :key="idx" class="review-card">
+      <div v-for="(review, idx) in packet.reviews" :key="review.reviewer_role || review.agent_id || idx" class="review-card">
         <div class="review-header" @click="toggleReview(idx)">
           <div class="review-role">{{ review.reviewer_role }}</div>
           <div class="review-header-right">
@@ -150,7 +150,7 @@
           <div v-if="review.strengths && review.strengths.length" class="review-field">
             <h4>Strengths</h4>
             <ul class="tagged-list strengths">
-              <li v-for="(s, si) in review.strengths" :key="si">
+              <li v-for="(s, si) in review.strengths" :key="review.reviewer_role + '-str-' + si">
                 <template v-if="typeof s === 'object'">
                   <strong v-if="s.point">{{ s.point }}</strong>
                   <span v-if="s.evidence" class="evidence">{{ s.evidence }}</span>
@@ -165,7 +165,7 @@
           <div v-if="review.weaknesses && review.weaknesses.length" class="review-field">
             <h4>Weaknesses</h4>
             <ul class="tagged-list weaknesses">
-              <li v-for="(w, wi) in review.weaknesses" :key="wi">
+              <li v-for="(w, wi) in review.weaknesses" :key="review.reviewer_role + '-weak-' + wi">
                 <template v-if="typeof w === 'object'">
                   <strong v-if="w.point">{{ w.point }}</strong>
                   <span v-if="w.evidence" class="evidence">{{ w.evidence }}</span>
@@ -180,7 +180,7 @@
           <div v-if="review.questions_for_authors && review.questions_for_authors.length" class="review-field">
             <h4>Questions for Authors</h4>
             <ol>
-              <li v-for="(q, qi) in review.questions_for_authors" :key="qi">{{ q }}</li>
+              <li v-for="(q, qi) in review.questions_for_authors" :key="review.reviewer_role + '-q-' + qi">{{ q }}</li>
             </ol>
           </div>
 
@@ -195,14 +195,14 @@
             class="review-field concerns">
             <h4>Decision Risk Notes</h4>
             <ul>
-              <li v-for="(c, ci) in review.internal_committee_concerns" :key="ci">{{ c }}</li>
+              <li v-for="(c, ci) in review.internal_committee_concerns" :key="review.reviewer_role + '-concern-' + ci">{{ c }}</li>
             </ul>
           </div>
 
           <!-- Revision Actions -->
           <div v-if="review.revision_actions && review.revision_actions.length" class="review-field">
             <h4>Revision Actions</h4>
-            <div v-for="(ra, ri) in review.revision_actions" :key="ri" class="revision-item">
+            <div v-for="(ra, ri) in review.revision_actions" :key="review.reviewer_role + '-rev-' + ri" class="revision-item">
               <span :class="['priority-tag', ra.priority || 'should']">
                 {{ ra.priority || 'should' }}
               </span>
@@ -231,7 +231,7 @@
       <div v-if="showDelib">
         <div v-for="round in packet.deliberation" :key="round.round_number" class="delib-round">
           <div class="round-label">Round {{ round.round_number }}</div>
-          <div v-for="(entry, ei) in round.entries" :key="ei" class="delib-entry">
+          <div v-for="(entry, ei) in round.entries" :key="round.round_number + '-' + ei" class="delib-entry">
             <div class="delib-role">{{ entry.role }}</div>
             <div class="delib-content" v-html="md(truncate(entry.content, 500))"></div>
           </div>
@@ -246,13 +246,13 @@
       <div v-if="meta.agreements && meta.agreements.length" class="meta-field">
         <h4>Points of Agreement</h4>
         <ul>
-          <li v-for="(a, ai) in meta.agreements" :key="ai">{{ a }}</li>
+          <li v-for="(a, ai) in meta.agreements" :key="'agree-' + ai">{{ a }}</li>
         </ul>
       </div>
 
       <div v-if="meta.disagreements && meta.disagreements.length" class="meta-field">
         <h4>Points of Disagreement</h4>
-        <div v-for="(d, di) in meta.disagreements" :key="di" class="disagreement-item">
+        <div v-for="(d, di) in meta.disagreements" :key="'disagree-' + di" class="disagreement-item">
           <strong>{{ d.issue || d }}</strong>
           <p v-if="d.why_reviewers_disagree">{{ d.why_reviewers_disagree }}</p>
           <p v-if="d.your_resolution" class="resolution">
@@ -264,14 +264,14 @@
       <div v-if="meta.decision_risk_notes && meta.decision_risk_notes.length" class="meta-field concerns">
         <h4>Decision Risk Notes</h4>
         <ul>
-          <li v-for="(n, ni) in meta.decision_risk_notes" :key="ni">{{ n }}</li>
+          <li v-for="(n, ni) in meta.decision_risk_notes" :key="'risk-' + ni">{{ n }}</li>
         </ul>
       </div>
 
       <div v-if="meta.prioritized_revision_plan && meta.prioritized_revision_plan.length"
         class="meta-field revision-plan">
         <h4>Prioritized Revision Plan</h4>
-        <div v-for="(item, ii) in meta.prioritized_revision_plan" :key="ii" class="revision-item">
+        <div v-for="(item, ii) in meta.prioritized_revision_plan" :key="'revplan-' + ii" class="revision-item">
           <span :class="['priority-tag', item.priority || 'should']">
             {{ item.priority || 'should' }}
           </span>
@@ -298,20 +298,10 @@
     <div class="export-section">
       <h3 class="export-heading">Export</h3>
       <div class="export-grid">
-        <div class="export-card" @click="exportJSON">
-          <div class="export-icon">{ }</div>
-          <div class="export-label">Full Packet</div>
-          <div class="export-format">JSON</div>
-        </div>
-        <div class="export-card" @click="exportMarkdown">
-          <div class="export-icon">MD</div>
-          <div class="export-label">Full Packet</div>
-          <div class="export-format">Markdown</div>
-        </div>
-        <div class="export-card" @click="exportPDF">
-          <div class="export-icon">PDF</div>
-          <div class="export-label">Full Packet</div>
-          <div class="export-format">PDF</div>
+        <div v-for="fmt in exportCards" :key="fmt.format_name" class="export-card" @click="doExport(fmt.format_name)">
+          <div class="export-icon">{{ fmt.icon }}</div>
+          <div class="export-label">{{ fmt.label }}</div>
+          <div class="export-format">{{ fmt.ext }}</div>
         </div>
         <div class="export-card" @click="exportGraphJSON">
           <div class="export-icon">KG</div>
@@ -324,11 +314,14 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import { getReviewPacketMd, getReviewPacketPdf, exportGraph } from '../api/kernel.js'
+import { ref, computed, inject, onMounted } from 'vue'
+import { getReviewPacketMd, getReviewPacketPdf, exportGraph, getExportFormats, exportSession } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 
 const md = renderMarkdown
+
+const activeApp = inject('activeApp', ref(null))
+const scoreFields = computed(() => activeApp.value?.score_fields || [])
 
 const props = defineProps({
   packet: { type: Object, required: true },
@@ -338,6 +331,16 @@ const expandedReviews = ref({})
 const showGraphCtx = ref(false)
 const showUtilization = ref(false)
 const showDelib = ref(false)
+const availableFormats = ref([])
+
+onMounted(async () => {
+  try {
+    const res = await getExportFormats()
+    availableFormats.value = res.data.formats || []
+  } catch (e) {
+    console.warn('Failed to load export formats:', e)
+  }
+})
 
 // Expand the first review by default
 if (props.packet.reviews?.length > 0) {
@@ -372,8 +375,11 @@ const hasMetaDetail = computed(() => {
 })
 
 function meritLabel(score) {
-  const labels = { 1: 'Reject', 2: 'Weak reject', 3: 'Weak accept', 4: 'Accept', 5: 'Strong accept' }
-  return labels[score] || ''
+  // Use score_fields from manifest if available
+  const sf = scoreFields.value.find(f => f.name === 'overall_merit')
+  if (sf && sf.labels && sf.labels[score]) return sf.labels[score]
+  const defaults = { 1: 'Reject', 2: 'Weak reject', 3: 'Weak accept', 4: 'Accept', 5: 'Strong accept' }
+  return defaults[score] || ''
 }
 
 function scoreTier(score) {
@@ -395,41 +401,51 @@ function formatReadiness(status) {
   return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
-function exportJSON() {
-  const blob = new Blob([JSON.stringify(props.packet, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `review-packet-${props.packet.session_id || 'export'}.json`
-  a.click()
-  URL.revokeObjectURL(url)
+const FORMAT_ICONS = {
+  json: '{ }', markdown: 'MD', 'review-markdown': 'MD', pdf: 'PDF', 'review-pdf': 'PDF', latex: 'TEX',
 }
 
-async function exportMarkdown() {
-  try {
-    const res = await getReviewPacketMd(props.packet.session_id)
-    const url = URL.createObjectURL(res.data)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `review-packet-${props.packet.session_id || 'export'}.md`
-    a.click()
-    URL.revokeObjectURL(url)
-  } catch (e) {
-    console.error('Failed to export markdown:', e)
+const exportCards = computed(() => {
+  if (availableFormats.value.length > 0) {
+    return availableFormats.value.map(f => ({
+      format_name: f.format_name,
+      icon: FORMAT_ICONS[f.format_name] || f.file_extension.replace('.', '').toUpperCase(),
+      label: f.format_name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+      ext: f.file_extension.replace('.', '').toUpperCase(),
+    }))
   }
-}
+  // Fallback if endpoint not available
+  return [
+    { format_name: 'json', icon: '{ }', label: 'Full Packet', ext: 'JSON' },
+    { format_name: 'review-markdown', icon: 'MD', label: 'Full Packet', ext: 'MD' },
+    { format_name: 'review-pdf', icon: 'PDF', label: 'Full Packet', ext: 'PDF' },
+  ]
+})
 
-async function exportPDF() {
-  try {
-    const res = await getReviewPacketPdf(props.packet.session_id)
-    const url = URL.createObjectURL(res.data)
+async function doExport(formatName) {
+  const sid = props.packet.session_id || 'export'
+  if (formatName === 'json') {
+    const blob = new Blob([JSON.stringify(props.packet, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `review-packet-${props.packet.session_id || 'export'}.pdf`
+    a.download = `review-packet-${sid}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    return
+  }
+  try {
+    const res = await exportSession(sid, formatName)
+    const url = URL.createObjectURL(res.data)
+    const fmt = availableFormats.value.find(f => f.format_name === formatName)
+    const ext = fmt ? fmt.file_extension : '.bin'
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `review-packet-${sid}${ext}`
     a.click()
     URL.revokeObjectURL(url)
   } catch (e) {
-    console.error('Failed to export PDF:', e)
+    console.error(`Failed to export ${formatName}:`, e)
   }
 }
 
@@ -733,16 +749,16 @@ async function exportGraphJSON() {
 
 /* Rendered markdown */
 .review-body-md h2, .review-body-md h3, .review-body-md h4,
-.pc-chair-review-content h2, .pc-chair-review-content h3, .pc-chair-review-content h4 {
+.card-chair-review-content h2, .card-chair-review-content h3, .card-chair-review-content h4 {
   font-size: 14px; font-weight: 600; margin: 16px 0 8px; color: #222;
 }
-.review-body-md strong, .pc-chair-review-content strong { font-weight: 600; }
-.review-body-md code, .pc-chair-review-content code {
+.review-body-md strong, .card-chair-review-content strong { font-weight: 600; }
+.review-body-md code, .card-chair-review-content code {
   font-family: 'JetBrains Mono', monospace; font-size: 12px;
   background: #f4f4f4; padding: 1px 4px; border-radius: 2px;
 }
-.review-body-md li, .pc-chair-review-content li { margin-bottom: 4px; }
-.review-body-md p, .pc-chair-review-content p { margin: 0 0 8px; }
+.review-body-md li, .card-chair-review-content li { margin-bottom: 4px; }
+.review-body-md p, .card-chair-review-content p { margin: 0 0 8px; }
 .md-table { border-collapse: collapse; font-size: 12px; margin: 8px 0; width: 100%; }
 .md-table td { border: 1px solid #ddd; padding: 4px 8px; }
 .md-table tr:first-child td { font-weight: 600; background: #f8f8f8; }

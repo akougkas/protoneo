@@ -62,133 +62,120 @@ const streamTail = computed(() => {
 
 <style scoped>
 .agent-card {
-  border: 1px solid #e0e0e0;
-  border-radius: 5px;
-  padding: 14px 16px;
-  transition: border-color 0.2s, background 0.2s;
+  border: 1px solid var(--pn-border);
+  padding: var(--pn-space-3) var(--pn-space-4);
+  transition: all var(--pn-duration) var(--pn-ease);
+  position: relative;
+  background: var(--pn-surface);
+}
+.agent-card::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 2px;
+  background: var(--pn-border);
+  transition: background var(--pn-duration) var(--pn-ease);
 }
 
-.agent-card.running {
-  border-color: #e8a500;
-  background: #fffdf5;
-}
+.agent-card.running { border-color: var(--pn-warn); }
+.agent-card.running::before { background: var(--pn-warn); }
 
-.agent-card.done {
-  border-color: #4a4;
-  background: #f8fcf8;
-}
+.agent-card.done { border-color: var(--pn-ok); }
+.agent-card.done::before { background: var(--pn-ok); }
 
-.agent-card.error {
-  border-color: #c44;
-  background: #fff5f5;
-}
+.agent-card.error { border-color: var(--pn-err); }
+.agent-card.error::before { background: var(--pn-err); }
 
 .card-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: var(--pn-space-2);
+  margin-bottom: var(--pn-space-1);
 }
 
 .agent-dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-
-.agent-dot.waiting { background: #ccc; }
-.agent-dot.running {
-  background: #e8a500;
-  animation: pulse 1.5s infinite;
-}
-.agent-dot.done { background: #4a4; }
-.agent-dot.error { background: #c44; }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
+.agent-dot.waiting { background: var(--pn-border-strong); }
+.agent-dot.running { background: var(--pn-warn); animation: pn-pulse 1.8s ease-in-out infinite; }
+.agent-dot.done { background: var(--pn-ok); }
+.agent-dot.error { background: var(--pn-err); }
 
 .agent-role {
-  font-size: 13px;
-  font-weight: 600;
+  font-family: var(--pn-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .stream-counter {
   margin-left: auto;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: #e8a500;
-  animation: pulse 1.5s infinite;
+  font-size: 9px;
+  color: var(--pn-warn);
+  animation: pn-pulse 1.8s ease-in-out infinite;
+  letter-spacing: 0.02em;
 }
 
 .agent-model {
-  font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
-  color: #888;
-  margin-bottom: 4px;
+  color: var(--pn-text-muted);
+  margin-bottom: var(--pn-space-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agent-metrics {
-  font-size: 12px;
-  color: #666;
+  font-size: 11px;
+  color: var(--pn-text-secondary);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--pn-space-2);
   flex-wrap: wrap;
 }
 
 .metric-label { font-weight: 500; }
-
-.metric.mono {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: #999;
-}
-
-.metric.dim { color: #bbb; }
+.metric.mono { font-size: 10px; color: var(--pn-text-muted); }
+.metric.dim { color: var(--pn-text-ghost); }
 
 .stream-preview {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #f0e8c8;
+  margin-top: var(--pn-space-2);
+  padding-top: var(--pn-space-2);
+  border-top: 1px solid var(--pn-border);
 }
 
 .stream-text {
-  font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   line-height: 1.5;
-  color: #555;
+  color: var(--pn-text-secondary);
   max-height: 80px;
   overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
-  transition: max-height 0.2s;
+  transition: max-height var(--pn-duration) var(--pn-ease);
 }
-
 .stream-text.expanded {
   max-height: 400px;
   overflow-y: auto;
 }
 
 .expand-toggle {
-  margin-top: 4px;
-  font-size: 10px;
+  margin-top: var(--pn-space-1);
+  font-size: 9px;
   font-weight: 600;
-  color: #888;
+  color: var(--pn-text-muted);
   background: none;
   border: none;
   cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 2px;
+  padding: 1px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
-
 .expand-toggle:hover {
-  color: #000;
-  background: #f0f0f0;
+  color: var(--pn-text);
 }
 </style>
