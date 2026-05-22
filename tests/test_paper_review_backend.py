@@ -5,9 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from apps.paper_review import api
+from apps.paper_review import pipeline as review_pipeline
 from apps.paper_review.conference import ConferenceProfile
 from apps.paper_review.export import packet_to_markdown
-from apps.paper_review.pipeline import _parse_final_review
+from apps.paper_review.pipeline import _parse_final_review, _run_review_stage
 from apps.paper_review.review import (
     parse_review_output,
     resolve_paper_review_model,
@@ -16,14 +17,16 @@ from apps.paper_review.review import (
 from apps.paper_review.schemas import ReviewPacket
 from protoneo.agents.base import BaseAgent
 from protoneo.agents.types import AgentOutput, Message
-from protoneo.config.schema import AgentConfig
+from protoneo.api.pipeline_control import PipelineControl
+from protoneo.config.schema import AgentConfig, DeliberationConfig
 from protoneo.deliberation.session import (
     SessionContext,
     SessionStatus,
     StageCheckpoint,
     StepState,
 )
-from protoneo.deliberation.types import DeliberationResult
+from protoneo.deliberation.types import DeliberationResult, PhaseResult
+from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.llm.settings import LocalEndpoint, ModelPreset, ProtoNeoSettings
 
 
@@ -519,6 +522,73 @@ def test_session_to_review_packet_includes_parse_provenance():
     assert packet.pc_chair_review["overall_merit"]["label"] == "borderline"
     assert packet.provenance_metadata["parse"]["parser"] == "docling"
     assert packet.provenance_metadata["parse"]["figure_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_review_stage_uses_session_conference_for_guardrails(monkeypatch):
+    session = SimpleNamespace(
+        session_id="s1",
+        result=None,
+        status=SessionStatus.RUNNING,
+        config={"metadata": {"conference": "hpdc26"}},
+        checkpoints=[],
+        last_checkpoint="",
+    )
+    manager = FakeSessionManager(session)
+
+    class FakeEngine:
+        async def run(self, **kwargs):
+            return DeliberationResult(
+                session_id="s1",
+                phases=[
+                    PhaseResult(
+                        phase_name="independent_review",
+                        mode="parallel",
+                        outputs=[
+                            AgentOutput(
+                                agent_id="technical_1",
+                                agent_role="Technical Reviewer",
+                                content=(
+                                    "Reasoning: private notes.\n"
+                                    '{"summary": "ok", "strengths": ["VisionHPC result is strong"], '
+                                    '"weaknesses": [], "questions_for_authors": []}'
+                                ),
+                                metadata={},
+                            )
+                        ],
+                    )
+                ],
+            )
+
+    async def no_finalize(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(review_pipeline, "get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(review_pipeline, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(review_pipeline, "_finalize_unified_synthesis", no_finalize)
+
+    graph = KnowledgeGraph()
+    graph.add_node("Paper", "Paper", node_id="paper-root")
+    graph.add_node("VisionHPC", "Method")
+
+    bus = SimpleNamespace(events=[])
+    bus.emit = lambda event, data: bus.events.append((event, data))
+
+    result = await _run_review_stage(
+        "s1",
+        {"technical": _agent_config()},
+        DeliberationConfig(),
+        "review this paper",
+        bus,
+        PipelineControl(),
+        graph,
+    )
+
+    assert result.session_id == "s1"
+    cnn_node = graph.node_by_label("VisionHPC")
+    assert cnn_node is not None
+    assert cnn_node.annotations
+    assert "private notes" not in cnn_node.annotations[0].content
 
 
 def test_review_route_aliases_are_registered():

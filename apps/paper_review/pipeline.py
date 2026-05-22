@@ -184,6 +184,16 @@ def _write_review_checkpoint(session, stage_name: str) -> None:
         session.last_checkpoint = stage_name
 
 
+def _session_conference_slug(session: Any | None) -> str:
+    """Return the session's conference slug for prompt-pack guardrails."""
+    if session is None:
+        return ""
+    config = getattr(session, "config", {}) or {}
+    metadata = config.get("metadata", {}) if isinstance(config, dict) else {}
+    conference = metadata.get("conference", "") if isinstance(metadata, dict) else ""
+    return str(conference or "")
+
+
 async def _run_review_stage(
     sid: str,
     agent_configs: dict[str, AgentConfig],
@@ -266,7 +276,9 @@ async def _run_review_stage(
 
     # Annotate graph with review findings (derive roles from agent configs)
     role_keys = [k for k in agent_configs if k != "meta"]
-    no_chain_of_thought = prompt_pack_no_chain_of_thought(profile.slug)
+    no_chain_of_thought = prompt_pack_no_chain_of_thought(
+        _session_conference_slug(session)
+    )
     for phase in result.phases:
         if phase.phase_name == "independent_review":
             for output in phase.outputs:
