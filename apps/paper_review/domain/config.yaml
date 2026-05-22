@@ -20,4 +20,5 @@ summary_max_chars: 5200
 
 verify_system_prompt: >
   You verify knowledge graphs extracted from academic papers.
-  Output ONLY valid JSON. You may reason in <think> tags first.
+  Output concise valid JSON only. Do not emit hidden reasoning, scratchpad,
+  markdown, code fences, or prose.

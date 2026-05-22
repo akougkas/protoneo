@@ -72,6 +72,9 @@
               <span v-if="selectedModelMeta(node.id).context_length" class="meta-chip">{{ formatContext(selectedModelMeta(node.id).context_length) }} ctx</span>
               <span v-if="selectedModelMeta(node.id).loaded" class="meta-chip live">loaded</span>
               <span v-if="selectedModelMeta(node.id).speed" class="meta-chip speed">{{ selectedModelMeta(node.id).speed }} t/s</span>
+              <span v-if="selectedModelMeta(node.id).registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
+              <span v-if="selectedModelMeta(node.id).registry?.supports_vision" class="meta-chip vision">vision</span>
+              <span v-if="selectedModelMeta(node.id).registry?.structured_output !== 'unknown'" class="meta-chip">{{ selectedModelMeta(node.id).registry.structured_output }} json</span>
               <span v-if="selectedModelMeta(node.id).benchmark" :class="['class-chip', selectedModelMeta(node.id).benchmark.protoneo_class]">
                 {{ selectedModelMeta(node.id).benchmark.protoneo_class }}
               </span>
@@ -126,6 +129,9 @@
               <span v-if="selectedModelMeta(node.id).context_length" class="meta-chip">{{ formatContext(selectedModelMeta(node.id).context_length) }} ctx</span>
               <span v-if="selectedModelMeta(node.id).loaded" class="meta-chip live">loaded</span>
               <span v-if="selectedModelMeta(node.id).speed" class="meta-chip speed">{{ selectedModelMeta(node.id).speed }} t/s</span>
+              <span v-if="selectedModelMeta(node.id).registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
+              <span v-if="selectedModelMeta(node.id).registry?.supports_vision" class="meta-chip vision">vision</span>
+              <span v-if="selectedModelMeta(node.id).registry?.structured_output !== 'unknown'" class="meta-chip">{{ selectedModelMeta(node.id).registry.structured_output }} json</span>
               <span v-if="selectedModelMeta(node.id).benchmark" :class="['class-chip', selectedModelMeta(node.id).benchmark.protoneo_class]">
                 {{ selectedModelMeta(node.id).benchmark.protoneo_class }}
               </span>
@@ -179,6 +185,8 @@
             <div v-if="selectedModelMeta('openrouter')" class="selected-model-meta">
               <span v-if="selectedModelMeta('openrouter').context_length" class="meta-chip">{{ formatContext(selectedModelMeta('openrouter').context_length) }} ctx</span>
               <span v-if="selectedModelMeta('openrouter').speed" class="meta-chip speed">{{ selectedModelMeta('openrouter').speed }} t/s</span>
+              <span v-if="selectedModelMeta('openrouter').registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
+              <span v-if="selectedModelMeta('openrouter').registry?.supports_tools" class="meta-chip">tools</span>
               <span v-if="selectedModelMeta('openrouter').benchmark" :class="['class-chip', selectedModelMeta('openrouter').benchmark.protoneo_class]">
                 {{ selectedModelMeta('openrouter').benchmark.protoneo_class }}
               </span>
@@ -242,6 +250,8 @@
             <div v-if="selectedModelMeta(p.provider)" class="selected-model-meta">
               <span v-if="selectedModelMeta(p.provider).context_length" class="meta-chip">{{ formatContext(selectedModelMeta(p.provider).context_length) }} ctx</span>
               <span v-if="selectedModelMeta(p.provider).speed" class="meta-chip speed">{{ selectedModelMeta(p.provider).speed }} t/s</span>
+              <span v-if="selectedModelMeta(p.provider).registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
+              <span v-if="selectedModelMeta(p.provider).registry?.supports_tools" class="meta-chip">tools</span>
               <span v-if="selectedModelMeta(p.provider).benchmark" :class="['class-chip', selectedModelMeta(p.provider).benchmark.protoneo_class]">
                 {{ selectedModelMeta(p.provider).benchmark.protoneo_class }}
               </span>
@@ -384,7 +394,7 @@
       <div class="section-header-row">
         <div>
           <h2 class="section-title">VLM Figure Description</h2>
-          <p class="section-desc">Configure a Vision-Language Model endpoint for automatic figure descriptions during PDF parsing.</p>
+          <p class="section-desc">Optional figure descriptions during PDF parsing. Keep disabled for fastest first-pass reviews.</p>
         </div>
         <button class="action-btn-sm" @click="testVlm" :disabled="testingVlm || !settings.vlm_endpoint.url">
           {{ testingVlm ? 'Testing...' : 'Test Connection' }}
@@ -392,6 +402,10 @@
       </div>
 
       <div class="vlm-form">
+        <label class="toggle-label vlm-enable">
+          <input type="checkbox" v-model="settings.vlm_endpoint.enabled" @change="saveSettings" />
+          Enable VLM figure descriptions during parsing
+        </label>
         <div class="vlm-row">
           <label class="vlm-label">Endpoint URL</label>
           <input
@@ -434,6 +448,10 @@
             <label class="vlm-label">Timeout (s)</label>
             <input class="vlm-input" type="number" step="10" min="30" max="600" v-model.number="settings.vlm_endpoint.timeout" @change="saveSettings" />
           </div>
+          <div class="vlm-row vlm-row--narrow">
+            <label class="vlm-label">Concurrency</label>
+            <input class="vlm-input" type="number" step="1" min="1" max="4" v-model.number="settings.vlm_endpoint.concurrency" @change="saveSettings" />
+          </div>
         </div>
         <div v-if="vlmTestResult" :class="['vlm-test-result', vlmTestResult.ok ? 'ok' : 'err']">
           {{ vlmTestResult.message }}
@@ -446,20 +464,21 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
-  getProviders, getSettings, updateSettings, discoverModels,
+  getProviders, getSettings, updateSettings, discoverModels, getModels,
   startBenchmark, getBenchmarkResults,
   beginProviderLogin, getLoginStatus, completeProviderLogin, providerLogout,
 } from '../api/kernel.js'
 
 const providers = ref([])
 const discovery = ref({})
+const registeredModels = ref([])
 const settings = reactive({
   localhost_endpoints: [],
   lan_endpoints: [],
   openrouter_free_only: true,
   provider_enabled: {},
   active_models: {},
-  vlm_endpoint: { url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 300, concurrency: 1 },
+  vlm_endpoint: { enabled: false, url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 120, concurrency: 1 },
   benchmark_results: [],
   discovered_models: {},
 })
@@ -556,11 +575,20 @@ const benchIndex = computed(() => {
   return index
 })
 
+const registryIndex = computed(() => {
+  const index = {}
+  for (const model of registeredModels.value) {
+    index[model.model_id] = model
+  }
+  return index
+})
+
 const activeModelList = computed(() => {
   const list = []
   for (const [provider, modelId] of Object.entries(settings.active_models)) {
     if (!modelId || !isProviderEnabled(provider)) continue
     const model = findDiscoveredModel(provider, modelId)
+    const registry = registryIndex.value[`${provider}/${modelId}`] || null
     list.push({
       provider,
       id: modelId,
@@ -572,6 +600,7 @@ const activeModelList = computed(() => {
       loaded: model?.loaded ?? null,
       temperature: model?.temperature ?? null,
       flash_attention: model?.flash_attention ?? null,
+      registry,
     })
   }
   return list
@@ -635,9 +664,11 @@ function selectedModelMeta(provider) {
   if (!modelId) return null
   const model = findDiscoveredModel(provider, modelId)
   const benchmark = getBenchResult(provider, modelId)
+  const registry = registryIndex.value[`${provider}/${modelId}`] || null
   return {
     model,
-    context_length: model?.context_length || null,
+    registry,
+    context_length: model?.context_length || registry?.max_context || null,
     loaded: model?.loaded ?? null,
     speed: benchmark?.throughput?.tokens_per_second || null,
     benchmark,
@@ -717,12 +748,16 @@ function tagClass(tag) {
 // Actions
 async function loadAll() {
   try {
-    const [pRes, sRes, bRes] = await Promise.all([getProviders(), getSettings(), getBenchmarkResults()])
+    const [pRes, sRes, bRes, mRes] = await Promise.all([getProviders(), getSettings(), getBenchmarkResults(), getModels()])
     providers.value = pRes.data.providers || []
     const loaded = sRes.data
-    if (!loaded.vlm_endpoint) loaded.vlm_endpoint = { url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 300, concurrency: 1 }
+    if (!loaded.vlm_endpoint) loaded.vlm_endpoint = { enabled: false, url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 120, concurrency: 1 }
+    if (loaded.vlm_endpoint.enabled === undefined) loaded.vlm_endpoint.enabled = false
+    if (!loaded.vlm_endpoint.timeout) loaded.vlm_endpoint.timeout = 120
+    if (!loaded.vlm_endpoint.concurrency) loaded.vlm_endpoint.concurrency = 1
     Object.assign(settings, loaded)
     benchmarkResults.value = bRes.data.results || []
+    registeredModels.value = mRes.data.models || []
   } catch (e) { console.error('Load failed:', e) }
 }
 
@@ -962,6 +997,8 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 }
 .meta-chip.live { background: #f0f8f0; color: #4a4; }
 .meta-chip.speed { background: #f0f0f0; color: #666; }
+.meta-chip.warn { background: #fff3e0; color: #a06000; }
+.meta-chip.vision { background: #e3f2fd; color: #1565c0; }
 
 .power-toggle {
   position: relative;
@@ -1114,6 +1151,7 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 
 /* VLM Section */
 .vlm-form { display: flex; flex-direction: column; gap: var(--pn-space-3); }
+.vlm-enable { margin-bottom: var(--pn-space-1); }
 .vlm-row { display: flex; flex-direction: column; gap: var(--pn-space-1); }
 .vlm-row--wide { max-width: 100%; }
 .vlm-row--narrow { max-width: 160px; }

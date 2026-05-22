@@ -497,6 +497,7 @@ async def _run_graph_pipeline(
                 model_map,
                 fallback_keys=("ontology", "graph"),
                 require_local=True,
+                phase_policy="fast_structured",
             )
             if not resolved:
                 logger.warning("No local model for graph step '%s'", step_key)
@@ -553,6 +554,7 @@ async def _run_graph_pipeline(
                         model=model_id,
                         messages=[{"role": "user", "content": "ping"}],
                         max_tokens=1, temperature=0,
+                        phase_policy="fast_structured",
                     ),
                     timeout=_PREFLIGHT_TIMEOUT,
                 )

@@ -24,7 +24,7 @@ from protoneo.deliberation.session import (
     StepState,
 )
 from protoneo.deliberation.types import DeliberationResult
-from protoneo.llm.settings import LocalEndpoint, ProtoNeoSettings
+from protoneo.llm.settings import LocalEndpoint, ModelPreset, ProtoNeoSettings
 
 
 class FakeSessionManager:
@@ -303,6 +303,179 @@ def test_active_preset_drives_local_graph_model_routing(monkeypatch):
 
     assert model.startswith("lan-dynamo/")
     assert "omni" in model
+
+
+def test_graph_routing_skips_reasoning_preset_when_fast_model_available(monkeypatch):
+    settings = ProtoNeoSettings(
+        lan_endpoints=[
+            LocalEndpoint(
+                id="lan-mini",
+                display_name="Mini",
+                url="http://mini/v1",
+                location="lan",
+            ),
+            LocalEndpoint(
+                id="lan-dynamo",
+                display_name="Dynamo",
+                url="http://dynamo/v1",
+                location="lan",
+            ),
+        ],
+        active_models={
+            "lan-mini": "fast-json",
+            "lan-dynamo": "reasoning-model",
+        },
+        presets=[
+            ModelPreset(
+                name="bad-graph",
+                assignments={"ontology": "lan-dynamo/reasoning-model"},
+            )
+        ],
+        active_preset="bad-graph",
+        discovered_models={
+            "lan-mini": [
+                {
+                    "id": "fast-json",
+                    "source": "lan-mini",
+                    "provider_type": "local",
+                    "tags": ["structured"],
+                }
+            ],
+            "lan-dynamo": [
+                {
+                    "id": "reasoning-model",
+                    "source": "lan-dynamo",
+                    "provider_type": "local",
+                    "tags": ["structured", "reasoning"],
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr("protoneo.llm.settings.load_settings", lambda: settings)
+
+    model = resolve_paper_review_model(
+        "ontology",
+        require_local=True,
+        phase_policy="fast_structured",
+    )
+
+    assert model == "lan-mini/fast-json"
+
+
+def test_mini_only_graph_routing_ignores_disabled_dynamo(monkeypatch):
+    settings = ProtoNeoSettings(
+        lan_endpoints=[
+            LocalEndpoint(
+                id="lan-mini",
+                display_name="Mini",
+                url="http://mini/v1",
+                location="lan",
+                enabled=True,
+            ),
+            LocalEndpoint(
+                id="lan-dynamo",
+                display_name="Dynamo",
+                url="http://dynamo/v1",
+                location="lan",
+                enabled=False,
+            ),
+        ],
+        active_models={
+            "lan-mini": "mini-reasoning",
+            "lan-dynamo": "dynamo-reasoning",
+        },
+        presets=[
+            ModelPreset(
+                name="dynamo-preset",
+                assignments={"ontology": "lan-dynamo/dynamo-reasoning"},
+            )
+        ],
+        active_preset="dynamo-preset",
+        discovered_models={
+            "lan-mini": [
+                {
+                    "id": "mini-reasoning",
+                    "source": "lan-mini",
+                    "provider_type": "local",
+                    "tags": ["structured", "reasoning"],
+                }
+            ],
+            "lan-dynamo": [
+                {
+                    "id": "dynamo-reasoning",
+                    "source": "lan-dynamo",
+                    "provider_type": "local",
+                    "tags": ["structured", "reasoning"],
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr("protoneo.llm.settings.load_settings", lambda: settings)
+
+    model = resolve_paper_review_model(
+        "ontology",
+        require_local=True,
+        phase_policy="fast_structured",
+    )
+
+    assert model == "lan-mini/mini-reasoning"
+
+
+def test_graph_routing_prefers_non_reasoning_discovered_model_on_same_endpoint(monkeypatch):
+    settings = ProtoNeoSettings(
+        lan_endpoints=[
+            LocalEndpoint(
+                id="lan-mini",
+                display_name="Mini",
+                url="http://mini/v1",
+                location="lan",
+                enabled=True,
+            ),
+        ],
+        active_models={
+            "lan-mini": "mini-reasoning",
+        },
+        discovered_models={
+            "lan-mini": [
+                {
+                    "id": "mini-reasoning",
+                    "source": "lan-mini",
+                    "provider_type": "local",
+                    "tags": ["structured", "reasoning"],
+                },
+                {
+                    "id": "mini-fast-json",
+                    "source": "lan-mini",
+                    "provider_type": "local",
+                    "tags": ["structured"],
+                },
+                {
+                    "id": "mini-loaded-json",
+                    "source": "lan-mini",
+                    "provider_type": "local",
+                    "tags": ["structured"],
+                    "loaded": True,
+                },
+                {
+                    "id": "mini-mmproj-F16",
+                    "source": "lan-mini",
+                    "provider_type": "local",
+                },
+            ],
+        },
+    )
+
+    monkeypatch.setattr("protoneo.llm.settings.load_settings", lambda: settings)
+
+    model = resolve_paper_review_model(
+        "ontology",
+        require_local=True,
+        phase_policy="fast_structured",
+    )
+
+    assert model == "lan-mini/mini-loaded-json"
 
 
 def test_step_state_normalizes_legacy_completed_status():

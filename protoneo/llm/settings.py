@@ -66,17 +66,18 @@ class LocalEndpoint(BaseModel):
 class VlmEndpoint(BaseModel):
     """VLM endpoint for figure description during PDF parsing."""
 
+    enabled: bool = False
     url: str = ""
     model: str = ""
     prompt: str = (
-        "You are an expert scientific figure analyst. "
-        "Describe this figure in 500 words for a peer reviewer who cannot see it. "
-        "Cover: chart type, axes, data series with colors, trends, and key observations. "
-        "Write as continuous prose paragraphs. Do not use markdown headings."
+        "Describe the figure or table for a scientific reviewer in 6 concise sentences. "
+        "Include chart/table type, axes or columns, compared methods, key numeric trends, "
+        "and any result needed to verify the manuscript. "
+        "Output plain text only. Do not include reasoning, scratchpad, markdown, or speculation."
     )
     temperature: float = 0.1
     top_p: float = 0.9
-    timeout: float = 300.0
+    timeout: float = 120.0
     concurrency: int = 1
 
 
@@ -426,7 +427,7 @@ def update_settings(patch: dict[str, Any]) -> ProtoNeoSettings:
 def build_vlm_config(settings: ProtoNeoSettings | None = None) -> dict[str, Any] | None:
     """Build a vlm_config dict from settings, or None if no VLM endpoint is configured."""
     s = settings or load_settings()
-    if not s.vlm_endpoint.url:
+    if not s.vlm_endpoint.enabled or not s.vlm_endpoint.url:
         return None
     return s.vlm_endpoint.model_dump()
 
@@ -440,13 +441,13 @@ def build_vlm_config(settings: ProtoNeoSettings | None = None) -> dict[str, Any]
 _BUILTIN_PRESETS: list[ModelPreset] = [
     ModelPreset(
         name="dynamo-heavy",
-        description="Dynamo runs graph pipeline (distilled reasoning model), cloud runs reviews",
+        description="Dynamo runs fast structured graph pipeline, cloud runs reviews",
         assignments={
             # Graph pipeline: local only
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "extraction": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
+            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
             "coref": "lan-dynamo/qwen3.5-35b-a3b",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b",
             # Reviews: cloud models
             "technical": "openai/gpt-5.4",
             "systems": "openai/gpt-5.4-mini",
@@ -459,13 +460,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
     ),
     ModelPreset(
         name="split-local",
-        description="Dynamo handles reasoning-heavy steps, Mini handles fast extraction",
+        description="Dynamo handles fast graph steps, Mini handles review-side local fallback",
         assignments={
             # Graph pipeline: split across nodes
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "extraction": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
-            "coref": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
+            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
+            "coref": "lan-dynamo/qwen3.5-35b-a3b",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b",
             # Reviews: cloud models
             "technical": "openai/gpt-5.4",
             "systems": "openai/gpt-5.4-mini",
@@ -514,10 +515,10 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         name="dynamo-ministral",
         description="Mistral Ministral 14B for graph pipeline, cloud for reviews",
         assignments={
-            "ontology": "lan-dynamo/mistralai/ministral-3-14b-reasoning",
+            "ontology": "lan-dynamo/mistralai/ministral-3-14b",
             "extraction": "lan-dynamo/mistralai/ministral-3-14b",
             "coref": "lan-dynamo/mistralai/ministral-3-8b",
-            "verification": "lan-dynamo/mistralai/ministral-3-14b-reasoning",
+            "verification": "lan-dynamo/mistralai/ministral-3-14b",
             "technical": "openai/gpt-5.4",
             "systems": "openai/gpt-5.4-mini",
             "novelty": "openai/gpt-5.4",
@@ -552,10 +553,10 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         description="All reviewers on GPT-5.4 Mini, meta and chair on GPT-5.4 (no Anthropic)",
         assignments={
             # Graph pipeline: local
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "extraction": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "coref": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
+            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
+            "coref": "lan-dynamo/qwen3.5-35b-a3b",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b",
             # Reviews: OpenAI only
             "technical": "openai/gpt-5.4-mini",
             "systems": "openai/gpt-5.4-mini",
@@ -570,10 +571,10 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         name="nemotron-all",
         description="All Nemotron-Cascade-2 on dynamo for local dry-run reviews (no cloud tokens)",
         assignments={
-            "ontology": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "extraction": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "coref": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "verification": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
+            "ontology": "lan-dynamo/nemotron-cascade-2-30b-a3b",
+            "extraction": "lan-dynamo/nemotron-cascade-2-30b-a3b",
+            "coref": "lan-dynamo/nemotron-cascade-2-30b-a3b",
+            "verification": "lan-dynamo/nemotron-cascade-2-30b-a3b",
             "technical": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
             "novelty": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
             "skeptic": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
@@ -586,10 +587,10 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         name="nemotron-omni-split",
         description="Nemotron Omni split panel: Dynamo analytical/deterministic, Mini creative/adversarial",
         assignments={
-            "ontology": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
-            "extraction": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
-            "coref": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
-            "verification": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "ontology": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
+            "extraction": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
+            "coref": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
+            "verification": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
             "technical": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
             "systems": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
             "clarity": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
@@ -602,13 +603,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
     ),
     ModelPreset(
         name="hpdc26-openai",
-        description="HPDC '26 reviews: Nemotron-Cascade-2 graph pipeline, GPT-5.4 for technical/novelty/skeptic/meta, GPT-5.4-mini for clarity",
+        description="HPDC '26 reviews: fast local graph pipeline, GPT-5.4 for technical/novelty/skeptic/meta, GPT-5.4-mini for clarity",
         assignments={
-            # Graph pipeline: Nemotron-Cascade-2 on dynamo (30B/3B MoE, strong reasoning)
-            "ontology": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "extraction": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "coref": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "verification": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
+            # Graph pipeline: local fast structured extraction
+            "ontology": "lan-dynamo/nemotron-cascade-2-30b-a3b",
+            "extraction": "lan-dynamo/nemotron-cascade-2-30b-a3b",
+            "coref": "lan-dynamo/nemotron-cascade-2-30b-a3b",
+            "verification": "lan-dynamo/nemotron-cascade-2-30b-a3b",
             # Reviews: GPT-5.4 for analytical/reasoning-heavy roles
             "technical": "openai/gpt-5.4",
             "novelty": "openai/gpt-5.4",
@@ -624,10 +625,10 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         name="full-local",
         description="All local, no cloud tokens used (for testing pipeline)",
         assignments={
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "extraction": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
-            "coref": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
+            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
+            "coref": "lan-dynamo/qwen3.5-35b-a3b",
+            "verification": "lan-dynamo/qwen3.5-35b-a3b",
             "technical": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
             "systems": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
             "novelty": "lan-dynamo/qwen3.5-35b-a3b",
@@ -722,6 +723,11 @@ def active_model_assignments(
             "litellm_model": registry_info.effective_model,
             "api_base": registry_info.api_base or "",
             "api_key_source": api_key_source,
+            "capabilities": sorted(c.value for c in registry_info.capabilities),
+            "quirks": sorted(q.value for q in registry_info.quirks),
+            "latency_class": registry_info.latency_class.value,
+            "structured_output": registry_info.structured_output.value,
+            "runtime_location": registry_info.runtime_location,
         }
 
     return assignments

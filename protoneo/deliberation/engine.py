@@ -55,6 +55,7 @@ class DeliberationEngine:
             min_p=config.min_p,
             repeat_penalty=config.repeat_penalty,
             reasoning_effort=config.reasoning_effort,
+            phase_policy=config.phase_policy,
             presence_penalty=config.presence_penalty,
             frequency_penalty=config.frequency_penalty,
         )

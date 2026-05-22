@@ -302,8 +302,16 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                     "model_id": m.model_id,
                     "provider": m.provider,
                     "capabilities": sorted(c.value for c in m.capabilities),
+                    "quirks": sorted(q.value for q in m.quirks),
                     "max_context": m.max_context,
                     "tier": m.tier.value,
+                    "runtime_location": m.runtime_location,
+                    "latency_class": m.latency_class.value,
+                    "structured_output": m.structured_output.value,
+                    "supports_reasoning": "extended_thinking" in {c.value for c in m.capabilities},
+                    "supports_reasoning_control": "reasoning_control" in {c.value for c in m.capabilities},
+                    "supports_tools": "function_calling" in {c.value for c in m.capabilities},
+                    "supports_vision": "vision" in {c.value for c in m.capabilities},
                     "display_name": m.display_name or m.model_id,
                     "speed_tps": m.speed_tps,
                     "is_private": m.is_private,
@@ -313,6 +321,13 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                 for m in registry.list_all()
             ]
         }
+
+    @app.get("/api/model-policies")
+    async def list_model_policies():
+        """Return phase policy metadata for UI warnings and routing explanations."""
+        from ..llm.policies import phase_policy_metadata
+
+        return {"policies": phase_policy_metadata()}
 
     @app.post("/api/models/discover")
     async def discover_models():

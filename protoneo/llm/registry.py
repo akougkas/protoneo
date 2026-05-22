@@ -16,17 +16,35 @@ from collections import defaultdict
 from typing import Any
 
 from .settings import ProtoNeoSettings, endpoint_alias_map, endpoint_map, load_settings
-from .types import ModelCapability, ModelInfo, ModelTier
+from .types import (
+    LatencyClass,
+    ModelCapability,
+    ModelInfo,
+    ModelQuirk,
+    ModelTier,
+    StructuredOutputReliability,
+)
 
 logger = logging.getLogger("protoneo.llm.registry")
 
 _TAG_CAPABILITIES = {
     "structured": ModelCapability.STRUCTURED_OUTPUT,
     "reasoning": ModelCapability.EXTENDED_THINKING,
+    "tool-use": ModelCapability.FUNCTION_CALLING,
+    "tools": ModelCapability.FUNCTION_CALLING,
+    "vision": ModelCapability.VISION,
 }
 
-_VISION_HINTS = ("vision", "vl", "gpt-4.1", "ocr")  # "claude" removed
+_VISION_HINTS = ("vision", "vl", "omni", "gpt-4.1", "ocr")  # "claude" removed
 _FUNCTION_CALLING_PROVIDERS = {"openai", "openrouter"}  # anthropic removed
+_REASONING_HINTS = (
+    "reason",
+    "thinking",
+    "deepseek-r1",
+    "nemotron-cascade",
+    "-i1",
+    "_i1",
+)
 
 
 def _provider_prefixed_model_id(provider: str, model_id: str) -> str:
@@ -141,8 +159,11 @@ class CapabilityRegistry:
         model_id = _provider_prefixed_model_id(provider, raw_model_id)
         litellm_model = self._litellm_model(provider, raw_model_id, endpoint)
         capabilities = self._capabilities_for(provider, raw_model_id, entry, benchmark)
+        quirks = self._quirks_for(provider, raw_model_id, capabilities)
         tier = self._tier_for(provider, entry, endpoint)
         benchmark_throughput = ((benchmark or {}).get("throughput") or {}).get("tokens_per_second", 0)
+        runtime_location = getattr(endpoint, "location", "") or ("remote" if tier != ModelTier.LOCAL else "")
+        speed_tps = int(round(benchmark_throughput or 0))
 
         return ModelInfo(
             model_id=model_id,
@@ -150,8 +171,12 @@ class CapabilityRegistry:
             litellm_model=litellm_model,
             api_base=getattr(endpoint, "url", None),
             capabilities=capabilities,
+            quirks=quirks,
             max_context=int(entry.get("context_length") or 128_000),
-            speed_tps=int(round(benchmark_throughput or 0)),
+            speed_tps=speed_tps,
+            latency_class=self._latency_class_for(speed_tps, raw_model_id),
+            structured_output=self._structured_reliability_for(entry, benchmark, capabilities),
+            runtime_location=runtime_location,
             cost_per_input_token=float(entry.get("cost_prompt") or 0.0),
             cost_per_output_token=float(entry.get("cost_completion") or 0.0),
             tier=tier,
@@ -205,10 +230,67 @@ class CapabilityRegistry:
             if capability is not None:
                 capabilities.add(capability)
 
-        if "reason" in lower or ("qwen" in lower and "i1" in lower):
+        if entry.get("reasoning"):
             capabilities.add(ModelCapability.EXTENDED_THINKING)
 
+        if (
+            any(hint in lower for hint in _REASONING_HINTS)
+            or ("qwen" in lower and "i1" in lower)
+        ):
+            capabilities.add(ModelCapability.EXTENDED_THINKING)
+
+        if provider == "openai" and ModelCapability.EXTENDED_THINKING in capabilities:
+            capabilities.add(ModelCapability.REASONING_CONTROL)
+
         return capabilities
+
+    @staticmethod
+    def _quirks_for(
+        provider: str,
+        raw_model_id: str,
+        capabilities: set[ModelCapability],
+    ) -> set[ModelQuirk]:
+        quirks: set[ModelQuirk] = set()
+        lower = raw_model_id.lower()
+
+        if ModelCapability.EXTENDED_THINKING in capabilities:
+            quirks.add(ModelQuirk.HIDDEN_REASONING_FIELD)
+            if provider in {"openai", "openrouter"}:
+                quirks.add(ModelQuirk.REASONING_CONTENT_FIELD)
+            if any(hint in lower for hint in ("qwen", "deepseek", "nemotron", "reason", "i1")):
+                quirks.add(ModelQuirk.THINK_TAGS)
+                quirks.add(ModelQuirk.THINKING_TAGS)
+
+        return quirks
+
+    @staticmethod
+    def _structured_reliability_for(
+        entry: dict[str, Any],
+        benchmark: dict[str, Any] | None,
+        capabilities: set[ModelCapability],
+    ) -> StructuredOutputReliability:
+        if ModelCapability.STRUCTURED_OUTPUT in capabilities:
+            return StructuredOutputReliability.STRONG
+        if entry.get("structured_output") or entry.get("json_schema"):
+            return StructuredOutputReliability.STRONG
+        if (benchmark or {}).get("output_valid_json") is True:
+            return StructuredOutputReliability.BASIC
+        return StructuredOutputReliability.UNKNOWN
+
+    @staticmethod
+    def _latency_class_for(speed_tps: int, raw_model_id: str) -> LatencyClass:
+        if speed_tps >= 80:
+            return LatencyClass.FAST
+        if speed_tps >= 25:
+            return LatencyClass.BALANCED
+        if speed_tps > 0:
+            return LatencyClass.SLOW
+        lower = raw_model_id.lower()
+        if any(hint in lower for hint in ("120b", "70b", "405b", "opus", "reason")):
+            return LatencyClass.SLOW
+        if any(hint in lower for hint in ("mini", "nano", "8b", "4b", "3b")):
+            return LatencyClass.FAST
+        return LatencyClass.UNKNOWN
 
     def register(self, model: ModelInfo) -> None:
         self._models[model.model_id] = model

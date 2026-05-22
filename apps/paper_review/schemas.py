@@ -36,6 +36,7 @@ class ReviewerProvenance(BaseModel):
     min_p: float | None = None
     repeat_penalty: float | None = None
     reasoning_effort: str | None = None
+    phase_policy: str | None = None
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
     prompt_pack_version: str = ""

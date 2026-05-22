@@ -14,7 +14,6 @@ import asyncio
 import base64
 import json
 import logging
-import re
 from collections import defaultdict
 from typing import Any, AsyncGenerator, Callable
 
@@ -29,8 +28,10 @@ from litellm.exceptions import (
     APIError,
 )
 
+from .policies import policy_for_label
 from .registry import CapabilityRegistry
-from .types import LLMResponse, ModelInfo, TokenUsage
+from .structured import strip_thinking_output
+from .types import LLMResponse, ModelCapability, ModelInfo, TokenUsage
 
 logger = logging.getLogger("protoneo.llm.client")
 
@@ -216,6 +217,7 @@ class LLMClient:
     async def _build_kwargs_async(self, model: str, messages: list[dict], **overrides: Any) -> dict[str, Any]:
         """Build LiteLLM kwargs for local, homelab, OpenRouter, and API-key providers."""
         info: ModelInfo = self.registry.get(model)
+        overrides = self._filter_request_overrides(info, overrides)
 
         kwargs: dict[str, Any] = {
             "model": info.effective_model,
@@ -261,15 +263,50 @@ class LLMClient:
     # ── Shared helpers ────────────────────────────────────────
 
     @staticmethod
+    def _filter_request_overrides(
+        info: ModelInfo,
+        overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Drop provider/model params that phase policy or capabilities disallow."""
+        filtered = dict(overrides)
+        policy = policy_for_label(filtered.pop("phase_policy", None))
+
+        reasoning_allowed = True if policy is None else policy.allow_reasoning
+        supports_reasoning_control = ModelCapability.REASONING_CONTROL in info.capabilities
+
+        if "reasoning_effort" in filtered:
+            if not reasoning_allowed or not supports_reasoning_control:
+                logger.debug(
+                    "Dropping reasoning_effort for model=%s policy=%s supports_control=%s",
+                    info.model_id,
+                    policy.label.value if policy else "",
+                    supports_reasoning_control,
+                )
+                filtered.pop("reasoning_effort", None)
+
+        extra_body = filtered.get("extra_body")
+        if isinstance(extra_body, dict):
+            extra_body = dict(extra_body)
+            if not reasoning_allowed:
+                for key in (
+                    "reasoning",
+                    "reasoning_effort",
+                    "thinking",
+                    "thinking_budget",
+                    "include_reasoning",
+                ):
+                    extra_body.pop(key, None)
+            if extra_body:
+                filtered["extra_body"] = extra_body
+            else:
+                filtered.pop("extra_body", None)
+
+        return filtered
+
+    @staticmethod
     def _strip_thinking(content: str) -> str:
-        """Remove <think>...</think> blocks emitted by reasoning models."""
-        stripped = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
-        if stripped:
-            return stripped
-        match = re.search(r"<think>([\s\S]*?)</think>", content)
-        if match:
-            return match.group(1).strip()
-        return content.strip()
+        """Remove visible thinking blocks emitted by reasoning models."""
+        return strip_thinking_output(content)
 
     @staticmethod
     def _extract_usage(response: ModelResponse, model_info: ModelInfo) -> TokenUsage:
@@ -379,10 +416,6 @@ class LLMClient:
 
         msg = response.choices[0].message
         content = msg.content or ""
-
-        reasoning_content = getattr(msg, "reasoning_content", None)
-        if not content and reasoning_content:
-            content = reasoning_content
 
         raw_len = len(content)
         content = self._strip_thinking(content)

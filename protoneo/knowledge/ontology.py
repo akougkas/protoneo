@@ -34,6 +34,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
+from ..llm.structured import sanitize_structured_text
 from .types import DomainConfig
 
 logger = logging.getLogger("protoneo.knowledge.ontology")
@@ -337,7 +338,8 @@ def _detect_domain(
 _DISCOVER_SYSTEM = """\
 You are an academic paper ontology designer. Analyze a research paper and design
 domain-specific entity types and edge types that capture what peer reviewers need
-to evaluate. Output ONLY valid JSON. You may reason in <think> tags first."""
+to evaluate. Output concise valid JSON only. Do not emit hidden reasoning,
+scratchpad, markdown, code fences, or prose."""
 
 _DISCOVER_USER = """\
 Design 3-5 paper-SPECIFIC entity types for reviewer evaluation of this paper.
@@ -460,6 +462,7 @@ async def _discover_ontology_single(
         session_id=session_id,
         temperature=temperature,
         max_tokens=4096,
+        phase_policy="fast_structured",
     )
     return _parse_ontology(response.content)
 
@@ -582,7 +585,8 @@ _GROUND_SYSTEM = """\
 You verify whether proposed entity types are actually present in a research paper.
 For each type, find 2-3 concrete named examples from the paper text.
 If a type has fewer than 2 real examples, mark it as ungrounded.
-Output ONLY valid JSON. You may reason in <think> tags first."""
+Output concise valid JSON only. Do not emit hidden reasoning, scratchpad,
+markdown, code fences, or prose."""
 
 _GROUND_USER = """\
 Verify these proposed entity types against the paper. For each type, find concrete
@@ -636,6 +640,7 @@ async def _ground_ontology(
             session_id=session_id,
             temperature=0.15,
             max_tokens=4096,
+            phase_policy="fast_structured",
         )
 
         result = _parse_ontology_grounding(response.content)
@@ -671,8 +676,7 @@ async def _ground_ontology(
 
 def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
     """Parse the grounding verification response."""
-    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    cleaned = re.sub(r"</?output>", "", cleaned).strip()
+    cleaned = sanitize_structured_text(raw)
 
     # Try direct JSON
     try:
@@ -864,16 +868,14 @@ def ontology_to_extraction_prompt(ontology: Ontology) -> str:
 def _parse_ontology(raw: str) -> Ontology:
     """Parse LLM output into Ontology.
 
-    Handles reasoning model output (Nemotron, Qwen-thinking) that wraps
-    JSON in <think>...</think> tags, code fences, or plain text preamble.
+    Handles model output that wraps JSON in thinking tags, code fences,
+    or plain text preamble.
     """
     if not raw or not raw.strip():
         logger.warning("Empty ontology response")
         return Ontology()
 
-    # Strip reasoning tags
-    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    cleaned = re.sub(r"</?output>", "", cleaned).strip()
+    cleaned = sanitize_structured_text(raw)
 
     # Try direct JSON
     try:

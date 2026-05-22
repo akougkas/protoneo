@@ -27,7 +27,15 @@ from protoneo.llm.client import LLMClient
 from protoneo.llm.registry import CapabilityRegistry
 import protoneo.llm.settings as settings_module
 from protoneo.llm.settings import LocalEndpoint, ProtoNeoSettings, active_model_assignments
-from protoneo.llm.types import LLMResponse, ModelCapability, ModelInfo, TokenUsage
+from protoneo.llm.types import (
+    LatencyClass,
+    LLMResponse,
+    ModelCapability,
+    ModelInfo,
+    ModelQuirk,
+    StructuredOutputReliability,
+    TokenUsage,
+)
 
 
 # ── Registry ────────────────────────────────────────────────
@@ -82,6 +90,9 @@ class TestCapabilityRegistry:
         assert info.speed_tps == 123
         assert ModelCapability.STRUCTURED_OUTPUT in info.capabilities
         assert ModelCapability.EXTENDED_THINKING in info.capabilities
+        assert ModelQuirk.THINK_TAGS in info.quirks
+        assert info.latency_class == LatencyClass.FAST
+        assert info.structured_output == StructuredOutputReliability.STRONG
 
     def test_load_settings_migrates_legacy_endpoint_schema(self, tmp_path, monkeypatch):
         legacy_path = tmp_path / "settings.json"
@@ -237,6 +248,60 @@ class TestLLMClient:
     def test_strip_thinking_multiline(self):
         text = "<think>\nline1\nline2\n</think>\nClean output."
         assert LLMClient._strip_thinking(text) == "Clean output."
+
+    def test_strip_thinking_variants(self):
+        text = "<thinking hidden='true'>private notes</thinking>\n{\"ok\": true}"
+        assert LLMClient._strip_thinking(text) == '{"ok": true}'
+        assert LLMClient._strip_thinking("<thinking>only private notes</thinking>") == ""
+
+    @pytest.mark.asyncio
+    async def test_fast_structured_policy_drops_reasoning_params(self):
+        reg = CapabilityRegistry(load_builtins=False)
+        reg.register(ModelInfo(
+            model_id="lan-mini/reasoning-model",
+            provider="lan-mini",
+            api_base="http://mini/v1",
+            capabilities={ModelCapability.EXTENDED_THINKING},
+        ))
+        client = LLMClient(registry=reg)
+
+        kwargs = await client._build_kwargs_async(
+            "lan-mini/reasoning-model",
+            [{"role": "user", "content": "extract json"}],
+            phase_policy="fast_structured",
+            reasoning_effort="high",
+            extra_body={
+                "reasoning": {"effort": "high"},
+                "thinking_budget": 4096,
+                "top_k": 20,
+            },
+        )
+
+        assert "phase_policy" not in kwargs
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["extra_body"] == {"top_k": 20}
+
+    @pytest.mark.asyncio
+    async def test_deep_review_policy_keeps_supported_reasoning_control(self):
+        reg = CapabilityRegistry(load_builtins=False)
+        reg.register(ModelInfo(
+            model_id="openai/gpt-5.4",
+            provider="openai",
+            capabilities={
+                ModelCapability.EXTENDED_THINKING,
+                ModelCapability.REASONING_CONTROL,
+            },
+        ))
+        client = LLMClient(registry=reg)
+
+        kwargs = await client._build_kwargs_async(
+            "openai/gpt-5.4",
+            [{"role": "user", "content": "review"}],
+            phase_policy="deep_review",
+            reasoning_effort="medium",
+        )
+
+        assert kwargs["reasoning_effort"] == "medium"
 
     def test_session_cost_tracking(self):
         reg = CapabilityRegistry()
@@ -1522,6 +1587,12 @@ class TestCorefResolver:
         result = _parse_coref_response(raw)
         assert result["merges"] == []
 
+    def test_parse_coref_response_strips_thinking_variants(self):
+        from protoneo.knowledge.coref_resolver import _parse_coref_response
+        raw = '<thinking>private merge notes</thinking>\n{"merges": [], "aliases": []}'
+        result = _parse_coref_response(raw)
+        assert result == {"merges": [], "aliases": []}
+
     def test_parse_coref_response_invalid(self):
         from protoneo.knowledge.coref_resolver import _parse_coref_response
         result = _parse_coref_response("not json at all")
@@ -1547,6 +1618,16 @@ class TestGraphVerifier:
         result = _parse_verification(raw)
         assert len(result["grounding_issues"]) == 1
 
+    def test_parse_verification_strips_thinking_variants(self):
+        from protoneo.knowledge.graph_verifier import _parse_verification
+        raw = '<think>private audit</think>\n{"grounding_issues": [], "missing_concepts": [], "missing_connections": []}'
+        result = _parse_verification(raw)
+        assert result == {
+            "grounding_issues": [],
+            "missing_concepts": [],
+            "missing_connections": [],
+        }
+
     def test_parse_verification_invalid(self):
         from protoneo.knowledge.graph_verifier import _parse_verification
         result = _parse_verification("garbage")
@@ -1571,10 +1652,26 @@ class TestGraphVerifier:
 
 class TestSectionAwareExtraction:
     def test_section_prompt_template_exists(self):
-        from protoneo.knowledge.graph_extractor import _SECTION_PROMPT_TEMPLATE, _SECTION_SYSTEM
+        from protoneo.knowledge.coref_resolver import _COREF_SYSTEM
+        from protoneo.knowledge.graph_extractor import _CHUNK_SYSTEM, _SECTION_PROMPT_TEMPLATE, _SECTION_SYSTEM
+        from protoneo.knowledge.graph_verifier import _VERIFY_SYSTEM
+        from protoneo.knowledge.ontology import _DISCOVER_SYSTEM, _GROUND_SYSTEM
         assert "section" in _SECTION_SYSTEM.lower()
         assert "{section_name}" in _SECTION_PROMPT_TEMPLATE
         assert "{accumulated_context_block}" in _SECTION_PROMPT_TEMPLATE
+        for prompt in (
+            _SECTION_SYSTEM,
+            _CHUNK_SYSTEM,
+            _DISCOVER_SYSTEM,
+            _GROUND_SYSTEM,
+            _COREF_SYSTEM,
+            _VERIFY_SYSTEM,
+        ):
+            lowered = prompt.lower()
+            assert "valid json" in lowered
+            assert "you may reason" not in lowered
+            assert "<think" not in lowered
+            assert "output concise" in lowered or "output valid" in lowered
 
     @pytest.mark.asyncio
     async def test_extract_with_knowledge_graph(self):
@@ -1609,6 +1706,9 @@ class TestSectionAwareExtraction:
         assert len(pg.nodes) > 1  # paper-root + extracted entities
         method_nodes = [n for n in pg.nodes if n.node_type == "Method"]
         assert len(method_nodes) >= 1
+        for call in mock_client.complete.call_args_list:
+            assert call.kwargs["phase_policy"] == "fast_structured"
+            assert "reasoning_effort" not in call.kwargs
 
     @pytest.mark.asyncio
     async def test_extract_without_knowledge_graph_backward_compat(self):
@@ -1631,6 +1731,9 @@ class TestSectionAwareExtraction:
         # Should return D3 format dict
         assert "nodes" in result
         assert "edges" in result
+        for call in mock_client.complete.call_args_list:
+            assert call.kwargs["phase_policy"] == "fast_structured"
+            assert "reasoning_effort" not in call.kwargs
 
 
 class TestPipelineStepEndpoints:

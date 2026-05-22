@@ -39,6 +39,7 @@ class BaseAgent:
         min_p: float | None = None,
         repeat_penalty: float | None = None,
         reasoning_effort: str | None = None,
+        phase_policy: str | None = None,
         presence_penalty: float | None = None,
         frequency_penalty: float | None = None,
     ):
@@ -55,6 +56,7 @@ class BaseAgent:
         self._min_p = min_p
         self._repeat_penalty = repeat_penalty
         self._reasoning_effort = reasoning_effort
+        self._phase_policy = phase_policy
         self._presence_penalty = presence_penalty
         self._frequency_penalty = frequency_penalty
 
@@ -94,6 +96,8 @@ class BaseAgent:
             kw["extra_body"] = local_extra
         if self._reasoning_effort is not None:
             kw["reasoning_effort"] = self._reasoning_effort
+        if self._phase_policy is not None:
+            kw["phase_policy"] = self._phase_policy
         if self._presence_penalty is not None:
             kw["presence_penalty"] = self._presence_penalty
         if self._frequency_penalty is not None:
@@ -181,6 +185,7 @@ class BaseAgent:
                 "min_p": self._min_p,
                 "repeat_penalty": self._repeat_penalty,
                 "reasoning_effort": self._reasoning_effort,
+                "phase_policy": self._phase_policy,
             },
         )
 
@@ -240,6 +245,7 @@ class BaseAgent:
                 "min_p": self._min_p,
                 "repeat_penalty": self._repeat_penalty,
                 "reasoning_effort": self._reasoning_effort,
+                "phase_policy": self._phase_policy,
                 "usage": stream_usage if stream_usage else {},
             },
         )

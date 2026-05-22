@@ -151,6 +151,8 @@ class TestReviewOrchestration:
             assert isinstance(cfg, AgentConfig)
             assert len(cfg.system_prompt) > 0
             assert len(cfg.model) > 0
+        assert configs["technical"].phase_policy == "deep_review"
+        assert configs["meta"].phase_policy == "meta_synthesis"
 
     def test_build_agent_configs_with_overrides(self):
         profile = load_profile("hpdc26")

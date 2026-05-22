@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
+from ..llm.structured import sanitize_structured_text
 from .graph import KnowledgeGraph
 from .types import DomainConfig
 
@@ -34,7 +35,11 @@ class VerificationResult(BaseModel):
     entities_flagged: int = 0
 
 
-_VERIFY_SYSTEM = "You verify knowledge graphs extracted from academic papers. Output ONLY valid JSON. You may reason in <think> tags first."
+_VERIFY_SYSTEM = (
+    "You verify knowledge graphs extracted from academic papers. "
+    "Output concise valid JSON only. Do not emit hidden reasoning, scratchpad, "
+    "markdown, code fences, or prose."
+)
 
 # ── Pass 1: Connectivity ──
 _VERIFY_CONNECTIVITY_PROMPT = """\
@@ -116,6 +121,7 @@ Only flag entities you are confident are NOT in the paper. Include a confidence 
 
 def _parse_verification(raw: str) -> dict:
     """Parse the LLM verification response."""
+    raw = sanitize_structured_text(raw)
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
@@ -229,6 +235,7 @@ async def verify_graph(
             session_id=session_id,
             temperature=0.1,
             max_tokens=4096,
+            phase_policy="fast_structured",
         )
         parsed1 = _parse_verification(response1.content)
 
@@ -282,6 +289,7 @@ async def verify_graph(
             session_id=session_id,
             temperature=0.1,
             max_tokens=4096,
+            phase_policy="fast_structured",
         )
         return _parse_verification(response2.content)
 
@@ -299,6 +307,7 @@ async def verify_graph(
             session_id=session_id,
             temperature=0.1,
             max_tokens=4096,
+            phase_policy="fast_structured",
         )
         return _parse_verification(response3.content)
 

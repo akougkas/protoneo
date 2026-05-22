@@ -1,9 +1,9 @@
 """
 Document parsing entry point.
 
-Uses Docling for layout-aware PDF extraction with integrated VLM
-figure descriptions. When a VLM endpoint is configured, Docling
-describes every figure inline during parsing in a single pass.
+Uses Docling for layout-aware PDF extraction with optional integrated
+VLM figure descriptions. When a VLM endpoint is explicitly enabled,
+Docling describes every figure inline during parsing in a single pass.
 """
 
 import logging
@@ -152,6 +152,7 @@ def _build_docling_pipeline_options(vlm_config: dict[str, Any] | None = None):
 
     Args:
         vlm_config: Optional dict with keys:
+            - enabled: whether VLM figure descriptions should run
             - url: VLM API endpoint (e.g., "http://host:8081/v1/chat/completions")
             - model: model name (e.g., "qwen3-vl-8b")
             - prompt: description prompt
@@ -166,7 +167,7 @@ def _build_docling_pipeline_options(vlm_config: dict[str, Any] | None = None):
     opts.generate_picture_images = True
     opts.do_ocr = False
 
-    if vlm_config and vlm_config.get("url"):
+    if vlm_config and vlm_config.get("url") and vlm_config.get("enabled", True):
         from docling.datamodel.pipeline_options import PictureDescriptionApiOptions
 
         params: dict[str, Any] = {}
@@ -182,13 +183,13 @@ def _build_docling_pipeline_options(vlm_config: dict[str, Any] | None = None):
         opts.picture_description_options = PictureDescriptionApiOptions(
             url=vlm_config["url"],
             params=params,
-            timeout=vlm_config.get("timeout", 300.0),
+            timeout=vlm_config.get("timeout", 120.0),
             concurrency=vlm_config.get("concurrency", 1),
             prompt=vlm_config.get("prompt", (
-                "You are an expert scientific figure analyst. "
-                "Describe this figure in 500 words for a peer reviewer who cannot see it. "
-                "Cover: chart type, axes, data series with colors, trends, and key observations. "
-                "Write as continuous prose paragraphs. Do not use markdown headings."
+                "Describe the figure concisely for paper review. "
+                "Identify the chart or diagram type, axes or components, main trends, "
+                "and any important quantitative observations. Use short prose only; "
+                "do not include markdown headings."
             )),
         )
         logger.info("Docling VLM enabled: %s (model=%s)", vlm_config["url"], vlm_config.get("model", "default"))

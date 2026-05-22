@@ -27,6 +27,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from ..llm.client import LLMClient
+from ..llm.structured import sanitize_structured_text
 from .metadata import extract_section_texts, extract_section_texts_md
 from .graph import KnowledgeGraph
 from .ontology import Ontology, ontology_to_extraction_prompt
@@ -103,7 +104,8 @@ class ExtractedGraph(BaseModel):
 
 _SECTION_SYSTEM = """\
 You extract entities and relationships from academic paper sections.
-Output ONLY valid JSON. You may reason in <think> tags first."""
+Output concise valid JSON only. Do not emit hidden reasoning, scratchpad,
+markdown, code fences, or prose."""
 
 _SECTION_PROMPT_TEMPLATE = """\
 Extract entities and relationships from section "{section_name}" of an academic paper.
@@ -132,7 +134,11 @@ Section text ({section_name}):
 
 # ── Legacy chunk prompt (kept for backward compat) ─────────
 
-_CHUNK_SYSTEM = "You extract entities and relationships from academic paper text. Output ONLY valid JSON. You may reason in <think> tags first."
+_CHUNK_SYSTEM = (
+    "You extract entities and relationships from academic paper text. "
+    "Output concise valid JSON only. Do not emit hidden reasoning, scratchpad, "
+    "markdown, code fences, or prose."
+)
 
 _CHUNK_PROMPT_TEMPLATE = """\
 Extract entities and relationships from this paper chunk.
@@ -165,9 +171,7 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
     if not raw or not raw.strip():
         return ExtractedGraph()
 
-    # Strip reasoning tags (Nemotron-Cascade, Qwen-thinking, DeepSeek-R1)
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    raw = re.sub(r"</?output>", "", raw).strip()
+    raw = sanitize_structured_text(raw)
 
     # Try direct JSON parse
     try:
@@ -446,13 +450,13 @@ async def _llm_section_split(
         session_id=session_id,
         temperature=0.1,
         max_tokens=4096,
+        phase_policy="fast_structured",
     )
 
     # Parse the section list
     try:
         raw = response.content
-        # Strip thinking tags if present
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        raw = sanitize_structured_text(raw)
         # Find JSON array
         start = raw.find("[")
         end = raw.rfind("]")
@@ -647,6 +651,7 @@ async def extract_graph(
                     session_id=session_id,
                     temperature=0.2,
                     max_tokens=8192,
+                    phase_policy="fast_structured",
                 )
                 result = _parse_extraction(response.content)
                 result = _normalize_entities(result)
@@ -819,6 +824,7 @@ async def extract_graph(
                 session_id=session_id,
                 temperature=0.2,
                 max_tokens=4096,
+                phase_policy="fast_structured",
             )
 
             chunk_graph = _parse_extraction(response.content)

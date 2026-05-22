@@ -14,11 +14,16 @@ import re
 from typing import Any
 
 from ..llm.client import LLMClient
+from ..llm.structured import sanitize_structured_text
 from .graph import KnowledgeGraph
 
 logger = logging.getLogger("protoneo.knowledge.coref_resolver")
 
-_COREF_SYSTEM = "You resolve co-references and identify abbreviations in knowledge graph entities extracted from an academic paper. Output ONLY valid JSON. You may reason in <think> tags first."
+_COREF_SYSTEM = (
+    "You resolve co-references and identify abbreviations in knowledge graph "
+    "entities extracted from an academic paper. Output concise valid JSON only. "
+    "Do not emit hidden reasoning, scratchpad, markdown, code fences, or prose."
+)
 
 _COREF_PROMPT = """\
 Below are entities extracted from an academic paper. Identify:
@@ -67,6 +72,7 @@ Only include MERGE and ALIAS decisions. Omit DISTINCT pairs."""
 
 def _parse_coref_response(raw: str) -> dict:
     """Parse the LLM co-reference resolution response."""
+    raw = sanitize_structured_text(raw)
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
@@ -207,6 +213,7 @@ async def resolve_coreferences(
                     session_id=session_id,
                     temperature=0.1,
                     max_tokens=4096,
+                    phase_policy="fast_structured",
                 )
                 all_results.append(_parse_coref_response(response.content))
                 logger.info("Coref pairs chunk %d/%d complete", chunk_idx + 1, len(pair_chunks))
@@ -232,6 +239,7 @@ async def resolve_coreferences(
             session_id=session_id,
             temperature=0.1,
             max_tokens=4096,
+            phase_policy="fast_structured",
         )
         all_results.append(_parse_coref_response(response.content))
     except Exception as e:

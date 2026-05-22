@@ -13,6 +13,14 @@ from typing import Any
 from protoneo.agents.types import Document
 from protoneo.config.schema import AgentConfig, DeliberationConfig, PhaseConfig
 from protoneo.deliberation.types import DeliberationResult
+from protoneo.llm.policies import (
+    PhasePolicy,
+    evaluate_model_for_policy,
+    policy_for_label,
+    policy_for_phase,
+)
+from protoneo.llm.registry import CapabilityRegistry
+from protoneo.llm.structured import extract_json_object, sanitize_structured_text
 from .conference import ConferenceProfile
 from .prompts import (
     apply_output_guardrails,
@@ -137,12 +145,128 @@ def _load_settings_context() -> tuple[Any | None, dict[str, str]]:
 def _active_models(settings: Any | None, *, require_local: bool = False) -> dict[str, str]:
     if settings is None:
         return {}
+    try:
+        from protoneo.llm.settings import provider_is_enabled
+    except Exception:
+        provider_is_enabled = None
+
     models = {}
     for provider, model_id in (settings.active_models or {}).items():
+        if provider_is_enabled and not provider_is_enabled(provider, settings):
+            continue
         candidate = f"{provider}/{model_id}" if model_id else ""
         if candidate and (not require_local or is_local_model_id(candidate, settings)):
             models[provider] = candidate
     return models
+
+
+def _discovered_model_candidates(
+    settings: Any | None,
+    *,
+    require_local: bool = False,
+) -> list[str]:
+    """Return enabled discovered model IDs for policy-based fallback."""
+    if settings is None:
+        return []
+    discovered = getattr(settings, "discovered_models", {}) or {}
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for provider, entries in discovered.items():
+        if not _candidate_provider_enabled(f"{provider}/placeholder", settings):
+            continue
+        ordered_entries = sorted(
+            entries or [],
+            key=lambda item: 0 if isinstance(item, dict) and item.get("loaded") else 1,
+        )
+        for entry in ordered_entries:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = str(entry.get("id") or entry.get("name") or "").strip()
+            if not raw_id:
+                continue
+            lower_id = raw_id.lower()
+            # llama.cpp exposes multimodal projector artifacts beside text
+            # generation models. They are not valid chat-completion targets.
+            if any(marker in lower_id for marker in ("mmproj", "projector")):
+                continue
+            candidate = f"{provider}/{raw_id}"
+            if require_local and not is_local_model_id(candidate, settings):
+                continue
+            if candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+    return candidates
+
+
+def _candidate_provider_enabled(candidate: str, settings: Any | None) -> bool:
+    provider = _provider_from_model(candidate)
+    if not provider:
+        return False
+    try:
+        from protoneo.llm.settings import provider_is_enabled
+        return provider_is_enabled(provider, settings)
+    except Exception:
+        return True
+
+
+def _select_candidate_for_policy(
+    candidates: list[str],
+    *,
+    registry: CapabilityRegistry,
+    policy: PhasePolicy,
+    settings: Any | None,
+    require_local: bool,
+    allow_soft_policy_override: bool,
+    source: str,
+) -> tuple[str, list[str]]:
+    """Pick the best policy-compatible candidate from an ordered list."""
+    scored: list[tuple[float, str, list[str]]] = []
+    warnings: list[str] = []
+
+    for idx, candidate in enumerate(candidates):
+        if not candidate:
+            continue
+        if not _candidate_provider_enabled(candidate, settings):
+            warnings.append(f"{source}: skipped disabled provider for {candidate}")
+            continue
+        if require_local and not is_local_model_id(candidate, settings):
+            warnings.append(f"{source}: skipped non-local model {candidate}")
+            continue
+
+        info = registry.get(candidate)
+        evaluation = evaluate_model_for_policy(
+            info,
+            policy,
+            require_local=require_local,
+        )
+        if not evaluation.hard_ok:
+            warnings.append(
+                f"{source}: skipped {candidate}: {'; '.join(evaluation.reasons)}"
+            )
+            continue
+        if not evaluation.soft_ok and not allow_soft_policy_override:
+            warnings.append(
+                f"{source}: skipped {candidate}: {'; '.join(evaluation.warnings)}"
+            )
+            continue
+
+        score = evaluation.score - (idx * 0.01)
+        scored.append((score, candidate, evaluation.warnings))
+
+    if not scored:
+        return "", warnings
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    _, selected, selected_warnings = scored[0]
+    for warning in selected_warnings:
+        logger.warning(
+            "Model %s selected for policy %s from %s with warning: %s",
+            selected,
+            policy.label.value,
+            source,
+            warning,
+        )
+    return selected, warnings
 
 
 def resolve_paper_review_model(
@@ -151,35 +275,59 @@ def resolve_paper_review_model(
     *,
     fallback_keys: tuple[str, ...] = (),
     require_local: bool = False,
+    phase_policy: str | None = None,
 ) -> str:
     """Resolve one paper-review model assignment.
 
     Resolution order:
     1. explicit request model_map
-    2. active preset assignment
+    2. active preset assignment if it matches the phase policy
     3. role/provider preference fallback over active_models
-    4. first acceptable active model
+    4. policy-compatible fallback, warning if only reasoning models remain
     """
     settings, preset_assignments = _load_settings_context()
-
-    def acceptable(candidate: str | None) -> str:
-        if not candidate:
-            return ""
-        if require_local and not is_local_model_id(candidate, settings):
-            return ""
-        return candidate
+    registry = CapabilityRegistry.from_settings(settings)
+    policy = policy_for_label(phase_policy) or policy_for_phase(key)
 
     lookup_keys = (key, *fallback_keys)
     explicit = model_map or {}
-    for lookup_key in lookup_keys:
-        candidate = acceptable(explicit.get(lookup_key))
-        if candidate:
-            return candidate
+    explicit_candidates = [
+        explicit.get(lookup_key, "")
+        for lookup_key in lookup_keys
+        if explicit.get(lookup_key)
+    ]
+    selected, warnings = _select_candidate_for_policy(
+        explicit_candidates,
+        registry=registry,
+        policy=policy,
+        settings=settings,
+        require_local=require_local,
+        allow_soft_policy_override=True,
+        source="explicit",
+    )
+    if selected:
+        for warning in warnings:
+            logger.info("Model routing note for %s: %s", key, warning)
+        return selected
 
-    for lookup_key in lookup_keys:
-        candidate = acceptable(preset_assignments.get(lookup_key))
-        if candidate:
-            return candidate
+    preset_candidates = [
+        preset_assignments.get(lookup_key, "")
+        for lookup_key in lookup_keys
+        if preset_assignments.get(lookup_key)
+    ]
+    selected, warnings = _select_candidate_for_policy(
+        preset_candidates,
+        registry=registry,
+        policy=policy,
+        settings=settings,
+        require_local=require_local,
+        allow_soft_policy_override=False,
+        source="preset",
+    )
+    if selected:
+        for warning in warnings:
+            logger.info("Model routing note for %s: %s", key, warning)
+        return selected
 
     available = _active_models(settings, require_local=require_local)
     if not available:
@@ -190,11 +338,63 @@ def resolve_paper_review_model(
         if require_local or key in _GRAPH_STEPS
         else _ROLE_PROVIDER_PREFS.get(key, [])
     )
+    active_candidates: list[str] = []
     for provider in prefs:
         if provider in available:
-            return available[provider]
+            active_candidates.append(available[provider])
+    active_candidates.extend(
+        candidate
+        for provider, candidate in available.items()
+        if provider not in prefs
+    )
 
-    return next(iter(available.values()), "")
+    selected, warnings = _select_candidate_for_policy(
+        active_candidates,
+        registry=registry,
+        policy=policy,
+        settings=settings,
+        require_local=require_local,
+        allow_soft_policy_override=False,
+        source="active_models",
+    )
+    if selected:
+        for warning in warnings:
+            logger.info("Model routing note for %s: %s", key, warning)
+        return selected
+
+    discovered_candidates = _discovered_model_candidates(
+        settings,
+        require_local=require_local,
+    )
+    selected, warnings = _select_candidate_for_policy(
+        discovered_candidates,
+        registry=registry,
+        policy=policy,
+        settings=settings,
+        require_local=require_local,
+        allow_soft_policy_override=False,
+        source="discovered_models",
+    )
+    if selected:
+        for warning in warnings:
+            logger.info("Model routing note for %s: %s", key, warning)
+        return selected
+
+    # Last resort: keep the pipeline runnable, but emit a warning. This matters
+    # for single-endpoint local setups where the only loaded model is reasoning
+    # capable; prompts and request params still suppress reasoning for graph use.
+    selected, warnings = _select_candidate_for_policy(
+        active_candidates + discovered_candidates + preset_candidates,
+        registry=registry,
+        policy=policy,
+        settings=settings,
+        require_local=require_local,
+        allow_soft_policy_override=True,
+        source="fallback",
+    )
+    for warning in warnings:
+        logger.info("Model routing note for %s: %s", key, warning)
+    return selected
 
 
 def _inference_for(role: str, model_id: str) -> dict[str, float | int | str]:
@@ -237,7 +437,7 @@ def strip_json_fences(text: str) -> str:
 
     Handles ```json ... ```, ``` ... ```, and leading/trailing whitespace.
     """
-    stripped = text.strip()
+    stripped = sanitize_structured_text(text)
     # Remove opening fence
     stripped = re.sub(r"^```(?:json)?\s*\n?", "", stripped)
     # Remove closing fence
@@ -247,6 +447,10 @@ def strip_json_fences(text: str) -> str:
 
 def _extract_json(text: str) -> dict | None:
     """Try to extract a JSON object from LLM output."""
+    parsed = extract_json_object(text)
+    if parsed is not None:
+        return parsed
+
     # Fix 5: Always strip fences before attempting parse
     cleaned = strip_json_fences(text)
     try:
@@ -354,6 +558,7 @@ def build_agent_configs(
             min_p=inference.get("min_p"),
             repeat_penalty=inference.get("repeat_penalty"),
             reasoning_effort=inference.get("reasoning_effort"),
+            phase_policy=policy_for_phase(role).label.value,
             presence_penalty=inference.get("presence_penalty"),
             frequency_penalty=inference.get("frequency_penalty"),
         )
@@ -382,6 +587,7 @@ def build_agent_configs(
         min_p=meta_inference.get("min_p"),
         repeat_penalty=meta_inference.get("repeat_penalty"),
         reasoning_effort=meta_inference.get("reasoning_effort"),
+        phase_policy=policy_for_phase("meta").label.value,
         presence_penalty=meta_inference.get("presence_penalty"),
         frequency_penalty=meta_inference.get("frequency_penalty"),
     )
@@ -467,6 +673,7 @@ def parse_review_output(
         min_p=agent_config.min_p if agent_config else None,
         repeat_penalty=agent_config.repeat_penalty if agent_config else None,
         reasoning_effort=agent_config.reasoning_effort if agent_config else None,
+        phase_policy=agent_config.phase_policy if agent_config else None,
         presence_penalty=agent_config.presence_penalty if agent_config else None,
         frequency_penalty=agent_config.frequency_penalty if agent_config else None,
         prompt_pack_version=prompt_pack_version,
@@ -642,6 +849,7 @@ def result_to_packet(
             "min_p": cfg.min_p,
             "repeat_penalty": cfg.repeat_penalty,
             "reasoning_effort": cfg.reasoning_effort,
+            "phase_policy": cfg.phase_policy,
             "presence_penalty": cfg.presence_penalty,
             "frequency_penalty": cfg.frequency_penalty,
         }
