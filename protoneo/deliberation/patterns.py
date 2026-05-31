@@ -42,6 +42,75 @@ def _try_extract_json(text: str) -> dict | None:
             pass
     return None
 
+
+_DELTA_KEYS = {
+    "stance_change",
+    "strongest_agreement",
+    "strongest_disagreement",
+    "evidence_correction",
+    "include_in_final_review",
+    "exclude_from_final_review",
+}
+_FULL_REVIEW_KEYS = {
+    "overall_merit",
+    "technical_soundness",
+    "paper_summary",
+    "strengths",
+    "weaknesses",
+    "questions_for_authors",
+}
+
+
+def _is_delta_json(obj) -> bool:
+    return isinstance(obj, dict) and len(_DELTA_KEYS & set(obj)) >= 2
+
+
+def _is_full_review_json(obj) -> bool:
+    return (
+        isinstance(obj, dict)
+        and len(_FULL_REVIEW_KEYS & set(obj)) >= 3
+        and len(_DELTA_KEYS & set(obj)) < 2
+    )
+
+
+def _coerce_to_delta(obj: dict) -> dict:
+    """Salvage a deliberation delta from a full-review JSON."""
+    merit = obj.get("overall_merit", {})
+    score = merit.get("score") if isinstance(merit, dict) else merit
+    try:
+        score = int(score)
+    except (TypeError, ValueError):
+        score = 3
+    strengths = obj.get("strengths") or []
+    weaknesses = obj.get("weaknesses") or []
+    return {
+        "stance_change": {
+            "changed": False,
+            "previous_score": score,
+            "current_score": score,
+            "reason": "Recovered from full-review output.",
+        },
+        "strongest_agreement": {
+            "with_reviewer": "",
+            "issue": strengths[0] if strengths else "",
+            "evidence": "",
+            "decision_impact": "",
+        },
+        "strongest_disagreement": {
+            "with_reviewer": "",
+            "issue": weaknesses[0] if weaknesses else "",
+            "evidence": "",
+            "decision_impact": "",
+        },
+        "evidence_correction": {},
+        "include_in_final_review": {
+            "issue": weaknesses[0] if weaknesses else "",
+            "why": "",
+        },
+        "exclude_from_final_review": {},
+        "_recovered_from_full_review": True,
+    }
+
 # Type alias for the event callback that streams phase-level updates
 EventCallback = Callable[[str, dict], None] | None
 
@@ -577,11 +646,50 @@ class RoundRobinPattern:
 
                 round_id = f"round-{round_num + 1}"
                 turn_index = len(deliberation_turns) + 1
+                structured = _try_extract_json(response.content)
+                if _is_full_review_json(structured):
+                    original_structured = structured
+                    logger.warning(
+                        "Agent %s returned full review in deliberation; retrying for delta",
+                        agent.agent_id,
+                    )
+                    if on_event:
+                        on_event("delta_violation", {
+                            "agent_id": agent.agent_id,
+                            "round": round_num + 1,
+                            "action": "retry",
+                        })
+                    repair_msg = Message(
+                        role="user",
+                        content=(
+                            prompt
+                            + "\n\nIMPORTANT: Your previous answer was a full review. "
+                            "Return ONLY the delta JSON object with the 6 specified keys. "
+                            "Do not include review schema fields."
+                        ),
+                    )
+                    try:
+                        response = await agent.process(
+                            context,
+                            repair_msg,
+                            include_history=False,
+                        )
+                        structured = _try_extract_json(response.content)
+                    except Exception:
+                        structured = original_structured
+                    if _is_full_review_json(structured):
+                        structured = _coerce_to_delta(structured)
+                        if on_event:
+                            on_event("delta_violation", {
+                                "agent_id": agent.agent_id,
+                                "round": round_num + 1,
+                                "action": "coerced",
+                            })
                 output = AgentOutput(
                     agent_id=agent.agent_id,
                     agent_role=agent.role,
                     content=response.content,
-                    structured=_try_extract_json(response.content),
+                    structured=structured,
                     metadata={
                         **response.metadata,
                         "round": round_num + 1,
