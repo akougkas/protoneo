@@ -1247,19 +1247,20 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         pg = KnowledgeGraph.model_validate(session.knowledge_graph)
         agent_outputs = []
-        try:
-            from apps.paper_review.review import session_to_review_packet
-
-            packet = session_to_review_packet(session)
-            agent_outputs = [review.model_dump() for review in packet.reviews]
-        except Exception:
-            phases = session.result.get("phases", [])
-            for phase in phases:
-                for output in phase.get("outputs", []):
-                    parsed = output.get("structured", {})
-                    if parsed:
-                        parsed["agent_id"] = output.get("agent_id", "")
-                        agent_outputs.append(parsed)
+        phases = session.result.get("phases", [])
+        for phase in phases:
+            if phase.get("phase_name") != "independent_review":
+                continue
+            for output in phase.get("outputs", []):
+                parsed = output.get("structured", {})
+                if not parsed:
+                    try:
+                        parsed = json.loads(output.get("content", ""))
+                    except Exception:
+                        parsed = {}
+                if parsed:
+                    parsed["agent_id"] = output.get("agent_id", "")
+                    agent_outputs.append(parsed)
 
         return pg.compute_utilization(agent_outputs)
 
