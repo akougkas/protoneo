@@ -129,6 +129,7 @@ class LLMClient:
         model_id: str,
         temperature: float = 1,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Call OpenAI Codex Responses API (chatgpt.com/backend-api).
 
@@ -163,6 +164,11 @@ class LLMClient:
             "stream": True,
             "store": False,
         }
+        if reasoning_effort:
+            body["reasoning"] = {
+                "effort": reasoning_effort,
+                "summary": "detailed" if reasoning_effort in {"high", "xhigh"} else "concise",
+            }
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -410,6 +416,7 @@ class LLMClient:
 
         # Subscription providers with OAuth tokens bypass LiteLLM entirely
         if api_key and not has_local_endpoint and _is_openai_oauth(provider, api_key):
+            direct_overrides = self._filter_request_overrides(info, kwargs)
             raw_model = model.split("/", 1)[1] if "/" in model else model
             response = await self._call_openai_codex(
                 token=api_key,
@@ -417,6 +424,7 @@ class LLMClient:
                 model_id=raw_model,
                 temperature=1,  # gpt-5 models only support temperature=1
                 max_tokens=max_tokens,
+                reasoning_effort=direct_overrides.get("reasoning_effort"),
             )
             response.content = self._strip_thinking(response.content)
             if session_id:

@@ -8,8 +8,10 @@ auto-detected. Cloud provider models come from their APIs.
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -52,6 +54,147 @@ async def _post_json(url: str, body: dict | None = None, headers: dict | None = 
 
 # ── Local service detection ────────────────────────────────
 
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _service_root(base_url: str) -> str:
+    """Return the service root for OpenAI-compatible endpoints.
+
+    LM Studio exposes management metadata under /api/v*/models while its
+    OpenAI-compatible API lives under /v1.
+    """
+    parsed = urlparse(base_url.rstrip("/"))
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3] or ""
+    return urlunparse(parsed._replace(path=path, params="", query="", fragment="")).rstrip("/")
+
+
+def _value_after_arg(args: list[Any], names: set[str]) -> str | None:
+    for i, arg in enumerate(args):
+        if str(arg) in names and i + 1 < len(args):
+            return str(args[i + 1])
+    return None
+
+
+def _context_from_preset(preset: str) -> int | None:
+    for key in ("ctx-size", "ctx_size", "n_ctx", "n-ctx", "context_length", "max_context_length"):
+        match = re.search(rf"(?m)^\s*{re.escape(key)}\s*=\s*([0-9]+)\s*$", preset)
+        if match:
+            parsed = _coerce_positive_int(match.group(1))
+            if parsed:
+                return parsed
+    return None
+
+
+def _extract_context_length(model: dict[str, Any]) -> int | None:
+    for key in (
+        "context_length",
+        "max_context_length",
+        "context_window",
+        "max_context",
+        "ctx_size",
+        "n_ctx",
+    ):
+        parsed = _coerce_positive_int(model.get(key))
+        if parsed:
+            return parsed
+
+    status = model.get("status")
+    if isinstance(status, dict):
+        args = status.get("args")
+        if isinstance(args, list):
+            parsed = _coerce_positive_int(_value_after_arg(
+                args,
+                {"--ctx-size", "--ctx_size", "--n-ctx", "--n_ctx", "-c"},
+            ))
+            if parsed:
+                return parsed
+        preset = status.get("preset")
+        if isinstance(preset, str):
+            parsed = _context_from_preset(preset)
+            if parsed:
+                return parsed
+
+    return None
+
+
+def _normalize_lmstudio_metadata(raw_model: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    model_id = str(raw_model.get("id") or raw_model.get("key") or "").strip()
+    if not model_id:
+        return None
+
+    metadata: dict[str, Any] = {
+        "metadata_source": "lmstudio",
+    }
+    display_name = raw_model.get("display_name") or raw_model.get("name")
+    if display_name:
+        metadata["display_name"] = display_name
+    context_length = _extract_context_length(raw_model)
+    if context_length:
+        metadata["context_length"] = context_length
+        metadata["context_source"] = "lmstudio"
+    state = raw_model.get("state")
+    if isinstance(state, str):
+        metadata["loaded"] = state == "loaded"
+    loaded_instances = raw_model.get("loaded_instances")
+    if isinstance(loaded_instances, list):
+        metadata["loaded"] = bool(loaded_instances)
+    capabilities = raw_model.get("capabilities")
+    if isinstance(capabilities, dict):
+        metadata["tools"] = bool(capabilities.get("trained_for_tool_use"))
+        metadata["vision"] = bool(capabilities.get("vision"))
+    elif isinstance(capabilities, list):
+        metadata["tools"] = "tool_use" in capabilities or "tools" in capabilities
+        metadata["vision"] = "vision" in capabilities
+    quantization = raw_model.get("quantization")
+    if isinstance(quantization, dict):
+        metadata["quantization"] = quantization.get("name") or ""
+    elif quantization:
+        metadata["quantization"] = str(quantization)
+    for source_key, target_key in (
+        ("arch", "architecture"),
+        ("architecture", "architecture"),
+        ("publisher", "publisher"),
+        ("params_string", "parameter_size"),
+        ("format", "format"),
+        ("size_bytes", "size_bytes"),
+    ):
+        if raw_model.get(source_key) is not None:
+            metadata[target_key] = raw_model[source_key]
+    return model_id, metadata
+
+
+async def fetch_lmstudio_metadata(base_url: str) -> dict[str, dict[str, Any]]:
+    """Fetch richer LM Studio model metadata when the endpoint supports it."""
+    root = _service_root(base_url)
+    metadata_by_id: dict[str, dict[str, Any]] = {}
+    if not root:
+        return metadata_by_id
+
+    for path in ("/api/v1/models", "/api/v0/models"):
+        data = await _get_json(f"{root}{path}", timeout=5.0)
+        if not isinstance(data, dict):
+            continue
+        raw_models = data.get("models") or data.get("data") or []
+        if not isinstance(raw_models, list):
+            continue
+        for raw_model in raw_models:
+            if not isinstance(raw_model, dict):
+                continue
+            normalized = _normalize_lmstudio_metadata(raw_model)
+            if normalized is None:
+                continue
+            model_id, metadata = normalized
+            metadata_by_id[model_id] = {**metadata_by_id.get(model_id, {}), **metadata}
+    return metadata_by_id
+
+
 async def probe_openai_endpoint(
     endpoint_id: str,
     display_name: str,
@@ -80,6 +223,7 @@ async def probe_openai_endpoint(
         }
 
     models_raw = data.get("data", []) if isinstance(data, dict) else data
+    lmstudio_metadata = await fetch_lmstudio_metadata(base_url)
     models = []
     loaded_model = None
     for m in models_raw:
@@ -95,9 +239,13 @@ async def probe_openai_endpoint(
             "source": endpoint_id,
             "provider_type": "local",
         }
+        context_length = _extract_context_length(m)
+        if context_length:
+            entry["context_length"] = context_length
+            entry["context_source"] = "openai_models"
 
         # llama-server exposes status and launch args per model
-        status_info = m.get("status", {})
+        status_info = m.get("status")
         if isinstance(status_info, dict):
             entry["loaded"] = status_info.get("value") == "loaded"
             if entry["loaded"]:
@@ -107,12 +255,7 @@ async def probe_openai_endpoint(
             args = status_info.get("args", [])
             if isinstance(args, list):
                 for i, arg in enumerate(args):
-                    if arg == "--ctx-size" and i + 1 < len(args):
-                        try:
-                            entry["context_length"] = int(args[i + 1])
-                        except (ValueError, TypeError):
-                            pass
-                    elif arg == "--temperature" and i + 1 < len(args):
+                    if arg == "--temperature" and i + 1 < len(args):
                         try:
                             entry["temperature"] = float(args[i + 1])
                         except (ValueError, TypeError):
@@ -126,6 +269,12 @@ async def probe_openai_endpoint(
             if len(models_raw) == 1:
                 loaded_model = mid
                 entry["loaded"] = True
+
+        if mid in lmstudio_metadata:
+            lmstudio_entry = lmstudio_metadata[mid]
+            entry = {**entry, **lmstudio_entry}
+            if lmstudio_entry.get("loaded"):
+                loaded_model = mid
 
         models.append(entry)
 
@@ -265,6 +414,10 @@ def _merge_model_lists(*model_lists: list[dict[str, Any]]) -> list[dict[str, Any
     return list(merged.values())
 
 
+def _with_discovery_source(models: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+    return [{**model, "discovery_source": source} for model in models]
+
+
 async def discover_openrouter(api_key: str, free_only: bool = False) -> dict[str, Any]:
     """Discover OpenRouter models. Optionally filter to free tier only."""
     data = await _get_json(
@@ -375,15 +528,17 @@ async def discover_openai(
                 force_refresh=force_refresh,
             )
         models = _merge_model_lists(
-            list(OPENAI_SUBSCRIPTION_MODELS),
-            catalog_models,
+            _with_discovery_source(list(OPENAI_SUBSCRIPTION_MODELS), "fallback_seed"),
+            _with_discovery_source(catalog_models, "live_catalog"),
         )
         return {
             "provider": "openai",
-            "online": True,
+            "online": bool(catalog_models),
             "models": models,
             "credential_type": "oauth",
             "catalog_source": "models.dev+seed" if catalog_models else "seed",
+            "using_cache": not bool(catalog_models),
+            **({"nudge": "Using bundled OpenAI/Codex fallback catalog; live catalog is unavailable."} if not catalog_models else {}),
         }
 
     # Standard API key: query live
@@ -472,6 +627,49 @@ async def discover_all(
             results[key] = {"error": str(result)}
         else:
             results[key] = result
+
+    if cached_models:
+        for group_name in ("localhost", "lan"):
+            nodes = results.get(group_name)
+            if not isinstance(nodes, list):
+                continue
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                provider_id = str(node.get("id") or "")
+                if not provider_id or node.get("online") or node.get("models"):
+                    continue
+                cached = cached_models.get(provider_id) or []
+                if cached:
+                    node["models"] = [
+                        {**model, "source": provider_id, "discovery_source": "cache"}
+                        for model in cached
+                        if isinstance(model, dict)
+                    ]
+                    node["using_cache"] = True
+                    node["nudge"] = "Live discovery failed; showing cached models."
+
+        for provider_id, result in list(results.items()):
+            if provider_id in {"localhost", "lan"}:
+                continue
+            if not isinstance(result, dict):
+                continue
+            if result.get("online") and result.get("models"):
+                continue
+            cached = cached_models.get(provider_id) or []
+            if cached:
+                results[provider_id] = {
+                    **result,
+                    "provider": provider_id,
+                    "online": False,
+                    "models": [
+                        {**model, "source": provider_id, "discovery_source": "cache"}
+                        for model in cached
+                        if isinstance(model, dict)
+                    ],
+                    "using_cache": True,
+                    "nudge": "Live discovery failed; showing cached models.",
+                }
 
     return results
 

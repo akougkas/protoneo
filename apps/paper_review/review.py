@@ -125,6 +125,63 @@ def _provider_from_model(model_id: str) -> str:
     return model_id.split("/", 1)[0] if "/" in model_id else ""
 
 
+def _raw_model_from_model_id(model_id: str) -> str:
+    return model_id.split("/", 1)[1] if "/" in model_id else model_id
+
+
+def _assignment_model_id(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(
+            value.get("model_id")
+            or value.get("provider_model_id")
+            or value.get("model")
+            or ""
+        ).strip()
+    return ""
+
+
+def _assignment_reasoning_effort(value: Any) -> str:
+    if isinstance(value, dict):
+        effort = str(value.get("reasoning_effort") or "").strip()
+        if effort in {"low", "medium", "high", "xhigh"}:
+            return effort
+    return ""
+
+
+def _normalize_model_map(model_map: dict[str, Any] | None) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in (model_map or {}).items():
+        model_id = _assignment_model_id(value)
+        if model_id:
+            normalized[key] = model_id
+    return normalized
+
+
+def _reasoning_effort_map(model_map: dict[str, Any] | None) -> dict[str, str]:
+    efforts: dict[str, str] = {}
+    for key, value in (model_map or {}).items():
+        effort = _assignment_reasoning_effort(value)
+        if effort:
+            efforts[key] = effort
+    return efforts
+
+
+def _configured_reasoning_effort(model_id: str, settings: Any | None) -> str:
+    provider = _provider_from_model(model_id)
+    if not provider or settings is None:
+        return ""
+    configured = getattr(settings, "active_models", {}).get(provider)
+    if configured != _raw_model_from_model_id(model_id):
+        return ""
+    options = getattr(settings, "active_model_options", {}).get(provider, {})
+    if not isinstance(options, dict):
+        return ""
+    effort = str(options.get("reasoning_effort") or "").strip()
+    return effort if effort in {"low", "medium", "high", "xhigh"} else ""
+
+
 def is_local_model_id(model_id: str, settings: Any | None = None) -> bool:
     """Return True when a provider-prefixed model resolves to a local endpoint."""
     provider = _provider_from_model(model_id)
@@ -256,7 +313,7 @@ def _select_candidate_for_policy(
 
 def resolve_paper_review_model(
     key: str,
-    model_map: dict[str, str] | None = None,
+    model_map: dict[str, Any] | None = None,
     *,
     fallback_keys: tuple[str, ...] = (),
     require_local: bool = False,
@@ -277,7 +334,7 @@ def resolve_paper_review_model(
     lookup_keys = (key, *fallback_keys)
     explicit = model_map or {}
     explicit_candidates = [
-        explicit.get(lookup_key, "")
+        _assignment_model_id(explicit.get(lookup_key, ""))
         for lookup_key in lookup_keys
         if explicit.get(lookup_key)
     ]
@@ -469,7 +526,8 @@ def _reviewer_roles_from_profile(
 def build_agent_configs(
     profile: ConferenceProfile,
     conference_slug: str,
-    model_map: dict[str, str] | None = None,
+    model_map: dict[str, Any] | None = None,
+    reasoning_effort_map: dict[str, str] | None = None,
     include_artifact: bool = False,
     user_instructions: str = "",
     artifact_description_assumed_present: bool = False,
@@ -486,7 +544,13 @@ def build_agent_configs(
 
     all_roles = reviewer_roles + ["meta"]
     defaults = _resolve_default_models(roles=all_roles)
-    models = {**defaults, **(model_map or {})}
+    explicit_models = _normalize_model_map(model_map)
+    explicit_efforts = {
+        **_reasoning_effort_map(model_map),
+        **(reasoning_effort_map or {}),
+    }
+    models = {**defaults, **explicit_models}
+    settings, _ = _load_settings_context()
 
     conference_context = (
         f"Conference: {profile.short_name} ({profile.name})\n"
@@ -518,6 +582,11 @@ def build_agent_configs(
         )
         model_id = models.get(role, models.get("technical", ""))
         inference = _inference_for(role, model_id)
+        reasoning_effort = (
+            explicit_efforts.get(role)
+            or _configured_reasoning_effort(model_id, settings)
+            or inference.get("reasoning_effort")
+        )
         configs[role] = AgentConfig(
             role=agent_def.role if agent_def else role.replace("_", " ").title() + " Reviewer",
             model=model_id,
@@ -529,7 +598,7 @@ def build_agent_configs(
             top_k=inference.get("top_k"),
             min_p=inference.get("min_p"),
             repeat_penalty=inference.get("repeat_penalty"),
-            reasoning_effort=inference.get("reasoning_effort"),
+            reasoning_effort=reasoning_effort,
             phase_policy=policy_for_phase(role).label.value,
             presence_penalty=inference.get("presence_penalty"),
             frequency_penalty=inference.get("frequency_penalty"),
@@ -547,6 +616,12 @@ def build_agent_configs(
                   or models.get("meta")
                   or models.get("technical", ""))
     meta_inference = _inference_for("meta", meta_model)
+    meta_reasoning_effort = (
+        explicit_efforts.get("meta_reviewer")
+        or explicit_efforts.get("meta")
+        or _configured_reasoning_effort(meta_model, settings)
+        or meta_inference.get("reasoning_effort")
+    )
     configs["meta"] = AgentConfig(
         role=meta_def.role if meta_def else "Meta-Reviewer",
         model=meta_model,
@@ -558,7 +633,7 @@ def build_agent_configs(
         top_k=meta_inference.get("top_k"),
         min_p=meta_inference.get("min_p"),
         repeat_penalty=meta_inference.get("repeat_penalty"),
-        reasoning_effort=meta_inference.get("reasoning_effort"),
+        reasoning_effort=meta_reasoning_effort,
         phase_policy=policy_for_phase("meta").label.value,
         presence_penalty=meta_inference.get("presence_penalty"),
         frequency_penalty=meta_inference.get("frequency_penalty"),

@@ -108,7 +108,7 @@
           <span class="role-label">{{ role }}</span>
           <select v-model="reviewModelMap[role]" class="modal-select model-select">
             <option value="">Default</option>
-            <option v-for="m in models" :key="m.model_id" :value="m.model_id">{{ m.display_name || m.model_id }}</option>
+            <option v-for="m in models" :key="modelFullId(m)" :value="modelFullId(m)">{{ m.display_name || modelFullId(m) }}</option>
           </select>
         </div>
 
@@ -383,6 +383,10 @@ async function loadMeta() {
     models.value = mRes.data.models || []
     conferences.value = cRes.data.conferences || []
   } catch { /* non-critical */ }
+}
+
+function modelFullId(model) {
+  return model.provider_model_id || model.qualified_id || model.model_id || ''
 }
 
 onMounted(() => {

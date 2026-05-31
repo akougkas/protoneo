@@ -66,6 +66,17 @@ def _normalize(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
+def _entry_context_length(entry: dict[str, Any]) -> int:
+    for key in ("context_length", "max_context_length", "context_window", "max_context", "ctx_size", "n_ctx"):
+        try:
+            value = int(entry.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
 class CapabilityRegistry:
     """
     Maps model identifiers to routing/capability metadata.
@@ -172,13 +183,13 @@ class CapabilityRegistry:
             api_base=getattr(endpoint, "url", None),
             capabilities=capabilities,
             quirks=quirks,
-            max_context=int(entry.get("context_length") or 128_000),
+            max_context=_entry_context_length(entry),
             speed_tps=speed_tps,
             latency_class=self._latency_class_for(speed_tps, raw_model_id),
             structured_output=self._structured_reliability_for(entry, benchmark, capabilities),
             runtime_location=runtime_location,
-            cost_per_input_token=float(entry.get("cost_prompt") or 0.0),
-            cost_per_output_token=float(entry.get("cost_completion") or 0.0),
+            cost_per_input_token=float(entry.get("cost_prompt") or entry.get("cost_input") or 0.0),
+            cost_per_output_token=float(entry.get("cost_completion") or entry.get("cost_output") or 0.0),
             tier=tier,
             display_name=str(entry.get("display_name") or entry.get("name") or raw_model_id),
         )
@@ -224,6 +235,10 @@ class CapabilityRegistry:
 
         if any(hint in lower for hint in _VISION_HINTS):
             capabilities.add(ModelCapability.VISION)
+        if entry.get("vision"):
+            capabilities.add(ModelCapability.VISION)
+        if entry.get("tools"):
+            capabilities.add(ModelCapability.FUNCTION_CALLING)
 
         for tag in (benchmark or {}).get("tags", []):
             capability = _TAG_CAPABILITIES.get(tag)
@@ -236,6 +251,13 @@ class CapabilityRegistry:
         if (
             any(hint in lower for hint in _REASONING_HINTS)
             or ("qwen" in lower and "i1" in lower)
+        ):
+            capabilities.add(ModelCapability.EXTENDED_THINKING)
+
+        if provider == "openai" and (
+            lower.startswith("gpt-5")
+            or lower.startswith(("o1", "o3", "o4"))
+            or "codex" in lower
         ):
             capabilities.add(ModelCapability.EXTENDED_THINKING)
 

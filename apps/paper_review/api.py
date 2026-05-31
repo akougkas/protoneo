@@ -1282,7 +1282,7 @@ async def retry_failed_in_batch(batch_id: str):
 # ── Launch Review on Existing Graph ─────────────────
 
 class LaunchReviewBody(BaseModel):
-    model_map: dict[str, str] = Field(default_factory=dict)
+    model_map: dict[str, Any] = Field(default_factory=dict)
     conference: str = ""
     max_rounds: int = 0
     user_instructions: str = ""
@@ -1790,7 +1790,7 @@ class SC26PacketReviewBody(BaseModel):
     packet_root: str = "submission_packets_sc26"
     paper_ids: list[str] = Field(default_factory=list)
     conference: str = "sc26"
-    model_map: dict[str, str] = Field(default_factory=dict)
+    model_map: dict[str, Any] = Field(default_factory=dict)
     preset: str = ""
     max_rounds: int = 2
     force: bool = False
@@ -1921,7 +1921,7 @@ async def _run_one_sc26_packet_review(
     packet_dir: Path,
     *,
     conference: str,
-    model_map: dict[str, str],
+    model_map: dict[str, Any],
     preset: str,
     max_rounds: int,
     user_instructions: str,
@@ -2062,7 +2062,7 @@ async def run_sc26_packet_reviews(
     packet_root: str = "submission_packets_sc26",
     paper_ids: list[str] | None = None,
     conference: str = "sc26",
-    model_map: dict[str, str] | None = None,
+    model_map: dict[str, Any] | None = None,
     preset: str = "",
     max_rounds: int = 2,
     force: bool = False,

@@ -43,6 +43,16 @@ _KNOWN_ENDPOINTS = {
         "location": _LOCALHOST,
         "type": "ollama",
     },
+    "lan-mini": {
+        "display_name": "Mini",
+        "location": _LAN,
+        "type": "openai",
+    },
+    "lan-dynamo": {
+        "display_name": "Dynamo",
+        "location": _LAN,
+        "type": "openai",
+    },
 }
 
 _KNOWN_HOSTS = {
@@ -81,6 +91,48 @@ class VlmEndpoint(BaseModel):
     concurrency: int = 1
 
 
+def _default_localhost_endpoints() -> list[LocalEndpoint]:
+    return [
+        LocalEndpoint(
+            id="localhost-lmstudio",
+            display_name="LM Studio",
+            url="http://localhost:1234/v1",
+            type="openai",
+            location=_LOCALHOST,
+            enabled=False,
+        ),
+        LocalEndpoint(
+            id="localhost-ollama",
+            display_name="Ollama",
+            url="http://localhost:11434",
+            type="ollama",
+            location=_LOCALHOST,
+            enabled=False,
+        ),
+    ]
+
+
+def _default_lan_endpoints() -> list[LocalEndpoint]:
+    return [
+        LocalEndpoint(
+            id="lan-mini",
+            display_name="Mini",
+            url="http://192.168.86.141:8080/v1",
+            type="openai",
+            location=_LAN,
+            enabled=True,
+        ),
+        LocalEndpoint(
+            id="lan-dynamo",
+            display_name="Dynamo",
+            url="http://192.168.86.143:1234/v1",
+            type="openai",
+            location=_LAN,
+            enabled=True,
+        ),
+    ]
+
+
 class ModelPreset(BaseModel):
     """Named model assignment preset.
 
@@ -102,26 +154,12 @@ class ProtoNeoSettings(BaseModel):
     review session config and are set in PanelHome.
     """
 
-    localhost_endpoints: list[LocalEndpoint] = Field(default_factory=lambda: [
-        LocalEndpoint(
-            id="localhost-lmstudio",
-            display_name="LM Studio",
-            url="http://localhost:1234/v1",
-            type="openai",
-            location=_LOCALHOST,
-        ),
-        LocalEndpoint(
-            id="localhost-ollama",
-            display_name="Ollama",
-            url="http://localhost:11434",
-            type="ollama",
-            location=_LOCALHOST,
-        ),
-    ])
-    lan_endpoints: list[LocalEndpoint] = Field(default_factory=list)
+    localhost_endpoints: list[LocalEndpoint] = Field(default_factory=_default_localhost_endpoints)
+    lan_endpoints: list[LocalEndpoint] = Field(default_factory=_default_lan_endpoints)
     openrouter_free_only: bool = True
     provider_enabled: dict[str, bool] = Field(default_factory=dict)
     active_models: dict[str, str] = Field(default_factory=dict)
+    active_model_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
     presets: list[ModelPreset] = Field(default_factory=list)
     active_preset: str = Field(default="", description="Name of the currently active preset")
     vlm_endpoint: VlmEndpoint = Field(default_factory=VlmEndpoint)
@@ -214,11 +252,19 @@ def _normalize_endpoint_payload(
         endpoint_id = _canonical_endpoint_id(raw_name or raw_display_name or raw_id or endpoint_type, url, endpoint_type, location)
 
     defaults = _KNOWN_ENDPOINTS.get(endpoint_id, {})
-    display_name = raw_display_name or _default_display_name(
-        endpoint_id,
-        raw_name or raw_id,
-        endpoint_type,
-    )
+    raw_label = raw_display_name or raw_name
+    default_label = str(defaults.get("display_name") or "")
+    if default_label and _slugify(raw_label) in {
+        _slugify(default_label),
+        endpoint_id.removeprefix("lan-").removeprefix("localhost-"),
+    }:
+        display_name = default_label
+    else:
+        display_name = raw_display_name or _default_display_name(
+            endpoint_id,
+            raw_name or raw_id,
+            endpoint_type,
+        )
 
     return {
         "id": endpoint_id,
@@ -335,6 +381,13 @@ def _migrate_settings_data(data: dict[str, Any]) -> dict[str, Any]:
         if mapped_name not in active_models or not active_models[mapped_name]:
             active_models[mapped_name] = model_id
 
+    active_model_options: dict[str, dict[str, Any]] = {}
+    for provider_name, options in (data.get("active_model_options") or {}).items():
+        if not isinstance(options, dict):
+            continue
+        mapped_name = aliases.get(str(provider_name), str(provider_name))
+        active_model_options[mapped_name] = dict(options)
+
     benchmark_results: list[dict[str, Any]] = []
     for result in data.get("benchmark_results") or []:
         if not isinstance(result, dict):
@@ -353,11 +406,13 @@ def _migrate_settings_data(data: dict[str, Any]) -> dict[str, Any]:
             "lan_endpoints",
             "provider_enabled",
             "active_models",
+            "active_model_options",
             "benchmark_results",
             "discovered_models",
         }},
         "provider_enabled": migrated_provider_enabled,
         "active_models": active_models,
+        "active_model_options": active_model_options,
         "benchmark_results": benchmark_results,
         "discovered_models": _migrate_discovered_models(data.get("discovered_models"), aliases),
     }
@@ -414,6 +469,29 @@ def save_settings(settings: ProtoNeoSettings) -> None:
     logger.info("Settings saved to %s", _SETTINGS_FILE)
 
 
+def _merge_endpoint_patch(
+    current: list[LocalEndpoint],
+    patch_value: Any,
+    default_location: str,
+) -> list[dict[str, Any]]:
+    """Merge endpoint patches by id so partial UI saves cannot erase providers."""
+    current_by_id = {endpoint.id: endpoint.model_dump() for endpoint in current}
+    if not isinstance(patch_value, list):
+        return list(current_by_id.values())
+
+    order = [endpoint.id for endpoint in current]
+    for raw_endpoint in patch_value:
+        normalized = _normalize_endpoint_payload(raw_endpoint, default_location)
+        if normalized is None:
+            continue
+        endpoint_id = normalized["id"]
+        current_by_id[endpoint_id] = {**current_by_id.get(endpoint_id, {}), **normalized}
+        if endpoint_id not in order:
+            order.append(endpoint_id)
+
+    return [current_by_id[endpoint_id] for endpoint_id in order if endpoint_id in current_by_id]
+
+
 def update_settings(patch: dict[str, Any]) -> ProtoNeoSettings:
     """Load, merge partial update, save, and return."""
     current = load_settings()
@@ -425,6 +503,22 @@ def update_settings(patch: dict[str, Any]) -> ProtoNeoSettings:
         if patch.get(endpoint_key) == [] and getattr(current, endpoint_key):
             patch.pop(endpoint_key, None)
     merged = current.model_dump()
+
+    for endpoint_key, default_location in (
+        ("localhost_endpoints", _LOCALHOST),
+        ("lan_endpoints", _LAN),
+    ):
+        if endpoint_key in patch:
+            merged[endpoint_key] = _merge_endpoint_patch(
+                getattr(current, endpoint_key),
+                patch.pop(endpoint_key),
+                default_location,
+            )
+
+    for dict_key in ("provider_enabled", "active_models", "active_model_options"):
+        if isinstance(patch.get(dict_key), dict):
+            merged[dict_key] = {**merged.get(dict_key, {}), **patch.pop(dict_key)}
+
     merged.update(patch)
     updated = ProtoNeoSettings.model_validate(_migrate_settings_data(merged))
     save_settings(updated)
@@ -700,7 +794,7 @@ def provider_is_enabled(provider_name: str, settings: ProtoNeoSettings | None = 
 def active_model_assignments(
     settings: ProtoNeoSettings | None = None,
     provider_registry=None,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     """Return ready-to-use routing assignments for enabled active models."""
     active_settings = settings or load_settings()
 
@@ -717,6 +811,7 @@ def active_model_assignments(
             continue
 
         registry_info = registry.get(f"{provider}/{model_id}")
+        model_options = dict(active_settings.active_model_options.get(provider) or {})
         api_key_source = "local"
         if provider not in endpoints:
             if provider == "openrouter":
@@ -735,6 +830,8 @@ def active_model_assignments(
             "latency_class": registry_info.latency_class.value,
             "structured_output": registry_info.structured_output.value,
             "runtime_location": registry_info.runtime_location,
+            "options": model_options,
+            "reasoning_effort": model_options.get("reasoning_effort", ""),
         }
 
     return assignments

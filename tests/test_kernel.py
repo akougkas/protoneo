@@ -24,6 +24,8 @@ from protoneo.deliberation.types import DeliberationRules
 from protoneo.knowledge.chunker import chunk_text
 from protoneo.knowledge.parser import parse_file
 from protoneo.llm.client import LLMClient
+from protoneo.llm import discovery as discovery_module
+from protoneo.llm.model_catalog import build_model_catalog
 from protoneo.llm.registry import CapabilityRegistry
 import protoneo.llm.settings as settings_module
 from protoneo.llm.settings import LocalEndpoint, ProtoNeoSettings, active_model_assignments
@@ -148,7 +150,11 @@ class TestCapabilityRegistry:
         # Returns defaults but does NOT auto-create the file
         assert not settings_path.exists()
         assert [ep.id for ep in settings.localhost_endpoints] == ["localhost-lmstudio", "localhost-ollama"]
-        assert settings.lan_endpoints == []
+        assert [ep.id for ep in settings.lan_endpoints] == ["lan-mini", "lan-dynamo"]
+        assert [ep.url for ep in settings.lan_endpoints] == [
+            "http://192.168.86.141:8080/v1",
+            "http://192.168.86.143:1234/v1",
+        ]
 
     def test_registry_accepts_legacy_provider_aliases(self):
         settings = ProtoNeoSettings(
@@ -176,6 +182,88 @@ class TestCapabilityRegistry:
 
         assert info.provider == "lan-mini"
         assert info.model_id == "lan-mini/Qwen35-Distilled-i1-Q4_K_M"
+
+    @pytest.mark.asyncio
+    async def test_openai_endpoint_discovery_reads_llama_server_context(self, monkeypatch):
+        async def fake_get_json(url, headers=None, timeout=3.0):
+            if url == "http://mini:8080/v1/models":
+                return {
+                    "data": [
+                        {
+                            "id": "AgenticQwen-30B-A3B-i1-Q4_K_M",
+                            "owned_by": "llamacpp",
+                            "status": {
+                                "value": "loaded",
+                                "args": [
+                                    "--ctx-size",
+                                    "225280",
+                                    "--temperature",
+                                    "0.6",
+                                ],
+                            },
+                        }
+                    ]
+                }
+            return {"error": "not found"}
+
+        monkeypatch.setattr(discovery_module, "_get_json", fake_get_json)
+
+        result = await discovery_module.probe_openai_endpoint(
+            "lan-mini",
+            "Mini",
+            "http://mini:8080/v1",
+            "lan",
+        )
+
+        assert result["loaded_model"] == "AgenticQwen-30B-A3B-i1-Q4_K_M"
+        assert result["models"][0]["context_length"] == 225280
+        assert result["models"][0]["context_source"] == "openai_models"
+
+    @pytest.mark.asyncio
+    async def test_openai_endpoint_discovery_enriches_lmstudio_context(self, monkeypatch):
+        async def fake_get_json(url, headers=None, timeout=3.0):
+            if url == "http://dynamo:1234/v1/models":
+                return {
+                    "data": [
+                        {
+                            "id": "nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+                            "owned_by": "organization_owner",
+                        }
+                    ]
+                }
+            if url == "http://dynamo:1234/api/v1/models":
+                return {
+                    "models": [
+                        {
+                            "key": "nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+                            "display_name": "Nemotron 3 Nano Omni",
+                            "max_context_length": 262144,
+                            "loaded_instances": ["default"],
+                            "capabilities": {
+                                "vision": True,
+                                "trained_for_tool_use": True,
+                            },
+                        }
+                    ]
+                }
+            return {"error": "not found"}
+
+        monkeypatch.setattr(discovery_module, "_get_json", fake_get_json)
+
+        result = await discovery_module.probe_openai_endpoint(
+            "lan-dynamo",
+            "Dynamo",
+            "http://dynamo:1234/v1",
+            "lan",
+        )
+
+        model = result["models"][0]
+        assert result["loaded_model"] == "nvidia-nemotron-3-nano-omni-30b-a3b-reasoning"
+        assert model["context_length"] == 262144
+        assert model["context_source"] == "lmstudio"
+        assert model["display_name"] == "Nemotron 3 Nano Omni"
+        assert model["vision"] is True
+        assert model["tools"] is True
 
     def test_register_custom_model(self):
         reg = CapabilityRegistry(load_builtins=False)
@@ -399,6 +487,108 @@ class TestLLMClient:
 
 
 class TestSettingsRouting:
+    def test_update_settings_preserves_endpoints_on_empty_partial_save(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "settings.json"
+        monkeypatch.setattr(settings_module, "_SETTINGS_DIR", tmp_path)
+        monkeypatch.setattr(settings_module, "_SETTINGS_FILE", settings_path)
+        settings_module.save_settings(ProtoNeoSettings(
+            lan_endpoints=[
+                LocalEndpoint(
+                    id="lan-mini",
+                    display_name="Mini",
+                    url="http://mini/v1",
+                    location="lan",
+                ),
+                LocalEndpoint(
+                    id="lan-dynamo",
+                    display_name="Dynamo",
+                    url="http://dynamo/v1",
+                    location="lan",
+                ),
+            ],
+            active_models={"lan-mini": "mini-model"},
+        ))
+
+        updated = settings_module.update_settings({
+            "localhost_endpoints": [],
+            "lan_endpoints": [],
+            "provider_enabled": {"openrouter": True},
+            "active_models": {"openai": "gpt-5.5"},
+            "active_model_options": {"openai": {"reasoning_effort": "xhigh"}},
+        })
+
+        assert [ep.id for ep in updated.lan_endpoints] == ["lan-mini", "lan-dynamo"]
+        assert updated.active_models["lan-mini"] == "mini-model"
+        assert updated.active_models["openai"] == "gpt-5.5"
+        assert updated.active_model_options["openai"]["reasoning_effort"] == "xhigh"
+
+    def test_update_settings_merges_endpoint_patches_by_id(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "settings.json"
+        monkeypatch.setattr(settings_module, "_SETTINGS_DIR", tmp_path)
+        monkeypatch.setattr(settings_module, "_SETTINGS_FILE", settings_path)
+        settings_module.save_settings(ProtoNeoSettings(
+            lan_endpoints=[
+                LocalEndpoint(
+                    id="lan-mini",
+                    display_name="Mini",
+                    url="http://mini/v1",
+                    location="lan",
+                ),
+                LocalEndpoint(
+                    id="lan-dynamo",
+                    display_name="Dynamo",
+                    url="http://dynamo/v1",
+                    location="lan",
+                ),
+            ],
+        ))
+
+        updated = settings_module.update_settings({
+            "lan_endpoints": [
+                {
+                    "id": "lan-mini",
+                    "display_name": "Mini Runtime",
+                    "url": "http://mini-new/v1",
+                    "type": "openai",
+                    "enabled": False,
+                    "location": "lan",
+                }
+            ],
+        })
+
+        endpoints = {ep.id: ep for ep in updated.lan_endpoints}
+        assert set(endpoints) == {"lan-mini", "lan-dynamo"}
+        assert endpoints["lan-mini"].display_name == "Mini Runtime"
+        assert endpoints["lan-mini"].url == "http://mini-new/v1"
+        assert endpoints["lan-mini"].enabled is False
+        assert endpoints["lan-dynamo"].url == "http://dynamo/v1"
+
+    def test_model_catalog_normalizes_reasoning_effort_models(self):
+        settings = ProtoNeoSettings(
+            provider_enabled={"openai": True},
+            active_models={"openai": "gpt-5.5-codex"},
+            active_model_options={"openai": {"reasoning_effort": "xhigh"}},
+            discovered_models={
+                "openai": [
+                    {
+                        "id": "gpt-5.5-codex",
+                        "name": "GPT-5.5 Codex",
+                        "source": "openai",
+                        "provider_type": "api",
+                        "discovery_source": "live_catalog",
+                    }
+                ]
+            },
+        )
+
+        catalog = build_model_catalog(settings, CapabilityRegistry.from_settings(settings))
+        model = next(item for item in catalog if item["provider_model_id"] == "openai/gpt-5.5-codex")
+
+        assert model["provider_id"] == "openai"
+        assert model["model_id"] == "gpt-5.5-codex"
+        assert model["supports_reasoning_effort"] is True
+        assert model["supported_reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
+
     def test_active_model_assignments_skip_disabled_providers(self):
         settings = ProtoNeoSettings(
             localhost_endpoints=[],
@@ -444,6 +634,33 @@ class TestSettingsRouting:
         assert assignments["lan-mini"]["litellm_model"] == "openai/Qwen35-Distilled-i1-Q4_K_M"
         assert assignments["lan-mini"]["api_base"] == "http://mini:8080/v1"
         assert assignments["lan-mini"]["api_key_source"] == "local"
+
+    def test_active_model_assignments_include_model_options(self):
+        settings = ProtoNeoSettings(
+            provider_enabled={"openai": True},
+            active_models={"openai": "gpt-5.5"},
+            active_model_options={"openai": {"reasoning_effort": "xhigh"}},
+            discovered_models={
+                "openai": [
+                    {
+                        "id": "gpt-5.5",
+                        "source": "openai",
+                        "provider_type": "api",
+                    }
+                ]
+            },
+        )
+        provider_registry = MagicMock()
+        provider_registry.resolve_credential_info.return_value = {
+            "api_key_source": "oauth",
+        }
+
+        assignments = active_model_assignments(settings=settings, provider_registry=provider_registry)
+
+        assert assignments["openai"]["model_id"] == "gpt-5.5"
+        assert assignments["openai"]["api_key_source"] == "oauth"
+        assert assignments["openai"]["options"] == {"reasoning_effort": "xhigh"}
+        assert assignments["openai"]["reasoning_effort"] == "xhigh"
 
 
 # ── Agent ───────────────────────────────────────────────────

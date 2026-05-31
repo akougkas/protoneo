@@ -290,26 +290,36 @@
                 v-model="modelMap[pa.id]"
                 :disabled="!pa.enabled"
                 class="model-select"
+                @change="syncRoleReasoning(pa.id)"
               >
                 <option
                   v-for="m in availableModels"
-                  :key="m.model_id"
-                  :value="m.model_id"
+                  :key="modelFullId(m)"
+                  :value="modelFullId(m)"
                 >{{ modelLabel(m) }}</option>
               </select>
               <div class="model-info" v-if="modelMap[pa.id]">
                 {{ modelDetail(modelMap[pa.id]) }}
               </div>
+              <select
+                v-if="supportsReasoningEffort(modelMap[pa.id])"
+                v-model="reasoningMap[pa.id]"
+                class="model-select reasoning-select"
+                :disabled="!pa.enabled"
+              >
+                <option value="">Provider default reasoning</option>
+                <option v-for="level in reasoningOptions(modelMap[pa.id])" :key="level" :value="level">{{ level }}</option>
+              </select>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Graph Processing Models (local only) -->
-      <div class="panel-section" v-if="localModels.length > 0">
+      <!-- Graph Processing Models -->
+      <div class="panel-section" v-if="availableModels.length > 0">
         <h2 class="section-heading">
           Graph Processing
-          <span class="agent-count">Local models for pre-review knowledge graph pipeline</span>
+          <span class="agent-count">Local providers are preferred; manual override is allowed</span>
         </h2>
         <div class="graph-model-grid">
           <div v-for="step in graphSteps" :key="step.id" class="graph-model-card">
@@ -318,20 +328,10 @@
               <div class="gmc-desc">{{ step.desc }}</div>
             </div>
             <select v-model="modelMap[step.id]" class="model-select">
-              <option v-for="m in localModels" :key="m.model_id" :value="m.model_id">{{ modelLabel(m) }}</option>
+              <option v-for="m in graphModels" :key="modelFullId(m)" :value="modelFullId(m)">{{ modelLabel(m) }}</option>
             </select>
           </div>
         </div>
-      </div>
-      <div class="panel-section panel-section--muted" v-else-if="availableModels.length > 0">
-        <h2 class="section-heading">
-          Graph Processing
-          <span class="agent-count">No local models available</span>
-        </h2>
-        <p class="no-local-hint">
-          Start LM Studio or Ollama with a loaded model. Graph processing runs on local models
-          to preserve subscription tokens for reviews.
-        </p>
       </div>
 
       <!-- User Instructions -->
@@ -576,6 +576,7 @@ const activePresetName = ref('')
 // Agent assignments built from conference profile
 const panelAgents = ref([])
 const modelMap = reactive({})
+const reasoningMap = reactive({})
 
 // Active model assignments from GET /api/settings/active-models.
 // Format: {provider: {model_id, litellm_model, api_base, api_key_source}}
@@ -615,8 +616,49 @@ const graphSteps = [
 // (OpenAI) are reserved for review roles.
 const _SUBSCRIPTION_PROVIDERS = new Set(['openai'])  // anthropic removed
 const localModels = computed(() =>
-  availableModels.value.filter(m => !_SUBSCRIPTION_PROVIDERS.has(m.provider))
+  availableModels.value.filter(m => !_SUBSCRIPTION_PROVIDERS.has(modelProviderId(m)))
 )
+const graphModels = computed(() => [
+  ...localModels.value,
+  ...availableModels.value.filter(m => _SUBSCRIPTION_PROVIDERS.has(modelProviderId(m))),
+])
+
+function modelProviderId(model) {
+  return model.provider_id || model.provider || ''
+}
+
+function modelFullId(model) {
+  return model.provider_model_id || model.qualified_id || model.model_id || ''
+}
+
+function modelById(modelId) {
+  const resolved = normalizeModelId(modelId)
+  return availableModels.value.find(m => modelFullId(m) === resolved) || null
+}
+
+function supportsReasoningEffort(modelId) {
+  return Boolean(modelById(modelId)?.supports_reasoning_effort)
+}
+
+function reasoningOptions(modelId) {
+  return modelById(modelId)?.supported_reasoning_efforts || []
+}
+
+function providerFromModelId(modelId) {
+  return modelId?.includes('/') ? modelId.split('/', 1)[0] : ''
+}
+
+function syncRoleReasoning(roleId) {
+  const selected = normalizeModelId(modelMap[roleId])
+  if (!supportsReasoningEffort(selected)) {
+    delete reasoningMap[roleId]
+    return
+  }
+  if (!reasoningMap[roleId]) {
+    const provider = providerFromModelId(selected)
+    reasoningMap[roleId] = activeAssignments.value?.[provider]?.reasoning_effort || ''
+  }
+}
 
 function benchmarkTokensPerSecond(bench) {
   if (!bench) return null
@@ -628,22 +670,22 @@ function normalizeModelId(modelId) {
   if (!modelId) return ''
   const models = availableModels.value || []
   if (!models.length) return modelId
-  if (models.some(m => m.model_id === modelId)) return modelId
+  if (models.some(m => modelFullId(m) === modelId)) return modelId
 
   const rawId = modelId.includes('/') ? modelId.split('/').slice(1).join('/') : modelId
   for (const [provider, info] of Object.entries(activeAssignments.value || {})) {
     if (info?.model_id !== rawId) continue
     const candidate = `${provider}/${rawId}`
-    if (models.some(m => m.model_id === candidate)) return candidate
+    if (models.some(m => modelFullId(m) === candidate)) return candidate
   }
 
   const suffixMatch = models.find(m => {
-    const candidate = m.model_id || ''
+    const candidate = modelFullId(m) || ''
     return candidate === rawId || candidate.endsWith(`/${rawId}`)
   })
-  if (suffixMatch) return suffixMatch.model_id
+  if (suffixMatch) return modelFullId(suffixMatch)
 
-  return models[0]?.model_id || modelId
+  return modelFullId(models[0]) || modelId
 }
 
 function getModelDefault(roleId) {
@@ -668,7 +710,13 @@ function getModelDefault(roleId) {
   }
 
   // Last resort: first model from /api/models
-  return normalizeModelId(availableModels.value[0]?.model_id || '')
+  return normalizeModelId(modelFullId(availableModels.value[0]) || '')
+}
+
+function getGraphDefault() {
+  const local = localModels.value[0]
+  if (local) return normalizeModelId(modelFullId(local))
+  return getModelDefault('technical')
 }
 
 const enabledAgentCount = computed(() => panelAgents.value.filter(a => a.enabled).length)
@@ -704,6 +752,7 @@ watch([availableModels, activeAssignments], () => {
   for (const pa of panelAgents.value) {
     if (modelMap[pa.id]) {
       modelMap[pa.id] = normalizeModelId(modelMap[pa.id])
+      syncRoleReasoning(pa.id)
     }
   }
 })
@@ -732,6 +781,7 @@ function buildPanelFromProfile(profile) {
       isMeta: id === 'meta_reviewer' || id === 'meta',
     })
     modelMap[id] = normalizeModelId(getModelDefault(id))
+    syncRoleReasoning(id)
   }
   const oa = profile.optional_agents || {}
   for (const [id, def] of Object.entries(oa)) {
@@ -744,11 +794,12 @@ function buildPanelFromProfile(profile) {
       isMeta: false,
     })
     modelMap[id] = normalizeModelId(getModelDefault(id))
+    syncRoleReasoning(id)
   }
   // Set graph processing model defaults (prefer fast local models)
   for (const step of graphSteps) {
     if (!modelMap[step.id]) {
-      modelMap[step.id] = normalizeModelId(getModelDefault('technical'))
+      modelMap[step.id] = normalizeModelId(getGraphDefault())
     }
   }
   panelAgents.value = agents
@@ -758,7 +809,10 @@ function applyPresetAssignments(assignments) {
   if (!assignments || typeof assignments !== 'object') return
   for (const [key, modelId] of Object.entries(assignments)) {
     const resolved = normalizeModelId(modelId)
-    if (resolved) modelMap[key] = resolved
+    if (resolved) {
+      modelMap[key] = resolved
+      syncRoleReasoning(key)
+    }
   }
 }
 
@@ -776,7 +830,7 @@ async function selectPreset(name) {
 }
 
 function modelLabel(m) {
-  const mid = m.model_id || ''
+  const mid = modelFullId(m)
   // Check if this model is an active assignment (mark it)
   const isActive = activeModelIds.value.includes(mid)
   const prefix = isActive ? '\u2713 ' : ''
@@ -811,6 +865,7 @@ function modelDetail(modelId) {
   // Extract provider from model_id
   const slashIdx = resolvedModelId.indexOf('/')
   const provider = slashIdx >= 0 ? resolvedModelId.slice(0, slashIdx) : ''
+  const catalog = modelById(resolvedModelId)
 
   // Check active assignments for routing info
   const assignment = activeAssignments.value[provider]
@@ -818,7 +873,16 @@ function modelDetail(modelId) {
     const parts = []
     parts.push(provider)
     if (assignment.api_key_source) parts.push(assignment.api_key_source)
+    if (catalog?.supports_reasoning_effort) parts.push('reasoning')
     return parts.join(' \u00b7 ')
+  }
+
+  if (catalog) {
+    const parts = [provider || catalog.provider_id]
+    if (catalog.context_length) parts.push(`${Math.round(catalog.context_length / 1000)}K ctx`)
+    if (catalog.supports_reasoning_effort) parts.push('reasoning')
+    if (catalog.is_free) parts.push('free')
+    return parts.filter(Boolean).join(' \u00b7 ')
   }
 
   // Fall back to benchmark data
@@ -839,9 +903,20 @@ function modelDetail(modelId) {
 function buildReviewModelMap() {
   const enabledMap = {}
   for (const pa of panelAgents.value) {
-    if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
+    if (!pa.enabled) continue
+    const model = normalizeModelId(modelMap[pa.id])
+    if (!model) continue
+    const effort = reasoningMap[pa.id] || ''
+    enabledMap[pa.id] = effort ? { model_id: model, reasoning_effort: effort } : model
   }
   return enabledMap
+}
+
+function addGraphModelMap(target) {
+  for (const step of graphSteps) {
+    if (modelMap[step.id]) target[step.id] = normalizeModelId(modelMap[step.id])
+  }
+  return target
 }
 
 function graphSessionTitle(sess) {
@@ -961,13 +1036,7 @@ async function doLaunchReview() {
   launchError.value = ''
   try {
     // Build model map from enabled agents + graph processing steps
-    const enabledMap = {}
-    for (const pa of panelAgents.value) {
-      if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
-    }
-    for (const step of graphSteps) {
-      if (modelMap[step.id]) enabledMap[step.id] = normalizeModelId(modelMap[step.id])
-    }
+    const enabledMap = addGraphModelMap(buildReviewModelMap())
     const res = await startReview(
       selectedFile.value,
       selectedConference.value,
@@ -1045,13 +1114,7 @@ async function launchBatch() {
   launching.value = true
   launchError.value = ''
   try {
-    const enabledMap = {}
-    for (const pa of panelAgents.value) {
-      if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
-    }
-    for (const step of graphSteps) {
-      if (modelMap[step.id]) enabledMap[step.id] = normalizeModelId(modelMap[step.id])
-    }
+    const enabledMap = addGraphModelMap(buildReviewModelMap())
     const res = await startBatch(batchFiles.value, selectedConference.value, enabledMap)
     router.push({ name: 'Batch', params: { batchId: res.data.batch_id } })
   } catch (e) {
@@ -1066,13 +1129,7 @@ async function launchBatchReview() {
   launching.value = true
   launchError.value = ''
   try {
-    const enabledMap = {}
-    for (const pa of panelAgents.value) {
-      if (pa.enabled) enabledMap[pa.id] = normalizeModelId(modelMap[pa.id])
-    }
-    for (const step of graphSteps) {
-      if (modelMap[step.id]) enabledMap[step.id] = normalizeModelId(modelMap[step.id])
-    }
+    const enabledMap = addGraphModelMap(buildReviewModelMap())
     const res = await startBatchReview(
       batchReviewFiles.value,
       selectedConference.value,
@@ -1478,6 +1535,10 @@ async function launchSavedGraph(sess) {
 .model-select {
   width: 100%;
   font-size: 11px;
+}
+
+.reasoning-select {
+  margin-top: 4px;
 }
 
 .model-select:disabled {

@@ -48,7 +48,14 @@
                 </span>
               </div>
             </div>
-            <div class="card-detail mono">{{ node.url }}</div>
+            <div class="endpoint-form">
+              <input class="endpoint-input endpoint-name" :value="node.display_name" @change="updateEndpoint(node.id, { display_name: $event.target.value.trim() })" />
+              <select class="endpoint-type" :value="node.type" @change="updateEndpoint(node.id, { type: $event.target.value })">
+                <option value="openai">OpenAI-compatible</option>
+                <option value="ollama">Ollama</option>
+              </select>
+              <input class="endpoint-input mono" :value="node.url" @change="updateEndpoint(node.id, { url: $event.target.value.trim() })" />
+            </div>
 
             <!-- Loaded vs available distinction -->
             <div v-if="node.online && node.loaded_model" class="card-loaded">
@@ -114,7 +121,14 @@
                 </span>
               </div>
             </div>
-            <div class="card-detail mono">{{ node.url }}</div>
+            <div class="endpoint-form">
+              <input class="endpoint-input endpoint-name" :value="node.display_name" @change="updateEndpoint(node.id, { display_name: $event.target.value.trim() })" />
+              <select class="endpoint-type" :value="node.type" @change="updateEndpoint(node.id, { type: $event.target.value })">
+                <option value="openai">OpenAI-compatible</option>
+                <option value="ollama">Ollama</option>
+              </select>
+              <input class="endpoint-input mono" :value="node.url" @change="updateEndpoint(node.id, { url: $event.target.value.trim() })" />
+            </div>
             <div v-if="node.online && node.loaded_model" class="card-loaded">In VRAM: <strong>{{ node.loaded_model }}</strong></div>
             <div v-if="node.online && node.models?.length" class="card-select">
               <label class="select-label">Active model:</label>
@@ -179,7 +193,7 @@
               <label class="select-label">Active model:</label>
               <select v-if="providerModelOptions('openrouter').length" class="provider-model-select" :disabled="!isProviderEnabled('openrouter')" :value="settings.active_models['openrouter'] || ''" @change="setActiveModel('openrouter', $event.target.value)">
                 <option value="">Select a model...</option>
-                <option v-for="m in providerModelOptions('openrouter')" :key="m.id" :value="m.id">{{ m.name || m.id }}</option>
+                <option v-for="m in providerModelOptions('openrouter')" :key="modelOptionKey(m)" :value="modelOptionValue(m)">{{ modelOptionLabel(m) }}</option>
               </select>
               <div class="manual-model-row">
                 <input
@@ -200,6 +214,13 @@
               <span v-if="selectedModelMeta('openrouter').benchmark" :class="['class-chip', selectedModelMeta('openrouter').benchmark.protoneo_class]">
                 {{ selectedModelMeta('openrouter').benchmark.protoneo_class }}
               </span>
+            </div>
+            <div v-if="selectedModelMeta('openrouter')?.supports_reasoning_effort" class="reasoning-row">
+              <label class="select-label">Reasoning effort:</label>
+              <select class="provider-model-select" :value="activeReasoningEffort('openrouter')" @change="setReasoningEffort('openrouter', $event.target.value)" :disabled="!isProviderEnabled('openrouter')">
+                <option value="">Provider default</option>
+                <option v-for="level in selectedModelMeta('openrouter').supported_reasoning_efforts" :key="level" :value="level">{{ level }}</option>
+              </select>
             </div>
             <div v-if="!openrouterAvailable" class="card-nudge">Set OPENROUTER_API_KEY in .env to access cloud models.</div>
           </div>
@@ -240,7 +261,7 @@
               <label class="select-label">Active model:</label>
               <select v-if="providerModelOptions(p.provider).length" class="provider-model-select" :disabled="!isProviderEnabled(p.provider)" :value="settings.active_models[p.provider] || ''" @change="setActiveModel(p.provider, $event.target.value)">
                 <option value="">Select a model...</option>
-                <option v-for="m in providerModelOptions(p.provider)" :key="m.id" :value="m.id">{{ m.name || m.id }}</option>
+                <option v-for="m in providerModelOptions(p.provider)" :key="modelOptionKey(m)" :value="modelOptionValue(m)">{{ modelOptionLabel(m) }}</option>
               </select>
               <div class="manual-model-row">
                 <input
@@ -261,6 +282,13 @@
               <span v-if="selectedModelMeta(p.provider).benchmark" :class="['class-chip', selectedModelMeta(p.provider).benchmark.protoneo_class]">
                 {{ selectedModelMeta(p.provider).benchmark.protoneo_class }}
               </span>
+            </div>
+            <div v-if="selectedModelMeta(p.provider)?.supports_reasoning_effort" class="reasoning-row">
+              <label class="select-label">Reasoning effort:</label>
+              <select class="provider-model-select" :value="activeReasoningEffort(p.provider)" @change="setReasoningEffort(p.provider, $event.target.value)" :disabled="!isProviderEnabled(p.provider)">
+                <option value="">Provider default</option>
+                <option v-for="level in selectedModelMeta(p.provider).supported_reasoning_efforts" :key="level" :value="level">{{ level }}</option>
+              </select>
             </div>
 
             <!-- Nudge from discovery -->
@@ -484,6 +512,7 @@ const settings = reactive({
   openrouter_free_only: true,
   provider_enabled: {},
   active_models: {},
+  active_model_options: {},
   vlm_endpoint: { enabled: false, url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 120, concurrency: 1 },
   benchmark_results: [],
   discovered_models: {},
@@ -513,7 +542,7 @@ const subscriptionProviders = computed(() =>
   providers.value.filter(p => ['openai'].includes(p.provider))  // anthropic removed
 )
 const openrouterAvailable = computed(() => providers.value.find(p => p.provider === 'openrouter')?.has_credentials ?? false)
-const openrouterModelCount = computed(() => discovery.value.openrouter?.models?.length || 0)
+const openrouterModelCount = computed(() => providerModelOptions('openrouter').length || discovery.value.openrouter?.models?.length || 0)
 
 function modelListFromCache(providerName, sourceSettings = settings) {
   const cached = sourceSettings.discovered_models?.[providerName]
@@ -640,7 +669,8 @@ const benchIndex = computed(() => {
 const registryIndex = computed(() => {
   const index = {}
   for (const model of registeredModels.value) {
-    index[model.model_id] = model
+    const fullId = model.provider_model_id || model.qualified_id || model.model_id
+    index[fullId] = model
   }
   return index
 })
@@ -654,12 +684,12 @@ const activeModelList = computed(() => {
     list.push({
       provider,
       id: modelId,
-      name: model?.name || modelId,
-      context_length: model?.context_length || null,
-      is_free: model?.is_free ?? null,
-      cost_prompt: model?.cost_prompt ?? null,
+      name: registry?.display_name || model?.name || modelId,
+      context_length: model?.context_length || registry?.context_length || registry?.max_context || null,
+      is_free: registry?.is_free ?? model?.is_free ?? null,
+      cost_prompt: registry?.cost_prompt ?? model?.cost_prompt ?? null,
       provider_type: model?.provider_type || 'local',
-      loaded: model?.loaded ?? null,
+      loaded: model?.loaded ?? registry?.loaded ?? null,
       temperature: model?.temperature ?? null,
       flash_attention: model?.flash_attention ?? null,
       registry,
@@ -717,17 +747,35 @@ function discoveredProviderModels(providerName) {
 }
 
 function providerModelOptions(providerName) {
-  const models = [...discoveredProviderModels(providerName)]
+  const catalogModels = registeredModels.value.filter(m => m.provider_id === providerName)
+  const models = catalogModels.length ? [...catalogModels] : [...discoveredProviderModels(providerName)]
   const selected = settings.active_models[providerName]
-  if (selected && !models.some(m => m.id === selected)) {
+  if (selected && !models.some(m => modelOptionValue(m) === selected)) {
     models.unshift({
-      id: selected,
-      name: `${selected} (custom)`,
-      source: providerName,
+      model_id: selected,
+      display_name: `${selected} (custom)`,
+      provider_id: providerName,
       provider_type: providerName === 'openrouter' ? 'api' : 'subscription',
+      custom: true,
     })
   }
   return models
+}
+
+function modelOptionValue(model) {
+  return model.model_id || model.id || ''
+}
+
+function modelOptionKey(model) {
+  return model.provider_model_id || `${model.provider_id || model.source || ''}/${modelOptionValue(model)}`
+}
+
+function modelOptionLabel(model) {
+  const name = model.display_name || model.name || modelOptionValue(model)
+  const ctx = model.context_length ? ` (${formatContext(model.context_length)} ctx)` : ''
+  const free = model.is_free === true ? ' · free' : ''
+  const fallback = model.discovery_source && model.discovery_source !== 'live' ? ` · ${model.discovery_source}` : ''
+  return `${name}${ctx}${free}${fallback}`
 }
 
 function discoveryNudge(providerName) {
@@ -739,21 +787,43 @@ function selectedModelMeta(provider) {
   const modelId = settings.active_models[provider]
   if (!modelId) return null
   const model = findDiscoveredModel(provider, modelId)
-  const benchmark = getBenchResult(provider, modelId)
   const registry = registryIndex.value[`${provider}/${modelId}`] || null
+  const benchmark = getBenchResult(provider, modelId)
   return {
     model,
     registry,
-    context_length: model?.context_length || registry?.max_context || null,
-    loaded: model?.loaded ?? null,
-    speed: benchmark?.throughput?.tokens_per_second || null,
+    context_length: model?.context_length || registry?.context_length || registry?.max_context || null,
+    loaded: model?.loaded ?? registry?.loaded ?? null,
+    speed: benchmark?.throughput?.tokens_per_second || registry?.speed_tps || null,
     benchmark,
+    supports_reasoning_effort: registry?.supports_reasoning_effort || false,
+    supported_reasoning_efforts: registry?.supported_reasoning_efforts || [],
   }
 }
 
 function setActiveModel(provider, modelId) {
   settings.active_models[provider] = modelId
   saveSettings()
+}
+
+function activeReasoningEffort(provider) {
+  return settings.active_model_options?.[provider]?.reasoning_effort || ''
+}
+
+function setReasoningEffort(provider, effort) {
+  if (!settings.active_model_options) settings.active_model_options = {}
+  settings.active_model_options[provider] = {
+    ...(settings.active_model_options[provider] || {}),
+    reasoning_effort: effort,
+  }
+  saveSettings()
+}
+
+async function updateEndpoint(provider, patch) {
+  const endpoint = findConfiguredEndpoint(provider)
+  if (!endpoint) return
+  Object.assign(endpoint, patch)
+  await saveSettings()
 }
 
 async function toggleEndpoint(provider, enabled) {
@@ -831,6 +901,7 @@ async function loadAll() {
     if (loaded.vlm_endpoint.enabled === undefined) loaded.vlm_endpoint.enabled = false
     if (!loaded.vlm_endpoint.timeout) loaded.vlm_endpoint.timeout = 120
     if (!loaded.vlm_endpoint.concurrency) loaded.vlm_endpoint.concurrency = 1
+    if (!loaded.active_model_options) loaded.active_model_options = {}
     Object.assign(settings, loaded)
     discovery.value = discoveryFromSettings(loaded)
     benchmarkResults.value = bRes.data.results || []
@@ -845,8 +916,11 @@ async function refreshDiscovery() {
     const sRes = await getSettings()
     const loaded = sRes.data || {}
     if (!loaded.vlm_endpoint) loaded.vlm_endpoint = settings.vlm_endpoint
+    if (!loaded.active_model_options) loaded.active_model_options = settings.active_model_options || {}
     Object.assign(settings, loaded)
     discovery.value = mergeDiscovery(discoveryFromSettings(loaded), live)
+    const mRes = await getModels()
+    registeredModels.value = mRes.data.models || []
   }
   catch (e) { console.error('Discovery failed:', e) }
   finally { discovering.value = false }
@@ -859,6 +933,7 @@ async function saveSettings() {
       lan_endpoints: settings.lan_endpoints,
       provider_enabled: settings.provider_enabled,
       active_models: settings.active_models,
+      active_model_options: settings.active_model_options,
       openrouter_free_only: settings.openrouter_free_only,
       vlm_endpoint: settings.vlm_endpoint,
     })
@@ -1043,6 +1118,33 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 .card-status-label.connected { color: var(--pn-ok); }
 .card-detail { font-size: 11px; color: var(--pn-text-muted); margin-bottom: 3px; }
 .card-detail.mono, .mono { font-size: 10px; }
+.endpoint-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  margin: var(--pn-space-2) 0;
+}
+.endpoint-input,
+.endpoint-type {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--pn-border);
+  background: var(--pn-bg);
+  color: var(--pn-text);
+  font-size: 11px;
+}
+.endpoint-input:focus,
+.endpoint-type:focus {
+  outline: none;
+  border-color: var(--pn-text);
+}
+.endpoint-form .mono {
+  grid-column: 1 / -1;
+  font-family: var(--pn-mono);
+}
+.endpoint-name {
+  font-weight: 600;
+}
 .card-loaded {
   font-size: 11px; color: var(--pn-text); margin: var(--pn-space-2) 0;
   padding: var(--pn-space-1) var(--pn-space-2);
@@ -1060,6 +1162,7 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 .manual-model-input { flex: 1; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; background: #fff; color: #333; }
 .manual-model-input:focus { outline: none; border-color: #000; }
 .manual-model-input::placeholder { color: #aaa; font-style: italic; }
+.reasoning-row { margin-top: var(--pn-space-2); }
 .card-nudge {
   font-size: 11px; color: var(--pn-warn); background: var(--pn-warn-dim);
   border: 1px solid var(--pn-warn); padding: var(--pn-space-2) var(--pn-space-3);

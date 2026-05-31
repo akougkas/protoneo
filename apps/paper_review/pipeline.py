@@ -271,6 +271,8 @@ async def _run_review_stage(
             enriched_message = f"{enriched_message}\n\n{web_context}"
         web_metadata["markdown"] = web_context
         if session:
+            if not hasattr(session, "app_data") or session.app_data is None:
+                session.app_data = {}
             session.app_data["web_search"] = web_metadata
             await _session_manager.update(session)
         bus.emit("web_search_completed", {
@@ -386,6 +388,8 @@ async def _finalize_unified_synthesis(
         conference_slug = session.config.get("metadata", {}).get("conference", "")
         session.result["final_review"] = final_review
         session.result["pc_chair_review"] = final_review
+        if not hasattr(session, "app_data") or session.app_data is None:
+            session.app_data = {}
         session.app_data["conference"] = conference_slug
         session.app_data["final_review"] = final_review
         session.app_data.pop("review_packet", None)

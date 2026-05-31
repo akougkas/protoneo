@@ -59,7 +59,7 @@ class ModelInfo(BaseModel):
     api_base: str | None = Field(default=None, description="Per-model endpoint URL override")
     capabilities: set[ModelCapability] = Field(default_factory=set)
     quirks: set[ModelQuirk] = Field(default_factory=set)
-    max_context: int = Field(default=128_000)
+    max_context: int = Field(default=0)
     speed_tps: int = Field(default=0, description="Approximate tokens per second for scheduling")
     latency_class: LatencyClass = Field(default=LatencyClass.UNKNOWN)
     structured_output: StructuredOutputReliability = Field(default=StructuredOutputReliability.UNKNOWN)

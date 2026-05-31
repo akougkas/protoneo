@@ -168,51 +168,64 @@ async def _auto_discover_after_login():
     """Background task: re-run discovery after a successful OAuth login."""
     try:
         from ..llm.discovery import discover_all
-        from ..llm.providers.registry import get_provider_registry
         from ..llm.settings import load_settings, save_settings
 
         settings = load_settings()
-        oauth_registry = get_provider_registry()
-
-        provider_credentials = {}
-        for name in ["anthropic", "openai"]:
-            info = oauth_registry.resolve_credential_info(name)
-            if info.get("api_key"):
-                provider_credentials[name] = info
 
         results = await discover_all(
             localhost_endpoints=[ep.model_dump() for ep in settings.localhost_endpoints],
             lan_endpoints=[ep.model_dump() for ep in settings.lan_endpoints],
-            provider_credentials=provider_credentials,
+            provider_credentials=_provider_credentials(),
             openrouter_free_only=settings.openrouter_free_only,
+            cached_models=settings.discovered_models,
             force_refresh=True,
         )
 
-        cached: dict[str, list[dict[str, Any]]] = {}
-        for group_name in ("localhost", "lan"):
-            nodes = results.get(group_name, [])
-            if not isinstance(nodes, list):
-                continue
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-                provider_name = str(node.get("id") or node.get("name") or "")
-                if provider_name:
-                    cached[provider_name] = [
-                        {**m, "source": provider_name}
-                        for m in node.get("models", [])
-                        if isinstance(m, dict)
-                    ]
-        for key, val in results.items():
-            if isinstance(val, dict) and "models" in val:
-                cached[key] = val["models"]
-        settings.discovered_models = cached
+        cached, _ = _discovery_cache_updates(results, settings.discovered_models)
+        settings.discovered_models = {**settings.discovered_models, **cached}
         save_settings(settings)
         if _llm_client is not None:
             _llm_client.registry = CapabilityRegistry.from_settings(settings)
         logger.info("Auto-discovery after login completed: %d providers", len(cached))
     except Exception as e:
         logger.warning("Auto-discovery after login failed: %s", e)
+
+
+def _openrouter_key() -> str | None:
+    return (
+        (_llm_client._api_keys.get("openrouter") if _llm_client is not None else None)
+        or os.getenv("OPENROUTER_API_KEY")
+    )
+
+
+def _provider_credentials() -> dict[str, dict[str, Any]]:
+    from ..llm.providers.registry import get_provider_registry
+
+    oauth_registry = get_provider_registry()
+    provider_credentials: dict[str, dict[str, Any]] = {}
+    for name in ["openai"]:
+        info = oauth_registry.resolve_credential_info(name)
+        if info.get("api_key"):
+            provider_credentials[name] = info
+
+    or_key = _openrouter_key()
+    if or_key:
+        provider_credentials["openrouter"] = {
+            "provider": "openrouter",
+            "api_key": or_key,
+            "api_key_source": "env" if os.getenv("OPENROUTER_API_KEY") else "config",
+            "token_type": "api_key",
+        }
+    return provider_credentials
+
+
+def _discovery_cache_updates(
+    results: dict[str, Any],
+    previous_cache: dict[str, list[dict[str, Any]]] | None,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, bool]]:
+    from ..llm.model_catalog import cache_from_discovery_results
+
+    return cache_from_discovery_results(results, previous_cache)
 
 
 def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -> None:
@@ -295,32 +308,16 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
     @app.get("/api/models")
     async def list_models():
-        """List registered models (from static registry, enriched by discovery)."""
+        """List the normalized runtime model catalog."""
+        from ..llm.model_catalog import build_model_catalog
+        from ..llm.settings import load_settings
+
+        settings = load_settings()
         registry: CapabilityRegistry = _llm_client.registry
         return {
-            "models": [
-                {
-                    "model_id": m.model_id,
-                    "provider": m.provider,
-                    "capabilities": sorted(c.value for c in m.capabilities),
-                    "quirks": sorted(q.value for q in m.quirks),
-                    "max_context": m.max_context,
-                    "tier": m.tier.value,
-                    "runtime_location": m.runtime_location,
-                    "latency_class": m.latency_class.value,
-                    "structured_output": m.structured_output.value,
-                    "supports_reasoning": "extended_thinking" in {c.value for c in m.capabilities},
-                    "supports_reasoning_control": "reasoning_control" in {c.value for c in m.capabilities},
-                    "supports_tools": "function_calling" in {c.value for c in m.capabilities},
-                    "supports_vision": "vision" in {c.value for c in m.capabilities},
-                    "display_name": m.display_name or m.model_id,
-                    "speed_tps": m.speed_tps,
-                    "is_private": m.is_private,
-                    "cost_per_input_token": m.cost_per_input_token,
-                    "cost_per_output_token": m.cost_per_output_token,
-                }
-                for m in registry.list_all()
-            ]
+            "models": build_model_catalog(settings, registry),
+            "active_models": settings.active_models,
+            "active_model_options": settings.active_model_options,
         }
 
     @app.get("/api/model-policies")
@@ -334,25 +331,13 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
     async def discover_models():
         """Discover available models from all connected providers."""
         from ..llm.discovery import discover_all
-        from ..llm.providers.registry import get_provider_registry
+        from ..llm.model_catalog import build_model_catalog
         from ..llm.settings import load_settings, save_settings
 
         settings = load_settings()
-        oauth_registry = get_provider_registry()
 
-        provider_credentials = {}
-        for name in ["anthropic", "openai"]:
-            info = oauth_registry.resolve_credential_info(name)
-            if info.get("api_key"):
-                provider_credentials[name] = info
-        or_key = _llm_client._api_keys.get("openrouter") or os.getenv("OPENROUTER_API_KEY")
-        if or_key:
-            provider_credentials["openrouter"] = {
-                "provider": "openrouter",
-                "api_key": or_key,
-                "api_key_source": "env" if os.getenv("OPENROUTER_API_KEY") else "config",
-                "token_type": "api_key",
-            }
+        provider_credentials = _provider_credentials()
+        if provider_credentials.get("openrouter"):
             settings.provider_enabled.setdefault("openrouter", True)
         if provider_credentials.get("openai"):
             settings.provider_enabled.setdefault("openai", True)
@@ -362,10 +347,12 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             lan_endpoints=[ep.model_dump() for ep in settings.lan_endpoints],
             provider_credentials=provider_credentials,
             openrouter_free_only=settings.openrouter_free_only,
+            cached_models=settings.discovered_models,
             force_refresh=True,
         )
 
-        cached: dict[str, list[dict[str, Any]]] = {}
+        cached, live_success = _discovery_cache_updates(results, settings.discovered_models)
+        settings.discovered_models = {**settings.discovered_models, **cached}
         for group_name in ("localhost", "lan"):
             nodes = results.get(group_name, [])
             if not isinstance(nodes, list):
@@ -373,31 +360,15 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             for node in nodes:
                 if not isinstance(node, dict):
                     continue
-
                 provider_name = str(node.get("id") or node.get("name") or "")
-                if not provider_name:
-                    continue
-
-                models = []
-                for model in node.get("models", []):
-                    if not isinstance(model, dict):
-                        continue
-                    entry = dict(model)
-                    entry["source"] = provider_name
-                    models.append(entry)
-                cached[provider_name] = models
-
                 loaded_model = node.get("loaded_model")
-                if loaded_model and not settings.active_models.get(provider_name):
+                if loaded_model and live_success.get(provider_name) and not settings.active_models.get(provider_name):
                     settings.active_models[provider_name] = loaded_model
 
-        for key, val in results.items():
-            if isinstance(val, dict) and "models" in val:
-                cached[key] = val["models"]
-        settings.discovered_models = cached
         save_settings(settings)
         if _llm_client is not None:
             _llm_client.registry = CapabilityRegistry.from_settings(settings)
+            results["catalog"] = build_model_catalog(settings, _llm_client.registry)
 
         return results
 
@@ -512,55 +483,127 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
     @app.get("/api/providers")
     async def list_providers():
-        """List all AI providers with connection status."""
+        """List all first-class AI providers with configuration status."""
         from ..llm.providers.registry import get_provider_registry
-        from ..llm.settings import load_settings
+        from ..llm.settings import all_configured_endpoints, load_settings, provider_is_enabled
 
         registry = get_provider_registry()
         settings = load_settings()
+        provider_rows: list[dict[str, Any]] = []
 
-        providers = registry.all_status()
+        for endpoint in all_configured_endpoints(settings):
+            cached = settings.discovered_models.get(endpoint.id, [])
+            live_cached = any(
+                isinstance(model, dict) and model.get("discovery_source") == "live"
+                for model in cached
+            )
+            provider_rows.append({
+                "provider_id": endpoint.id,
+                "provider": endpoint.id,
+                "display_name": endpoint.display_name,
+                "kind": endpoint.location,
+                "type": endpoint.type,
+                "enabled": endpoint.enabled,
+                "editable_endpoint": True,
+                "endpoint": endpoint.model_dump(),
+                "has_credentials": True,
+                "api_key_source": "local",
+                "online": bool(cached) and live_cached,
+                "model_count": len(cached),
+                "active_model": settings.active_models.get(endpoint.id, ""),
+                "active_model_options": settings.active_model_options.get(endpoint.id, {}),
+            })
 
-        or_key = _llm_client._api_keys.get("openrouter") or os.getenv("OPENROUTER_API_KEY")
-        providers.append({
+        or_key = _openrouter_key()
+        provider_rows.append({
+            "provider_id": "openrouter",
             "provider": "openrouter",
             "display_name": "OpenRouter",
-            "logged_in": False,
+            "kind": "api",
+            "type": "openrouter",
+            "enabled": provider_is_enabled("openrouter", settings),
+            "editable_endpoint": False,
+            "openrouter_free_only": settings.openrouter_free_only,
             "has_credentials": bool(or_key),
-            "type": "api_key",
             "api_key_source": "env" if os.getenv("OPENROUTER_API_KEY") else ("config" if or_key else "none"),
-        })
-
-        providers.append({
-            "provider": "local",
-            "display_name": "Local Runtime",
             "logged_in": False,
-            "has_credentials": True,
-            "type": "local",
-            "nodes": [
-                endpoint.model_dump()
-                for endpoint in [*settings.localhost_endpoints, *settings.lan_endpoints]
-            ],
+            "online": bool(settings.discovered_models.get("openrouter")),
+            "model_count": len(settings.discovered_models.get("openrouter", [])),
+            "active_model": settings.active_models.get("openrouter", ""),
+            "active_model_options": settings.active_model_options.get("openrouter", {}),
         })
 
-        return {"providers": providers}
+        openai_status = registry.provider_status("openai")
+        provider_rows.append({
+            **openai_status,
+            "provider_id": "openai",
+            "provider": "openai",
+            "display_name": openai_status.get("display_name") or "ChatGPT/OpenAI",
+            "kind": "subscription",
+            "type": "openai",
+            "enabled": provider_is_enabled("openai", settings),
+            "editable_endpoint": False,
+            "online": bool(settings.discovered_models.get("openai")),
+            "model_count": len(settings.discovered_models.get("openai", [])),
+            "active_model": settings.active_models.get("openai", ""),
+            "active_model_options": settings.active_model_options.get("openai", {}),
+        })
+
+        return {"providers": provider_rows}
 
     @app.get("/api/providers/{provider_name}")
     async def get_provider_status(provider_name: str):
         """Get detailed status for a single provider."""
         from ..llm.providers.registry import get_provider_registry
-        if provider_name == "openrouter":
-            or_key = _llm_client._api_keys.get("openrouter") or os.getenv("OPENROUTER_API_KEY")
+        from ..llm.settings import endpoint_map, load_settings, provider_is_enabled
+
+        settings = load_settings()
+        endpoints = endpoint_map(settings)
+        if provider_name in endpoints:
+            endpoint = endpoints[provider_name]
             return {
+                "provider_id": endpoint.id,
+                "provider": endpoint.id,
+                "display_name": endpoint.display_name,
+                "kind": endpoint.location,
+                "type": endpoint.type,
+                "enabled": endpoint.enabled,
+                "endpoint": endpoint.model_dump(),
+                "has_credentials": True,
+                "api_key_source": "local",
+                "model_count": len(settings.discovered_models.get(endpoint.id, [])),
+                "active_model": settings.active_models.get(endpoint.id, ""),
+                "active_model_options": settings.active_model_options.get(endpoint.id, {}),
+            }
+
+        if provider_name == "openrouter":
+            or_key = _openrouter_key()
+            return {
+                "provider_id": "openrouter",
                 "provider": "openrouter",
                 "display_name": "OpenRouter",
-                "logged_in": False,
+                "kind": "api",
+                "type": "openrouter",
+                "enabled": provider_is_enabled("openrouter", settings),
                 "has_credentials": bool(or_key),
                 "api_key_source": "env" if os.getenv("OPENROUTER_API_KEY") else ("config" if or_key else "none"),
                 "token_type": "api_key" if or_key else "",
+                "openrouter_free_only": settings.openrouter_free_only,
+                "model_count": len(settings.discovered_models.get("openrouter", [])),
+                "active_model": settings.active_models.get("openrouter", ""),
+                "active_model_options": settings.active_model_options.get("openrouter", {}),
             }
         registry = get_provider_registry()
-        return registry.provider_status(provider_name)
+        status = registry.provider_status(provider_name)
+        if provider_name == "openai":
+            status.update({
+                "provider_id": "openai",
+                "enabled": provider_is_enabled("openai", settings),
+                "model_count": len(settings.discovered_models.get("openai", [])),
+                "active_model": settings.active_models.get("openai", ""),
+                "active_model_options": settings.active_model_options.get("openai", {}),
+            })
+        return status
 
     class LoginRequest(BaseModel):
         provider: str
