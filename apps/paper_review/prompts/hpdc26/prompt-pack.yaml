@@ -8,11 +8,11 @@ composition:
     technical:
       path: "prompts/hpdc26/technical.md"
       phase: independent_review
-      default_model_hint: "openai/gpt-5.4"
+      default_model_hint: "openai/gpt-5.5"
     novelty:
       path: "prompts/hpdc26/novelty.md"
       phase: independent_review
-      default_model_hint: "openai/gpt-5.4-mini"
+      default_model_hint: "openai/gpt-5.5-mini"
     clarity:
       path: "prompts/hpdc26/clarity.md"
       phase: independent_review
@@ -28,7 +28,7 @@ composition:
     meta:
       path: "prompts/hpdc26/meta.md"
       phase: meta_review
-      default_model_hint: "openai/gpt-5.4"
+      default_model_hint: "openai/gpt-5.5"
 
 inputs:
   required:

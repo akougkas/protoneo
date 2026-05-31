@@ -8,11 +8,11 @@ composition:
     technical:
       path: "prompts/sc26/technical.md"
       phase: independent_review
-      default_model_hint: "openai/gpt-5.4"
+      default_model_hint: "openai/gpt-5.5"
     systems:
       path: "prompts/sc26/systems.md"
       phase: independent_review
-      default_model_hint: "openai/gpt-5.4-mini"
+      default_model_hint: "openai/gpt-5.5-mini"
     novelty:
       path: "prompts/sc26/novelty.md"
       phase: independent_review
@@ -24,7 +24,7 @@ composition:
     meta:
       path: "prompts/sc26/meta.md"
       phase: meta_review
-      default_model_hint: "openai/gpt-5.4"
+      default_model_hint: "openai/gpt-5.5"
 
 inputs:
   required:

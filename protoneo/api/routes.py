@@ -185,6 +185,7 @@ async def _auto_discover_after_login():
             lan_endpoints=[ep.model_dump() for ep in settings.lan_endpoints],
             provider_credentials=provider_credentials,
             openrouter_free_only=settings.openrouter_free_only,
+            force_refresh=True,
         )
 
         cached: dict[str, list[dict[str, Any]]] = {}
@@ -358,6 +359,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             lan_endpoints=[ep.model_dump() for ep in settings.lan_endpoints],
             provider_credentials=provider_credentials,
             openrouter_free_only=settings.openrouter_free_only,
+            force_refresh=True,
         )
 
         cached: dict[str, list[dict[str, Any]]] = {}
@@ -544,6 +546,16 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
     async def get_provider_status(provider_name: str):
         """Get detailed status for a single provider."""
         from ..llm.providers.registry import get_provider_registry
+        if provider_name == "openrouter":
+            or_key = _llm_client._api_keys.get("openrouter") or os.getenv("OPENROUTER_API_KEY")
+            return {
+                "provider": "openrouter",
+                "display_name": "OpenRouter",
+                "logged_in": False,
+                "has_credentials": bool(or_key),
+                "api_key_source": "env" if os.getenv("OPENROUTER_API_KEY") else ("config" if or_key else "none"),
+                "token_type": "api_key" if or_key else "",
+            }
         registry = get_provider_registry()
         return registry.provider_status(provider_name)
 

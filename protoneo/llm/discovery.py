@@ -250,6 +250,21 @@ async def discover_local(endpoints: list[dict]) -> list[dict[str, Any]]:
 
 # ── Cloud provider discovery ──────────────────────────────
 
+def _merge_model_lists(*model_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge provider model lists by id while preserving richer metadata."""
+    merged: dict[str, dict[str, Any]] = {}
+    for models in model_lists:
+        for model in models or []:
+            if not isinstance(model, dict):
+                continue
+            model_id = str(model.get("id") or "").strip()
+            if not model_id:
+                continue
+            existing = merged.get(model_id, {})
+            merged[model_id] = {**existing, **model}
+    return list(merged.values())
+
+
 async def discover_openrouter(api_key: str, free_only: bool = False) -> dict[str, Any]:
     """Discover OpenRouter models. Optionally filter to free tier only."""
     data = await _get_json(
@@ -335,21 +350,40 @@ async def discover_openai(
     api_key: str,
     credential_info: dict[str, Any] | None = None,
     models_dev_data: dict[str, Any] | None = None,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
     """Discover OpenAI models.
 
-    OAuth tokens (ChatGPT subscription) get the static Codex catalog
-    matching Codex CLI's /model list. API keys query /v1/models live.
+    OAuth tokens (ChatGPT subscription) use the runtime catalog because
+    the subscription endpoint cannot enumerate models via /v1/models. The
+    bundled catalog is only a seed/fallback so newer ChatGPT subscription
+    models can appear after Refresh All without a code release.
+    API keys query /v1/models live.
     """
     is_oauth = _is_oauth_token("openai", api_key, credential_info)
 
     if is_oauth:
         from .catalogs import OPENAI_SUBSCRIPTION_MODELS
+        from .models_dev import discover_provider_models, parse_provider_models
+
+        catalog_models: list[dict[str, Any]] = []
+        if models_dev_data is not None:
+            catalog_models = parse_provider_models(models_dev_data, "openai")
+        else:
+            catalog_models = await discover_provider_models(
+                "openai",
+                force_refresh=force_refresh,
+            )
+        models = _merge_model_lists(
+            list(OPENAI_SUBSCRIPTION_MODELS),
+            catalog_models,
+        )
         return {
             "provider": "openai",
             "online": True,
-            "models": list(OPENAI_SUBSCRIPTION_MODELS),
+            "models": models,
             "credential_type": "oauth",
+            "catalog_source": "models.dev+seed" if catalog_models else "seed",
         }
 
     # Standard API key: query live
@@ -394,6 +428,7 @@ async def discover_all(
     provider_credentials: dict[str, dict[str, Any]],
     openrouter_free_only: bool = True,
     cached_models: dict[str, list[dict[str, Any]]] | None = None,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
     """Discover models from all configured providers.
 
@@ -423,7 +458,11 @@ async def discover_all(
     #     tasks["anthropic"] = discover_anthropic(anthropic["api_key"], anthropic)
     openai_creds = provider_credentials.get("openai", {})
     if openai_creds.get("api_key"):
-        tasks["openai"] = discover_openai(openai_creds["api_key"], openai_creds)
+        tasks["openai"] = discover_openai(
+            openai_creds["api_key"],
+            openai_creds,
+            force_refresh=force_refresh,
+        )
 
     results_list = await asyncio.gather(*tasks.values(), return_exceptions=True)
 

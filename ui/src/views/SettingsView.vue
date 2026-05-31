@@ -175,12 +175,22 @@
                 ({{ discovery.openrouter.total_available }} total)
               </span>
             </div>
-            <div v-if="openrouterAvailable && openrouterModelCount > 0" class="card-select">
+            <div v-if="openrouterAvailable" class="card-select">
               <label class="select-label">Active model:</label>
-              <select class="provider-model-select" :disabled="!isProviderEnabled('openrouter')" :value="settings.active_models['openrouter'] || ''" @change="setActiveModel('openrouter', $event.target.value)">
+              <select v-if="providerModelOptions('openrouter').length" class="provider-model-select" :disabled="!isProviderEnabled('openrouter')" :value="settings.active_models['openrouter'] || ''" @change="setActiveModel('openrouter', $event.target.value)">
                 <option value="">Select a model...</option>
-                <option v-for="m in (discovery.openrouter?.models || [])" :key="m.id" :value="m.id">{{ m.name || m.id }}</option>
+                <option v-for="m in providerModelOptions('openrouter')" :key="m.id" :value="m.id">{{ m.name || m.id }}</option>
               </select>
+              <div class="manual-model-row">
+                <input
+                  class="manual-model-input"
+                  placeholder="Custom OpenRouter model ID, e.g. openai/gpt-5.5"
+                  :value="settings.active_models['openrouter'] || ''"
+                  @change="setActiveModel('openrouter', $event.target.value.trim())"
+                  @keydown.enter="setActiveModel('openrouter', $event.target.value.trim())"
+                  :disabled="!isProviderEnabled('openrouter')"
+                />
+              </div>
             </div>
             <div v-if="selectedModelMeta('openrouter')" class="selected-model-meta">
               <span v-if="selectedModelMeta('openrouter').context_length" class="meta-chip">{{ formatContext(selectedModelMeta('openrouter').context_length) }} ctx</span>
@@ -225,21 +235,17 @@
             <div v-if="p.email" class="card-detail">{{ p.email }}</div>
             <div v-if="p.logged_in && !p.expired" class="card-detail">Token expires {{ formatExpiry(p.expires_at) }}</div>
 
-            <!-- Active model from discovered -->
-            <div v-if="discoveredProviderModels(p.provider).length" class="card-select">
+            <!-- Active model from discovered, with manual override for new subscription models -->
+            <div v-if="(p.logged_in || p.has_credentials) && isProviderEnabled(p.provider)" class="card-select">
               <label class="select-label">Active model:</label>
-              <select class="provider-model-select" :disabled="!isProviderEnabled(p.provider)" :value="settings.active_models[p.provider] || ''" @change="setActiveModel(p.provider, $event.target.value)">
+              <select v-if="providerModelOptions(p.provider).length" class="provider-model-select" :disabled="!isProviderEnabled(p.provider)" :value="settings.active_models[p.provider] || ''" @change="setActiveModel(p.provider, $event.target.value)">
                 <option value="">Select a model...</option>
-                <option v-for="m in discoveredProviderModels(p.provider)" :key="m.id" :value="m.id">{{ m.name || m.id }}</option>
+                <option v-for="m in providerModelOptions(p.provider)" :key="m.id" :value="m.id">{{ m.name || m.id }}</option>
               </select>
-            </div>
-            <!-- Manual model ID input when discovery returns empty but provider is connected -->
-            <div v-else-if="(p.logged_in || p.has_credentials) && isProviderEnabled(p.provider)" class="card-select">
-              <label class="select-label">Model ID:</label>
               <div class="manual-model-row">
                 <input
                   class="manual-model-input"
-                  :placeholder="'e.g. gpt-4.1'"
+                  :placeholder="'Custom model ID, e.g. gpt-5.5'"
                   :value="settings.active_models[p.provider] || ''"
                   @change="setActiveModel(p.provider, $event.target.value.trim())"
                   @keydown.enter="setActiveModel(p.provider, $event.target.value.trim())"
@@ -654,6 +660,20 @@ function discoveredProviderModels(providerName) {
   return d?.models || []
 }
 
+function providerModelOptions(providerName) {
+  const models = [...discoveredProviderModels(providerName)]
+  const selected = settings.active_models[providerName]
+  if (selected && !models.some(m => m.id === selected)) {
+    models.unshift({
+      id: selected,
+      name: `${selected} (custom)`,
+      source: providerName,
+      provider_type: providerName === 'openrouter' ? 'api' : 'subscription',
+    })
+  }
+  return models
+}
+
 function discoveryNudge(providerName) {
   const d = discovery.value[providerName]
   return d?.nudge || ''
@@ -972,7 +992,7 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 }
 .provider-model-select { width: 100%; font-size: 11px; }
 .provider-model-select:focus { outline: none; border-color: #000; }
-.manual-model-row { display: flex; gap: 6px; }
+.manual-model-row { display: flex; gap: 6px; margin-top: 6px; }
 .manual-model-input { flex: 1; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; background: #fff; color: #333; }
 .manual-model-input:focus { outline: none; border-color: #000; }
 .manual-model-input::placeholder { color: #aaa; font-style: italic; }

@@ -37,7 +37,16 @@ _CHAT_PREFIXES = {
 }
 
 # Skip models containing these substrings (embeddings, previews with weird suffixes)
-_SKIP_SUBSTRINGS = ("embedding", "tts", "dall-e", "whisper", "moderation")
+_SKIP_SUBSTRINGS = (
+    "embedding",
+    "tts",
+    "dall-e",
+    "whisper",
+    "moderation",
+    "image",
+    "audio",
+    "realtime",
+)
 
 
 def _is_chat_model(provider: str, model_id: str) -> bool:
@@ -51,8 +60,10 @@ def _is_chat_model(provider: str, model_id: str) -> bool:
     return any(model_id.startswith(p) for p in prefixes)
 
 
-def _load_cache() -> dict[str, Any] | None:
+def _load_cache(*, force_refresh: bool = False) -> dict[str, Any] | None:
     """Load cached models.dev data if still fresh."""
+    if force_refresh:
+        return None
     if not _CACHE_FILE.exists():
         return None
     try:
@@ -71,12 +82,12 @@ def _save_cache(data: dict[str, Any]) -> None:
     _CACHE_FILE.write_text(json.dumps(data, indent=2))
 
 
-async def fetch_models_dev() -> dict[str, Any] | None:
+async def fetch_models_dev(*, force_refresh: bool = False) -> dict[str, Any] | None:
     """Fetch the models.dev catalog, using cache if fresh.
 
     Returns the raw JSON dict keyed by provider name, or None on failure.
     """
-    cached = _load_cache()
+    cached = _load_cache(force_refresh=force_refresh)
     if cached:
         logger.debug("Using cached models.dev data")
         return cached
@@ -153,13 +164,17 @@ def parse_provider_models(
     return models
 
 
-async def discover_provider_models(provider: str) -> list[dict[str, Any]]:
+async def discover_provider_models(
+    provider: str,
+    *,
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
     """Discover models for a subscription provider from models.dev.
 
     This is the primary discovery path for OAuth-authenticated providers
     whose tokens cannot enumerate models via their own APIs.
     """
-    raw = await fetch_models_dev()
+    raw = await fetch_models_dev(force_refresh=force_refresh)
     if raw is None:
         return []
     return parse_provider_models(raw, provider)

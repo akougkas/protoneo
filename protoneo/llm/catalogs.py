@@ -1,8 +1,8 @@
-"""Static model catalogs for subscription providers.
+"""Seed model catalogs for subscription providers.
 
-These are the exact models available through each subscription,
-matching what /model shows in Claude Code, Codex CLI, and Gemini CLI.
-No API models, no models.dev. Just the subscription models.
+These are fallback models for subscription providers whose OAuth runtime
+cannot enumerate models through the normal API. Runtime discovery should merge
+these seeds with the current catalog instead of treating them as authoritative.
 """
 
 # DISABLED: Anthropic provider removed from ProtoNeo.
@@ -16,6 +16,30 @@ ANTHROPIC_SUBSCRIPTION_MODELS: list = []  # Empty: provider disabled
 
 # ChatGPT Plus/Pro subscription models (from Codex CLI /model)
 OPENAI_SUBSCRIPTION_MODELS = [
+    {
+        "id": "gpt-5.5",
+        "name": "GPT-5.5",
+        "context_length": 272_000,
+        "reasoning": True,
+        "source": "openai",
+        "provider_type": "subscription",
+    },
+    {
+        "id": "gpt-5.5-mini",
+        "name": "GPT-5.5 Mini",
+        "context_length": 272_000,
+        "reasoning": True,
+        "source": "openai",
+        "provider_type": "subscription",
+    },
+    {
+        "id": "gpt-5.5-codex",
+        "name": "GPT-5.5 Codex",
+        "context_length": 272_000,
+        "reasoning": True,
+        "source": "openai",
+        "provider_type": "subscription",
+    },
     {
         "id": "gpt-5.4",
         "name": "GPT-5.4",

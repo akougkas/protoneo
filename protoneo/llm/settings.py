@@ -449,13 +449,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
             "coref": "lan-dynamo/qwen3.5-35b-a3b",
             "verification": "lan-dynamo/qwen3.5-35b-a3b",
             # Reviews: cloud models
-            "technical": "openai/gpt-5.4",
-            "systems": "openai/gpt-5.4-mini",
-            "novelty": "openai/gpt-5.4",
-            "clarity": "openai/gpt-5.4-mini",
-            "skeptic": "openai/gpt-5.4",
-            "meta_reviewer": "openai/gpt-5.4",
-            "meta": "openai/gpt-5.4",
+            "technical": "openai/gpt-5.5",
+            "systems": "openai/gpt-5.5-mini",
+            "novelty": "openai/gpt-5.5",
+            "clarity": "openai/gpt-5.5-mini",
+            "skeptic": "openai/gpt-5.5",
+            "meta_reviewer": "openai/gpt-5.5",
+            "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
@@ -468,13 +468,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
             "coref": "lan-dynamo/qwen3.5-35b-a3b",
             "verification": "lan-dynamo/qwen3.5-35b-a3b",
             # Reviews: cloud models
-            "technical": "openai/gpt-5.4",
-            "systems": "openai/gpt-5.4-mini",
-            "novelty": "openai/gpt-5.4",
-            "clarity": "openai/gpt-5.4-mini",
-            "skeptic": "openai/gpt-5.4",
-            "meta_reviewer": "openai/gpt-5.4",
-            "meta": "openai/gpt-5.4",
+            "technical": "openai/gpt-5.5",
+            "systems": "openai/gpt-5.5-mini",
+            "novelty": "openai/gpt-5.5",
+            "clarity": "openai/gpt-5.5-mini",
+            "skeptic": "openai/gpt-5.5",
+            "meta_reviewer": "openai/gpt-5.5",
+            "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
@@ -485,13 +485,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
             "extraction": "lan-dynamo/nemotron-3-nano-30b-a3b",
             "coref": "lan-dynamo/qwen3.5-35b-a3b",
             "verification": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "technical": "openai/gpt-5.4",
-            "systems": "openai/gpt-5.4-mini",
-            "novelty": "openai/gpt-5.4",
-            "clarity": "openai/gpt-5.4-mini",
-            "skeptic": "openai/gpt-5.4",
-            "meta_reviewer": "openai/gpt-5.4",
-            "meta": "openai/gpt-5.4",
+            "technical": "openai/gpt-5.5",
+            "systems": "openai/gpt-5.5-mini",
+            "novelty": "openai/gpt-5.5",
+            "clarity": "openai/gpt-5.5-mini",
+            "skeptic": "openai/gpt-5.5",
+            "meta_reviewer": "openai/gpt-5.5",
+            "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
@@ -502,13 +502,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
             "extraction": "lan-dynamo/ibm/granite-4-h-small",
             "coref": "lan-dynamo/ibm/granite-4-h-micro",
             "verification": "lan-dynamo/ibm/granite-4-h-small",
-            "technical": "openai/gpt-5.4",
-            "systems": "openai/gpt-5.4-mini",
-            "novelty": "openai/gpt-5.4",
-            "clarity": "openai/gpt-5.4-mini",
-            "skeptic": "openai/gpt-5.4",
-            "meta_reviewer": "openai/gpt-5.4",
-            "meta": "openai/gpt-5.4",
+            "technical": "openai/gpt-5.5",
+            "systems": "openai/gpt-5.5-mini",
+            "novelty": "openai/gpt-5.5",
+            "clarity": "openai/gpt-5.5-mini",
+            "skeptic": "openai/gpt-5.5",
+            "meta_reviewer": "openai/gpt-5.5",
+            "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
@@ -519,13 +519,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
             "extraction": "lan-dynamo/mistralai/ministral-3-14b",
             "coref": "lan-dynamo/mistralai/ministral-3-8b",
             "verification": "lan-dynamo/mistralai/ministral-3-14b",
-            "technical": "openai/gpt-5.4",
-            "systems": "openai/gpt-5.4-mini",
-            "novelty": "openai/gpt-5.4",
-            "clarity": "openai/gpt-5.4-mini",
-            "skeptic": "openai/gpt-5.4",
-            "meta_reviewer": "openai/gpt-5.4",
-            "meta": "openai/gpt-5.4",
+            "technical": "openai/gpt-5.5",
+            "systems": "openai/gpt-5.5-mini",
+            "novelty": "openai/gpt-5.5",
+            "clarity": "openai/gpt-5.5-mini",
+            "skeptic": "openai/gpt-5.5",
+            "meta_reviewer": "openai/gpt-5.5",
+            "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
@@ -550,7 +550,7 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
     ),
     ModelPreset(
         name="openai-only",
-        description="All reviewers on GPT-5.4 Mini, meta and chair on GPT-5.4 (no Anthropic)",
+        description="All reviewers on GPT-5.5 Mini, meta and chair on GPT-5.5 (no Anthropic)",
         assignments={
             # Graph pipeline: local
             "ontology": "lan-dynamo/qwen3.5-35b-a3b",
@@ -558,13 +558,13 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
             "coref": "lan-dynamo/qwen3.5-35b-a3b",
             "verification": "lan-dynamo/qwen3.5-35b-a3b",
             # Reviews: OpenAI only
-            "technical": "openai/gpt-5.4-mini",
-            "systems": "openai/gpt-5.4-mini",
-            "novelty": "openai/gpt-5.4-mini",
-            "clarity": "openai/gpt-5.4-mini",
-            "skeptic": "openai/gpt-5.4-mini",
-            "meta_reviewer": "openai/gpt-5.4",
-            "meta": "openai/gpt-5.4",
+            "technical": "openai/gpt-5.5-mini",
+            "systems": "openai/gpt-5.5-mini",
+            "novelty": "openai/gpt-5.5-mini",
+            "clarity": "openai/gpt-5.5-mini",
+            "skeptic": "openai/gpt-5.5-mini",
+            "meta_reviewer": "openai/gpt-5.5",
+            "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
@@ -603,22 +603,22 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
     ),
     ModelPreset(
         name="hpdc26-openai",
-        description="HPDC '26 reviews: fast local graph pipeline, GPT-5.4 for technical/novelty/skeptic/meta, GPT-5.4-mini for clarity",
+        description="HPDC '26 reviews: fast local graph pipeline, GPT-5.5 for technical/novelty/skeptic/meta, GPT-5.5-mini for clarity",
         assignments={
             # Graph pipeline: local fast structured extraction
             "ontology": "lan-dynamo/nemotron-cascade-2-30b-a3b",
             "extraction": "lan-dynamo/nemotron-cascade-2-30b-a3b",
             "coref": "lan-dynamo/nemotron-cascade-2-30b-a3b",
             "verification": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            # Reviews: GPT-5.4 for analytical/reasoning-heavy roles
-            "technical": "openai/gpt-5.4",
-            "novelty": "openai/gpt-5.4",
-            "skeptic": "openai/gpt-5.4",
-            # Reviews: GPT-5.4-mini for presentation/formatting roles
-            "clarity": "openai/gpt-5.4-mini",
-            # Meta-reviewer and PC Chair: GPT-5.4 (xhigh reasoning, full packet synthesis)
-            "meta_reviewer": "openai/gpt-5.4",
-            "meta": "openai/gpt-5.4",
+            # Reviews: GPT-5.5 for analytical/reasoning-heavy roles
+            "technical": "openai/gpt-5.5",
+            "novelty": "openai/gpt-5.5",
+            "skeptic": "openai/gpt-5.5",
+            # Reviews: GPT-5.5-mini for presentation/formatting roles
+            "clarity": "openai/gpt-5.5-mini",
+            # Meta-reviewer and PC Chair: GPT-5.5 (xhigh reasoning, full packet synthesis)
+            "meta_reviewer": "openai/gpt-5.5",
+            "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
@@ -713,7 +713,7 @@ def active_model_assignments(
         api_key_source = "local"
         if provider not in endpoints:
             if provider == "openrouter":
-                api_key_source = "env" if os.getenv("OPENROUTER_API_KEY") else "config"
+                api_key_source = "env" if os.getenv("OPENROUTER_API_KEY") else "none"
             else:
                 credential_info = oauth_registry.resolve_credential_info(provider)
                 api_key_source = credential_info.get("api_key_source", "none")
