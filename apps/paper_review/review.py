@@ -840,18 +840,22 @@ def parse_review_output(
 def _validate_score_distribution(scores: dict, max_score: int = 5) -> dict:
     """Validate and clean score_distribution from meta-review.
 
-    Clamps scores to the valid merit scale range and strips unknown reviewer keys.
+    Preserves either reviewer-id -> score maps or score-bucket -> count maps.
     """
     if not isinstance(scores, dict):
         return {}
     cleaned = {}
     for key, val in scores.items():
         label = str(key).strip()
-        if not label or label.isdigit():
+        if not label:
             continue
         if isinstance(val, (int, float)):
-            clamped = max(1, min(int(val), max_score))
-            cleaned[label] = clamped
+            if label.isdigit():
+                score_bucket = int(label)
+                if 1 <= score_bucket <= max_score and int(val) >= 0:
+                    cleaned[label] = int(val)
+            else:
+                cleaned[label] = max(1, min(int(val), max_score))
     return cleaned
 
 
