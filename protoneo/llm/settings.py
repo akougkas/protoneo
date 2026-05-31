@@ -791,6 +791,19 @@ def provider_is_enabled(provider_name: str, settings: ProtoNeoSettings | None = 
     return active_settings.provider_enabled.get(endpoint_id, True)
 
 
+def active_model_is_routable(settings: ProtoNeoSettings, provider: str, model_id: str) -> bool:
+    """Return whether a selected model is allowed into runtime routing."""
+    for entry in settings.discovered_models.get(provider, []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("id") or entry.get("model_id") or "") != model_id:
+            continue
+        if str(entry.get("availability") or "").strip() == "unsupported":
+            return False
+        return True
+    return True
+
+
 def active_model_assignments(
     settings: ProtoNeoSettings | None = None,
     provider_registry=None,
@@ -808,6 +821,8 @@ def active_model_assignments(
     assignments: dict[str, dict[str, str]] = {}
     for provider, model_id in active_settings.active_models.items():
         if not model_id or not provider_is_enabled(provider, active_settings):
+            continue
+        if not active_model_is_routable(active_settings, provider, model_id):
             continue
 
         registry_info = registry.get(f"{provider}/{model_id}")

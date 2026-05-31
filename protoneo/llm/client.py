@@ -167,7 +167,6 @@ class LLMClient:
         if reasoning_effort:
             body["reasoning"] = {
                 "effort": reasoning_effort,
-                "summary": "detailed" if reasoning_effort in {"high", "xhigh"} else "concise",
             }
 
         headers = {

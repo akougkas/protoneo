@@ -399,21 +399,6 @@ async def discover_local(endpoints: list[dict]) -> list[dict[str, Any]]:
 
 # ── Cloud provider discovery ──────────────────────────────
 
-def _merge_model_lists(*model_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge provider model lists by id while preserving richer metadata."""
-    merged: dict[str, dict[str, Any]] = {}
-    for models in model_lists:
-        for model in models or []:
-            if not isinstance(model, dict):
-                continue
-            model_id = str(model.get("id") or "").strip()
-            if not model_id:
-                continue
-            existing = merged.get(model_id, {})
-            merged[model_id] = {**existing, **model}
-    return list(merged.values())
-
-
 def _with_discovery_source(models: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
     return [{**model, "discovery_source": source} for model in models]
 
@@ -507,38 +492,40 @@ async def discover_openai(
 ) -> dict[str, Any]:
     """Discover OpenAI models.
 
-    OAuth tokens (ChatGPT subscription) use the runtime catalog because
-    the subscription endpoint cannot enumerate models via /v1/models. The
-    bundled catalog is only a seed/fallback so newer ChatGPT subscription
-    models can appear after Refresh All without a code release.
+    OAuth tokens (ChatGPT subscription) use the local Codex CLI account catalog
+    because the subscription endpoint cannot enumerate models via /v1/models.
+    The bundled catalog is only a labeled fallback when the Codex catalog is
+    unavailable; the generic OpenAI API catalog is intentionally not mixed into
+    this path.
     API keys query /v1/models live.
     """
     is_oauth = _is_oauth_token("openai", api_key, credential_info)
 
     if is_oauth:
-        from .catalogs import OPENAI_SUBSCRIPTION_MODELS
-        from .models_dev import discover_provider_models, parse_provider_models
+        from .catalogs import OPENAI_SUBSCRIPTION_MODELS, load_codex_cli_models
 
-        catalog_models: list[dict[str, Any]] = []
-        if models_dev_data is not None:
-            catalog_models = parse_provider_models(models_dev_data, "openai")
-        else:
-            catalog_models = await discover_provider_models(
-                "openai",
-                force_refresh=force_refresh,
-            )
-        models = _merge_model_lists(
-            _with_discovery_source(list(OPENAI_SUBSCRIPTION_MODELS), "fallback_seed"),
-            _with_discovery_source(catalog_models, "live_catalog"),
-        )
+        codex_models = load_codex_cli_models()
+        if codex_models:
+            models = _with_discovery_source(codex_models, "codex_cache")
+            return {
+                "provider": "openai",
+                "online": True,
+                "models": models,
+                "credential_type": "oauth",
+                "catalog_source": "codex_cli_cache",
+                "using_cache": False,
+                "nudge": "Using the local Codex CLI account model catalog; OpenAI /v1/models is not valid for ChatGPT OAuth.",
+            }
+
+        models = _with_discovery_source(list(OPENAI_SUBSCRIPTION_MODELS), "fallback_seed")
         return {
             "provider": "openai",
-            "online": bool(catalog_models),
+            "online": True,
             "models": models,
             "credential_type": "oauth",
-            "catalog_source": "models.dev+seed" if catalog_models else "seed",
-            "using_cache": not bool(catalog_models),
-            **({"nudge": "Using bundled OpenAI/Codex fallback catalog; live catalog is unavailable."} if not catalog_models else {}),
+            "catalog_source": "seed",
+            "using_cache": False,
+            "nudge": "Using bundled ChatGPT/Codex fallback catalog; local Codex CLI model cache is unavailable.",
         }
 
     # Standard API key: query live
@@ -587,9 +574,10 @@ async def discover_all(
 ) -> dict[str, Any]:
     """Discover models from all configured providers.
 
-    Fetches the models.dev catalog once (cached 6h) and uses it to
-    enrich subscription provider discovery. Local endpoints are probed
-    directly. Nothing is hardcoded.
+    Local endpoints are probed directly. OpenRouter and OpenAI API-key
+    credentials use provider APIs. ChatGPT OAuth uses the local Codex CLI
+    account catalog because the OAuth runtime cannot enumerate models through
+    OpenAI /v1/models.
     """
     tasks = {}
 

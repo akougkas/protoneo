@@ -293,7 +293,7 @@
                 @change="syncRoleReasoning(pa.id)"
               >
                 <option
-                  v-for="m in availableModels"
+                  v-for="m in routableModels"
                   :key="modelFullId(m)"
                   :value="modelFullId(m)"
                 >{{ modelLabel(m) }}</option>
@@ -316,7 +316,7 @@
       </div>
 
       <!-- Graph Processing Models -->
-      <div class="panel-section" v-if="availableModels.length > 0">
+      <div class="panel-section" v-if="routableModels.length > 0">
         <h2 class="section-heading">
           Graph Processing
           <span class="agent-count">Local providers are preferred; manual override is allowed</span>
@@ -615,16 +615,23 @@ const graphSteps = [
 // Graph pipeline steps use local models only. Subscription tokens
 // (OpenAI) are reserved for review roles.
 const _SUBSCRIPTION_PROVIDERS = new Set(['openai'])  // anthropic removed
+const routableModels = computed(() =>
+  availableModels.value.filter(m => modelIsRoutable(m))
+)
 const localModels = computed(() =>
-  availableModels.value.filter(m => !_SUBSCRIPTION_PROVIDERS.has(modelProviderId(m)))
+  routableModels.value.filter(m => !_SUBSCRIPTION_PROVIDERS.has(modelProviderId(m)))
 )
 const graphModels = computed(() => [
   ...localModels.value,
-  ...availableModels.value.filter(m => _SUBSCRIPTION_PROVIDERS.has(modelProviderId(m))),
+  ...routableModels.value.filter(m => _SUBSCRIPTION_PROVIDERS.has(modelProviderId(m))),
 ])
 
 function modelProviderId(model) {
   return model.provider_id || model.provider || ''
+}
+
+function modelIsRoutable(model) {
+  return model?.availability !== 'unsupported'
 }
 
 function modelFullId(model) {
@@ -668,7 +675,7 @@ function benchmarkTokensPerSecond(bench) {
 
 function normalizeModelId(modelId) {
   if (!modelId) return ''
-  const models = availableModels.value || []
+  const models = routableModels.value || []
   if (!models.length) return modelId
   if (models.some(m => modelFullId(m) === modelId)) return modelId
 
@@ -710,7 +717,7 @@ function getModelDefault(roleId) {
   }
 
   // Last resort: first model from /api/models
-  return normalizeModelId(modelFullId(availableModels.value[0]) || '')
+  return normalizeModelId(modelFullId(routableModels.value[0]) || '')
 }
 
 function getGraphDefault() {
@@ -853,10 +860,14 @@ function modelLabel(m) {
   }
 
   // Use display_name from /api/models if available
+  const suffix = []
+  if (m.context_length) suffix.push(`${Math.round(m.context_length / 1000)}K ctx`)
+  if (m.availability === 'unverified') suffix.push('unverified')
+  if (m.is_free) suffix.push('free')
   if (m.display_name && m.display_name !== mid) {
-    return prefix + `${mid} (${m.display_name})`
+    return prefix + `${mid} (${[m.display_name, ...suffix].join(' \u00b7 ')})`
   }
-  return prefix + mid
+  return prefix + (suffix.length ? `${mid} (${suffix.join(' \u00b7 ')})` : mid)
 }
 
 function modelDetail(modelId) {
@@ -882,6 +893,7 @@ function modelDetail(modelId) {
     if (catalog.context_length) parts.push(`${Math.round(catalog.context_length / 1000)}K ctx`)
     if (catalog.supports_reasoning_effort) parts.push('reasoning')
     if (catalog.is_free) parts.push('free')
+    if (catalog.availability === 'unverified') parts.push('unverified catalog')
     return parts.filter(Boolean).join(' \u00b7 ')
   }
 

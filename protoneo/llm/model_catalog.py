@@ -51,6 +51,28 @@ def supports_reasoning_effort(provider_id: str, model_id: str, info: ModelInfo) 
     )
 
 
+def _entry_reasoning_efforts(entry: dict[str, Any]) -> list[str]:
+    raw = entry.get("supported_reasoning_efforts") or entry.get("supported_reasoning_levels") or []
+    efforts: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                effort = str(item.get("effort") or "").strip()
+            else:
+                effort = str(item or "").strip()
+            if effort and effort not in efforts:
+                efforts.append(effort)
+    return [effort for effort in SUPPORTED_REASONING_EFFORTS if effort in efforts]
+
+
+def _entry_availability(entry: dict[str, Any]) -> tuple[str, str]:
+    availability = str(entry.get("availability") or "").strip()
+    if not availability:
+        availability = "available"
+    reason = str(entry.get("availability_reason") or "").strip()
+    return availability, reason
+
+
 def normalize_model_entry(
     provider_id: str,
     entry: dict[str, Any],
@@ -70,6 +92,8 @@ def normalize_model_entry(
     capabilities = sorted(capability.value for capability in info.capabilities)
     context_length = entry_context_length(entry, info)
     supports_effort = supports_reasoning_effort(provider_id, raw_id, info)
+    entry_efforts = _entry_reasoning_efforts(entry)
+    availability, availability_reason = _entry_availability(entry)
     endpoint = endpoint_map(settings).get(provider_id)
     tier = info.tier.value
     is_local = info.tier == ModelTier.LOCAL or endpoint is not None
@@ -102,6 +126,7 @@ def normalize_model_entry(
         "capabilities": capabilities,
         "context_length": context_length,
         "context_source": str(entry.get("context_source") or ("registry" if info.max_context else "")),
+        "catalog_priority": entry.get("catalog_priority"),
         "max_context": context_length,
         "loaded": entry.get("loaded"),
         "loaded_status": "loaded" if entry.get("loaded") else ("unloaded" if entry.get("loaded") is False else ""),
@@ -118,13 +143,19 @@ def normalize_model_entry(
         "structured_output": info.structured_output.value,
         "supports_reasoning": ModelCapability.EXTENDED_THINKING.value in capabilities,
         "supports_reasoning_effort": supports_effort,
-        "supported_reasoning_efforts": SUPPORTED_REASONING_EFFORTS if supports_effort else [],
+        "supported_reasoning_efforts": entry_efforts or (SUPPORTED_REASONING_EFFORTS if supports_effort else []),
+        "default_reasoning_effort": str(entry.get("default_reasoning_effort") or ""),
         "supports_tools": ModelCapability.FUNCTION_CALLING.value in capabilities,
         "supports_vision": ModelCapability.VISION.value in capabilities,
         "speed_tps": info.speed_tps,
         "is_private": info.is_private,
         "enabled": provider_is_enabled(provider_id, settings),
         "custom": bool(entry.get("custom", False)),
+        "availability": availability,
+        "availability_reason": availability_reason,
+        "supported_in_api": entry.get("supported_in_api"),
+        "standard_openai_api_supported": entry.get("standard_openai_api_supported", entry.get("supported_in_api")),
+        "catalog_visibility": str(entry.get("catalog_visibility") or ""),
     }
 
 
@@ -181,6 +212,7 @@ def build_model_catalog(
         key=lambda model: (
             0 if model["enabled"] else 1,
             model["provider_id"],
+            int(model.get("catalog_priority") or 999_999),
             model["display_name"].lower(),
         ),
     )

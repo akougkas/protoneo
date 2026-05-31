@@ -193,7 +193,7 @@
               <label class="select-label">Active model:</label>
               <select v-if="providerModelOptions('openrouter').length" class="provider-model-select" :disabled="!isProviderEnabled('openrouter')" :value="settings.active_models['openrouter'] || ''" @change="setActiveModel('openrouter', $event.target.value)">
                 <option value="">Select a model...</option>
-                <option v-for="m in providerModelOptions('openrouter')" :key="modelOptionKey(m)" :value="modelOptionValue(m)">{{ modelOptionLabel(m) }}</option>
+                <option v-for="m in providerModelOptions('openrouter')" :key="modelOptionKey(m)" :value="modelOptionValue(m)" :disabled="modelOptionDisabled(m)">{{ modelOptionLabel(m) }}</option>
               </select>
               <div class="manual-model-row">
                 <input
@@ -211,6 +211,8 @@
               <span v-if="selectedModelMeta('openrouter').speed" class="meta-chip speed">{{ selectedModelMeta('openrouter').speed }} t/s</span>
               <span v-if="selectedModelMeta('openrouter').registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
               <span v-if="selectedModelMeta('openrouter').registry?.supports_tools" class="meta-chip">tools</span>
+              <span v-if="selectedModelMeta('openrouter').availability === 'unsupported'" class="meta-chip bad">unsupported</span>
+              <span v-else-if="selectedModelMeta('openrouter').availability === 'unverified'" class="meta-chip warn">unverified</span>
               <span v-if="selectedModelMeta('openrouter').benchmark" :class="['class-chip', selectedModelMeta('openrouter').benchmark.protoneo_class]">
                 {{ selectedModelMeta('openrouter').benchmark.protoneo_class }}
               </span>
@@ -261,7 +263,7 @@
               <label class="select-label">Active model:</label>
               <select v-if="providerModelOptions(p.provider).length" class="provider-model-select" :disabled="!isProviderEnabled(p.provider)" :value="settings.active_models[p.provider] || ''" @change="setActiveModel(p.provider, $event.target.value)">
                 <option value="">Select a model...</option>
-                <option v-for="m in providerModelOptions(p.provider)" :key="modelOptionKey(m)" :value="modelOptionValue(m)">{{ modelOptionLabel(m) }}</option>
+                <option v-for="m in providerModelOptions(p.provider)" :key="modelOptionKey(m)" :value="modelOptionValue(m)" :disabled="modelOptionDisabled(m)">{{ modelOptionLabel(m) }}</option>
               </select>
               <div class="manual-model-row">
                 <input
@@ -279,10 +281,13 @@
               <span v-if="selectedModelMeta(p.provider).speed" class="meta-chip speed">{{ selectedModelMeta(p.provider).speed }} t/s</span>
               <span v-if="selectedModelMeta(p.provider).registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
               <span v-if="selectedModelMeta(p.provider).registry?.supports_tools" class="meta-chip">tools</span>
+              <span v-if="selectedModelMeta(p.provider).availability === 'unsupported'" class="meta-chip bad">unsupported</span>
+              <span v-else-if="selectedModelMeta(p.provider).availability === 'unverified'" class="meta-chip warn">unverified</span>
               <span v-if="selectedModelMeta(p.provider).benchmark" :class="['class-chip', selectedModelMeta(p.provider).benchmark.protoneo_class]">
                 {{ selectedModelMeta(p.provider).benchmark.protoneo_class }}
               </span>
             </div>
+            <div v-if="selectedModelMeta(p.provider)?.availability_reason" class="card-nudge">{{ selectedModelMeta(p.provider).availability_reason }}</div>
             <div v-if="selectedModelMeta(p.provider)?.supports_reasoning_effort" class="reasoning-row">
               <label class="select-label">Reasoning effort:</label>
               <select class="provider-model-select" :value="activeReasoningEffort(p.provider)" @change="setReasoningEffort(p.provider, $event.target.value)" :disabled="!isProviderEnabled(p.provider)">
@@ -734,6 +739,8 @@ const activeModelList = computed(() => {
       latency_class: registry?.latency_class || 'unknown',
       speed_tps: registry?.speed_tps || model?.speed_tps || 0,
       discovery_source: registry?.discovery_source || model?.discovery_source || '',
+      availability: registry?.availability || model?.availability || 'available',
+      availability_reason: registry?.availability_reason || model?.availability_reason || '',
       registry,
     })
   }
@@ -834,7 +841,12 @@ function modelOptionLabel(model) {
   const ctx = model.context_length ? ` (${formatContext(model.context_length)} ctx)` : ''
   const free = model.is_free === true ? ' · free' : ''
   const fallback = model.discovery_source && model.discovery_source !== 'live' ? ` · ${model.discovery_source}` : ''
-  return `${name}${ctx}${free}${fallback}`
+  const availability = model.availability === 'unsupported' ? ' · unavailable' : model.availability === 'unverified' ? ' · unverified' : ''
+  return `${name}${ctx}${free}${fallback}${availability}`
+}
+
+function modelOptionDisabled(model) {
+  return model.availability === 'unsupported'
 }
 
 function discoveryNudge(providerName) {
@@ -857,6 +869,8 @@ function selectedModelMeta(provider) {
     benchmark,
     supports_reasoning_effort: registry?.supports_reasoning_effort || false,
     supported_reasoning_efforts: registry?.supported_reasoning_efforts || [],
+    availability: registry?.availability || model?.availability || 'available',
+    availability_reason: registry?.availability_reason || model?.availability_reason || '',
   }
 }
 
@@ -973,6 +987,8 @@ function modelSignals(model) {
   if (model.supports_tools) addSignal(signals, 'tools', 'tools', 'context')
   if (model.supports_vision) addSignal(signals, 'vision', 'vision', 'context')
   if (model.structured_output && model.structured_output !== 'unknown') addSignal(signals, 'structured', `${model.structured_output} json`, 'json')
+  if (model.availability === 'unsupported') addSignal(signals, 'unavailable', 'unavailable', 'warn')
+  if (model.availability === 'unverified') addSignal(signals, 'unverified', 'unverified catalog', 'warn')
   const measuredTps = model.benchmark?.throughput?.tokens_per_second || model.speed_tps || 0
   if (measuredTps) addSignal(signals, 'measured-speed', `${measuredTps} t/s`, 'default')
   if (model.discovery_source && model.discovery_source !== 'live') {
@@ -983,6 +999,24 @@ function modelSignals(model) {
   if (model.benchmark?.status === 'partial') addSignal(signals, 'benchmark-partial', 'partial score', 'warn')
   if (!model.benchmark) addSignal(signals, 'unscored', 'unscored', 'warn')
   return signals
+}
+
+function benchmarkIssueSummary(error) {
+  if (!error) return ''
+  const text = String(error)
+  if (text.includes('free-models-per-day')) {
+    return 'OpenRouter free-model daily quota is exhausted.'
+  }
+  if (text.includes('temporarily rate-limited upstream')) {
+    return 'OpenRouter upstream provider is temporarily rate-limited.'
+  }
+  if (text.includes('not supported')) {
+    return 'This model is not supported by the selected account/runtime.'
+  }
+  if (text.includes('rate') && text.includes('429')) {
+    return 'Provider rate limit returned HTTP 429.'
+  }
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text
 }
 
 function selectionFit(model) {
@@ -998,6 +1032,8 @@ function selectionFit(model) {
   const issues = []
 
   if (!model.context_length) issues.push('context unknown')
+  if (model.availability === 'unsupported') issues.push('model is not supported for routing')
+  if (model.availability === 'unverified') issues.push('fallback catalog only')
   if (providerIsLocal(model.provider) && model.loaded === false) issues.push('selected model is not loaded')
   if (!model.benchmark) issues.push('score pending')
   if (model.benchmark?.status === 'error') issues.push('benchmark failed')
@@ -1008,7 +1044,7 @@ function selectionFit(model) {
     return {
       tier: 'bad',
       label: 'Benchmark error',
-      detail: model.benchmark.error || 'Last score run failed',
+      detail: benchmarkIssueSummary(model.benchmark.error) || 'Last score run failed',
       action: 'Fix routing, then score again',
       action_kind: 'bad',
       needs_attention: true,
@@ -1019,8 +1055,8 @@ function selectionFit(model) {
     return {
       tier: score >= 70 ? 'caution' : 'bad',
       label: 'Partial score',
-      detail: model.benchmark.error || 'At least one benchmark dimension failed',
-      action: 'Review failed dimension',
+      detail: benchmarkIssueSummary(model.benchmark.error) || 'At least one benchmark dimension failed',
+      action: model.provider === 'openrouter' ? 'Check quota/BYOK' : 'Review failed dimension',
       action_kind: 'caution',
       needs_attention: true,
       review_ready: score >= 70,
@@ -1391,6 +1427,7 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 .meta-chip.live { background: #f0f8f0; color: #4a4; }
 .meta-chip.speed { background: #f0f0f0; color: #666; }
 .meta-chip.warn { background: #fff3e0; color: #a06000; }
+.meta-chip.bad { background: #ffebee; color: #900; }
 .meta-chip.vision { background: #e3f2fd; color: #1565c0; }
 
 .power-toggle {

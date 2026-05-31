@@ -3,6 +3,7 @@ Tests for the ProtoNeo kernel foundation.
 """
 
 import asyncio
+import base64
 import json
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
@@ -25,9 +26,11 @@ from protoneo.knowledge.chunker import chunk_text
 from protoneo.knowledge.parser import parse_file
 from protoneo.llm.client import LLMClient
 from protoneo.llm import discovery as discovery_module
+from protoneo.llm import catalogs as catalogs_module
 from protoneo.llm.benchmark import (
     _score_reasoning as capability_score_reasoning,
     benchmark_model as capability_benchmark_model,
+    sanitize_error_message,
 )
 from protoneo.llm.model_catalog import build_model_catalog
 from protoneo.llm.registry import CapabilityRegistry
@@ -347,6 +350,52 @@ class TestLLMClient:
         assert LLMClient._strip_thinking("<thinking>only private notes</thinking>") == ""
 
     @pytest.mark.asyncio
+    async def test_openai_codex_call_sends_reasoning_effort_without_summary(self, monkeypatch):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+            text = (
+                'data: {"type":"response.output_text.delta","delta":"OK"}\n\n'
+                'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+                "data: [DONE]\n\n"
+            )
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                captured["session_kwargs"] = kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers=None, json=None):
+                captured["url"] = url
+                captured["headers"] = headers or {}
+                captured["json"] = json or {}
+                return FakeResponse()
+
+        monkeypatch.setattr("curl_cffi.requests.AsyncSession", FakeSession)
+
+        payload = {"https://api.openai.com/auth": {"chatgpt_account_id": "acct_test"}}
+        encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        token = f"header.{encoded_payload}.signature"
+        client = LLMClient(registry=CapabilityRegistry(load_builtins=False))
+
+        response = await client._call_openai_codex(
+            token,
+            [{"role": "user", "content": "Reply OK"}],
+            "gpt-5.3-codex-spark",
+            reasoning_effort="xhigh",
+        )
+
+        assert response.content == "OK"
+        assert captured["json"]["reasoning"] == {"effort": "xhigh"}
+        assert "summary" not in captured["json"]["reasoning"]
+
+    @pytest.mark.asyncio
     async def test_complete_recovers_json_payload_inside_thinking(self):
         reg = CapabilityRegistry(load_builtins=False)
         reg.register(ModelInfo(model_id="test/model", provider="test"))
@@ -593,6 +642,81 @@ class TestSettingsRouting:
         assert model["supports_reasoning_effort"] is True
         assert model["supported_reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
 
+    @pytest.mark.asyncio
+    async def test_openai_oauth_discovery_uses_codex_cache_not_api_catalog(self, tmp_path, monkeypatch):
+        cache_path = tmp_path / "models_cache.json"
+        cache_path.write_text(json.dumps({
+            "models": [
+                {
+                    "slug": "gpt-5.5",
+                    "display_name": "GPT-5.5",
+                    "context_window": 272000,
+                    "max_context_window": 272000,
+                    "priority": 9,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "xhigh"}],
+                    "supported_in_api": True,
+                    "visibility": "list",
+                },
+                {
+                    "slug": "gpt-5.3-codex-spark",
+                    "display_name": "GPT-5.3-Codex-Spark",
+                    "context_window": 128000,
+                    "priority": 26,
+                    "supported_reasoning_levels": [{"effort": "high"}],
+                    "supported_in_api": False,
+                    "visibility": "list",
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "context_window": 272000,
+                    "priority": 43,
+                    "supported_in_api": True,
+                    "visibility": "hide",
+                },
+            ],
+        }))
+        monkeypatch.setattr(catalogs_module, "CODEX_MODELS_CACHE", cache_path)
+
+        result = await discovery_module.discover_openai(
+            "oauth-token",
+            {"token_type": "oauth"},
+            models_dev_data={
+                "openai": {
+                    "models": {
+                        "gpt-4o": {"name": "GPT-4o", "limit": {"context": 128000}},
+                        "gpt-5.5": {"name": "GPT-5.5", "limit": {"context": 1050000}},
+                    }
+                }
+            },
+        )
+
+        by_id = {model["id"]: model for model in result["models"]}
+        assert result["catalog_source"] == "codex_cli_cache"
+        assert [model["id"] for model in result["models"]] == ["gpt-5.5", "gpt-5.3-codex-spark"]
+        assert by_id["gpt-5.5"]["context_length"] == 272000
+        assert by_id["gpt-5.5"]["catalog_priority"] == 9
+        assert by_id["gpt-5.5"]["discovery_source"] == "codex_cache"
+        assert by_id["gpt-5.5"]["supported_reasoning_efforts"] == ["low", "xhigh"]
+        assert by_id["gpt-5.3-codex-spark"]["availability"] == "available"
+        assert by_id["gpt-5.3-codex-spark"]["standard_openai_api_supported"] is False
+        assert "gpt-4o" not in by_id
+        assert "codex-auto-review" not in by_id
+
+    @pytest.mark.asyncio
+    async def test_openai_oauth_fallback_is_labeled_and_conservative(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(catalogs_module, "CODEX_MODELS_CACHE", tmp_path / "missing.json")
+
+        result = await discovery_module.discover_openai("oauth-token", {"token_type": "oauth"})
+        by_id = {model["id"]: model for model in result["models"]}
+
+        assert result["catalog_source"] == "seed"
+        assert "gpt-5.5" in by_id
+        assert "gpt-5.5-codex" not in by_id
+        assert by_id["gpt-5.5"]["discovery_source"] == "fallback_seed"
+        assert by_id["gpt-5.5"]["availability"] == "unverified"
+
     def test_active_model_assignments_skip_disabled_providers(self):
         settings = ProtoNeoSettings(
             localhost_endpoints=[],
@@ -666,6 +790,32 @@ class TestSettingsRouting:
         assert assignments["openai"]["options"] == {"reasoning_effort": "xhigh"}
         assert assignments["openai"]["reasoning_effort"] == "xhigh"
 
+    def test_active_model_assignments_allow_codex_cli_subscription_models(self):
+        settings = ProtoNeoSettings(
+            provider_enabled={"openai": True},
+            active_models={"openai": "gpt-5.3-codex-spark"},
+            discovered_models={
+                "openai": [
+                    {
+                        "id": "gpt-5.3-codex-spark",
+                        "source": "openai",
+                        "provider_type": "subscription",
+                        "availability": "available",
+                        "supported_in_api": False,
+                    }
+                ]
+            },
+        )
+        provider_registry = MagicMock()
+        provider_registry.resolve_credential_info.return_value = {
+            "api_key_source": "oauth",
+        }
+
+        assignments = active_model_assignments(settings=settings, provider_registry=provider_registry)
+
+        assert assignments["openai"]["model_id"] == "gpt-5.3-codex-spark"
+        assert assignments["openai"]["api_key_source"] == "oauth"
+
     def test_model_catalog_does_not_treat_unknown_subscription_pricing_as_free(self):
         settings = ProtoNeoSettings(
             provider_enabled={"openai": True, "openrouter": True},
@@ -696,6 +846,19 @@ class TestSettingsRouting:
 
 
 class TestCapabilityBenchmark:
+    def test_benchmark_error_sanitizer_removes_provider_identifiers(self):
+        error = (
+            'OpenrouterException - {"error":{"message":"Rate limit exceeded",'
+            '"metadata":{"headers":{"Authorization":"Bearer sk-secret123456"}}},'
+            '"user_id":"user_123456789"}'
+        )
+
+        sanitized = sanitize_error_message(error)
+
+        assert "user_123456789" not in sanitized
+        assert "sk-secret123456" not in sanitized
+        assert '"user_id":"[redacted]"' in sanitized
+
     def test_reasoning_score_handles_literal_big_o_notation(self):
         score, details = capability_score_reasoning(
             "Each round moves p * n/p = n items, so over log(p) rounds "

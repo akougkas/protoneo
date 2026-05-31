@@ -38,6 +38,23 @@ _REASONING_MODEL_HINTS = (
     "o1", "o3", "o4", "deepseek-r1",
 )
 
+_SENSITIVE_ERROR_PATTERNS = (
+    (re.compile(r'("user_id"\s*:\s*)"[^"]+"'), r'\1"[redacted]"'),
+    (re.compile(r'("api_key"\s*:\s*)"[^"]+"', re.IGNORECASE), r'\1"[redacted]"'),
+    (re.compile(r'("access_token"\s*:\s*)"[^"]+"', re.IGNORECASE), r'\1"[redacted]"'),
+    (re.compile(r'("refresh_token"\s*:\s*)"[^"]+"', re.IGNORECASE), r'\1"[redacted]"'),
+    (re.compile(r'(Bearer\s+)[A-Za-z0-9._~+/=-]+', re.IGNORECASE), r'\1[redacted]'),
+    (re.compile(r'\b(sk-[A-Za-z0-9_-]{12,})\b'), "[redacted]"),
+)
+
+
+def sanitize_error_message(error: object) -> str:
+    """Strip provider/account identifiers from UI-facing benchmark errors."""
+    message = str(error)
+    for pattern, replacement in _SENSITIVE_ERROR_PATTERNS:
+        message = pattern.sub(replacement, message)
+    return message
+
 
 # ── Dimension 1: JSON Compliance ─────────────────────────────
 #
@@ -725,9 +742,10 @@ async def benchmark_model(
                 timeout=_WARMUP_TIMEOUT_SECONDS,
             )
         except Exception as e:
-            logger.error("Warm-up failed for %s: %s", model_id, e)
+            sanitized = sanitize_error_message(e)
+            logger.error("Warm-up failed for %s: %s", model_id, sanitized)
             result["status"] = "error"
-            result["error"] = f"Warm-up failed: {e}"
+            result["error"] = f"Warm-up failed: {sanitized}"
             result["protoneo_class"] = "unreachable"
             return result
 
@@ -790,9 +808,10 @@ async def benchmark_model(
 
         except Exception as e:
             elapsed = time.monotonic() - start
+            sanitized = sanitize_error_message(e)
             dim_result["latency_seconds"] = round(elapsed, 2)
-            dim_result["error"] = str(e)
-            logger.error("benchmark[%s/%s] ERROR: %s", model_id, dim_key, e)
+            dim_result["error"] = sanitized
+            logger.error("benchmark[%s/%s] ERROR: %s", model_id, dim_key, sanitized)
 
         total_score += dim_result["score"]
         result["dimensions"][dim_key] = dim_result
@@ -908,7 +927,7 @@ async def benchmark_all_parallel(
                 "model_id": targets[i]["model_id"],
                 "provider": targets[i]["provider"],
                 "status": "error",
-                "error": str(r),
+                "error": sanitize_error_message(r),
                 "total_score": 0,
                 "protoneo_class": "error",
                 "dimensions": {},
