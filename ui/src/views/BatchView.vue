@@ -314,6 +314,7 @@ async function doLaunchReview() {
       model_map: { ...reviewModelMap },
       conference: reviewConference.value,
       user_instructions: reviewInstructions.value,
+      artifact_description_status: 'not_provided_to_protoneo',
     }
     await kernel.post(`/api/apps/paper_review/sessions/${reviewModal.value.session_id}/launch-review`, body)
     router.push({ name: 'Session', params: { sessionId: reviewModal.value.session_id } })

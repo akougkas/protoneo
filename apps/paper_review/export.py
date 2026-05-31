@@ -401,6 +401,7 @@ def write_review_artifacts(
     preset: str = "",
     prompt_pack_version: str = "",
     artifact_description_assumed_present: bool = False,
+    artifact_description_status: str = "",
 ) -> dict[str, Any]:
     """Write durable per-paper ProtoNeo review artifacts."""
     out = Path(output_dir)
@@ -477,6 +478,7 @@ def write_review_artifacts(
         "source_graph_session_id": source_session_id,
         "source_graph_format": graph_source,
         "prompt_pack_version": prompt_pack_version or packet.provenance_metadata.get("prompt_pack_version", ""),
+        "artifact_description_status": artifact_description_status,
         "artifact_description_assumed_present": artifact_description_assumed_present,
         "deliberation": packet.provenance_metadata.get("deliberation", {}),
         "artifact_paths": {

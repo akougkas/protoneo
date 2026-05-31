@@ -97,6 +97,28 @@ _LOCAL_ENDPOINT_INFERENCE_PREFS: dict[str, dict[str, float | int | str]] = {
     },
 }
 
+ARTIFACT_DESCRIPTION_STATUSES = {
+    "submitted",
+    "not_submitted",
+    "not_provided_to_protoneo",
+}
+
+_ARTIFACT_STATUS_ALIASES = {
+    "": "",
+    "unknown": "not_provided_to_protoneo",
+    "not_provided": "not_provided_to_protoneo",
+    "not_provided_to_protoneo": "not_provided_to_protoneo",
+    "not provided to protoneo": "not_provided_to_protoneo",
+    "provided": "submitted",
+    "present": "submitted",
+    "assumed_present": "submitted",
+    "submitted": "submitted",
+    "not_submitted": "not_submitted",
+    "not submitted": "not_submitted",
+    "absent": "not_submitted",
+    "missing": "not_submitted",
+}
+
 AD_ASSUMED_PRESENT_INSTRUCTION = (
     "artifact_description_assumed_present=true / ad_assumed_present=true. "
     "Assume AD is present unless explicit metadata says otherwise. Do not infer "
@@ -106,18 +128,72 @@ AD_ASSUMED_PRESENT_INSTRUCTION = (
     "paper quality, not on missing AD text."
 )
 
+AD_NOT_PROVIDED_INSTRUCTION = (
+    "artifact_description_status=not_provided_to_protoneo. ProtoNeo was not "
+    "given artifact material or an AD appendix for this local review. Treat this "
+    "as missing local input, not as evidence that the paper failed to submit an "
+    "AD. Do not penalize the paper for absent AD text unless the manuscript says "
+    "no AD exists or explicit metadata says artifact_description_status=not_submitted."
+)
+
+AD_NOT_SUBMITTED_INSTRUCTION = (
+    "artifact_description_status=not_submitted. Explicit launch metadata says no "
+    "AD was submitted. You may treat that as an SC submission-compliance concern, "
+    "but keep it separate from the core technical review of methods and results."
+)
+
+REVIEW_QUALITY_INSTRUCTION = (
+    "Review-quality guardrails: independent reviews should be concise structured "
+    "assessments grounded in manuscript evidence. Do not cite internal ProtoNeo "
+    "graph counts, edge names, or extraction artifacts in author-facing comments. "
+    "Use figure and table references only when they appear in the manuscript text "
+    "or extracted figure/table annotations. Author-facing prose must be natural, "
+    "constructive, technically specific, and must not use em dashes, en dashes, "
+    "or stock phrases such as 'Yet it lacks', 'Major revisions are needed', "
+    "'lacks solid evidence for its key claims', or 'limiting its relevance'."
+)
+
+
+def normalize_artifact_description_status(
+    value: Any = "",
+    *,
+    assumed_present: bool = False,
+) -> str:
+    """Normalize AD launch metadata into an explicit three-state status."""
+    key = str(value or "").strip().lower().replace("-", "_")
+    status = _ARTIFACT_STATUS_ALIASES.get(key)
+    if status:
+        return status
+    if assumed_present:
+        return "submitted"
+    return "not_provided_to_protoneo"
+
+
+def artifact_description_assumed_from_status(status: str) -> bool:
+    return normalize_artifact_description_status(status) == "submitted"
+
 
 def build_review_chair_instructions(
     user_instructions: str = "",
     *,
     artifact_description_assumed_present: bool = False,
+    artifact_description_status: str = "",
 ) -> str:
     """Compose per-run review-chair instructions."""
     parts = []
     if user_instructions:
         parts.append(user_instructions.strip())
-    if artifact_description_assumed_present:
+    status = normalize_artifact_description_status(
+        artifact_description_status,
+        assumed_present=artifact_description_assumed_present,
+    )
+    if status == "submitted":
         parts.append(AD_ASSUMED_PRESENT_INSTRUCTION)
+    elif status == "not_submitted":
+        parts.append(AD_NOT_SUBMITTED_INSTRUCTION)
+    else:
+        parts.append(AD_NOT_PROVIDED_INSTRUCTION)
+    parts.append(REVIEW_QUALITY_INSTRUCTION)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -531,6 +607,7 @@ def build_agent_configs(
     include_artifact: bool = False,
     user_instructions: str = "",
     artifact_description_assumed_present: bool = False,
+    artifact_description_status: str = "",
 ) -> dict[str, AgentConfig]:
     """Build AgentConfig instances from a conference profile and prompts.
 
@@ -566,6 +643,7 @@ def build_agent_configs(
     chair_instructions = build_review_chair_instructions(
         user_instructions,
         artifact_description_assumed_present=artifact_description_assumed_present,
+        artifact_description_status=artifact_description_status,
     )
     if chair_instructions:
         conference_context += f"\n\n## Review Chair Instructions\n\n{chair_instructions}"
@@ -768,9 +846,12 @@ def _validate_score_distribution(scores: dict, max_score: int = 5) -> dict:
         return {}
     cleaned = {}
     for key, val in scores.items():
+        label = str(key).strip()
+        if not label or label.isdigit():
+            continue
         if isinstance(val, (int, float)):
             clamped = max(1, min(int(val), max_score))
-            cleaned[key] = clamped
+            cleaned[label] = clamped
     return cleaned
 
 
@@ -1016,6 +1097,7 @@ def session_to_review_packet(session: Any) -> ReviewPacket:
                 "source_session_id",
                 "source_graph_path",
                 "packet_paper_id",
+                "artifact_description_status",
                 "artifact_description_assumed_present",
                 "preset",
             )

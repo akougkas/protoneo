@@ -1355,6 +1355,69 @@ class TestRoundRobinPattern:
         agent_done_events = [(t, d) for t, d in events if t == "agent_done"]
         assert all("round" in d for _, d in agent_done_events)
 
+    @pytest.mark.asyncio
+    async def test_round_robin_prompt_requires_delta_not_full_review(self):
+        delta = json.dumps({
+            "stance_change": {
+                "changed": False,
+                "previous_score": 3,
+                "current_score": 3,
+                "reason": "No new evidence changed the score.",
+            },
+            "strongest_agreement": {
+                "with_reviewer": "Systems",
+                "issue": "Baseline scope",
+                "evidence": "Section 5",
+                "decision_impact": "Keeps paper borderline.",
+            },
+            "strongest_disagreement": {
+                "with_reviewer": "",
+                "issue": "",
+                "evidence": "",
+                "decision_impact": "",
+            },
+            "evidence_correction": {
+                "claim_to_correct": "",
+                "correction": "",
+                "source": "",
+            },
+            "include_in_final_review": {
+                "issue": "Baseline scope",
+                "why": "It affects the score.",
+            },
+            "exclude_from_final_review": {
+                "issue": "Missing local AD material",
+                "why": "It was not provided to the review system.",
+            },
+        })
+        a1 = _make_mock_agent("a1", "Technical", delta)
+        ctx = SessionContext("s1")
+        ctx.add_output(AgentOutput(
+            agent_id="a1",
+            agent_role="Technical",
+            content=json.dumps({
+                "overall_merit": {"score": 3},
+                "strengths": [{"point": "Clear goal"}],
+                "weaknesses": [{"point": "Narrow baseline"}],
+            }),
+        ))
+
+        pattern = RoundRobinPattern()
+        result = await pattern.execute([a1], ctx, DeliberationRules(max_rounds=1))
+
+        prompt = a1._llm_client.complete.call_args.kwargs["messages"][-1]["content"]
+        assert "Return only a concise deliberation delta JSON object" in prompt
+        assert "Do not regenerate the full independent-review schema" in prompt
+        assert "strengths" not in result.outputs[0].structured
+        assert set(result.outputs[0].structured) == {
+            "stance_change",
+            "strongest_agreement",
+            "strongest_disagreement",
+            "evidence_correction",
+            "include_in_final_review",
+            "exclude_from_final_review",
+        }
+
 
 class TestIndependentSynthesisPattern:
     @pytest.mark.asyncio

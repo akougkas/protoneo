@@ -8,8 +8,15 @@ from apps.paper_review import api
 from apps.paper_review import pipeline as review_pipeline
 from apps.paper_review.conference import ConferenceProfile
 from apps.paper_review.export import packet_to_markdown
-from apps.paper_review.pipeline import _parse_final_review, _run_review_stage
+from apps.paper_review.pipeline import (
+    _apply_graph_output_guardrail,
+    _build_enriched_review_message,
+    _parse_final_review,
+    _run_review_stage,
+    review_graph_quality,
+)
 from apps.paper_review.review import (
+    build_review_chair_instructions,
     parse_review_output,
     resolve_paper_review_model,
     session_to_review_packet,
@@ -156,19 +163,79 @@ def test_sanitize_final_review_formats_structured_items_for_editor():
     })
 
     assert final_review["strengths"] == [
-        "Strong evaluation on current GPUs [importance: high] — Evidence: Section VII reports H100 and MI300 results."
+        {
+            "point": "Strong evaluation on current GPUs",
+            "evidence": "Section VII reports H100 and MI300 results.",
+            "importance": "high",
+        }
     ]
     assert final_review["weaknesses"] == [
-        "Missing artifact appendix [severity: high; fixability: medium]"
+        {
+            "point": "Missing artifact appendix",
+            "evidence": "",
+            "severity": "high",
+            "fixability": "medium",
+        }
     ]
     assert final_review["revision_actions"] == [
-        "Add artifact details [priority: must] — Target: Artifact Description Why it matters: SC requires reproducibility details."
+        {
+            "priority": "must",
+            "action": "Add artifact details",
+            "target_section": "Artifact Description",
+            "why_it_matters": "SC requires reproducibility details.",
+        }
     ]
-    assert "[object Object]" not in "\n".join(
-        final_review["strengths"]
-        + final_review["weaknesses"]
-        + final_review["revision_actions"]
-    )
+
+
+def test_sanitize_final_review_parses_legacy_annotations_without_pseudo_markdown():
+    final_review = sanitize_final_review({
+        "strengths": [
+            "Clear contribution [importance: high] — Evidence: Section 2 states the compiler target."
+        ],
+        "weaknesses": [
+            "Missing baseline [severity: high; fixability: medium] — Evidence: Section 5 compares only against a toy case."
+        ],
+        "revision_actions": [
+            "Add a modern baseline [priority: must] — Target: Evaluation Why it matters: It determines competitiveness."
+        ],
+    })
+
+    assert final_review["strengths"][0] == {
+        "point": "Clear contribution",
+        "evidence": "Section 2 states the compiler target.",
+        "importance": "high",
+    }
+    assert final_review["weaknesses"][0]["severity"] == "high"
+    assert final_review["weaknesses"][0]["evidence"] == "Section 5 compares only against a toy case."
+    assert final_review["revision_actions"][0]["target_section"] == "Evaluation"
+    serialized = json.dumps(final_review)
+    assert "—" not in serialized
+    assert "[severity:" not in serialized
+
+
+def test_final_review_author_text_removes_banned_stock_phrases_and_dashes():
+    final_review = sanitize_final_review({
+        "comments_for_authors": (
+            "The paper has a useful goal — Yet it lacks a fair baseline. "
+            "Major revisions are needed because it lacks solid evidence for its key claims, limiting its relevance."
+        )
+    })
+
+    text = final_review["comments_for_authors"]
+    assert "—" not in text
+    assert "–" not in text
+    assert "Yet it lacks" not in text
+    assert "Major revisions are needed" not in text
+    assert "lacks solid evidence for its key claims" not in text
+    assert "limiting its relevance" not in text
+
+
+def test_final_review_score_distribution_drops_malformed_numeric_keys():
+    final_review = _parse_final_review(json.dumps({
+        "score_distribution": {"1": 2, "2": 2, "technical_1": 4},
+    }))
+
+    assert final_review["score_distribution"] == {"technical_1": 4}
 
 
 def test_imported_graph_payload_accepts_saved_d3_graph():
@@ -210,6 +277,74 @@ def test_imported_graph_payload_accepts_saved_d3_graph():
     assert len(payload.graph.nodes) == 2
     assert len(payload.graph.edges) == 1
     assert payload.graph.summary
+
+
+def test_zero_link_graph_is_index_only_review_context():
+    graph = KnowledgeGraph()
+    graph.add_node("Paper", "Paper", node_id="paper-root")
+    graph.add_node("Evaluation", "Section")
+    graph.add_node("VisionHPC", "Method")
+    graph.add_node("Expert-level code generation", "Claim")
+    graph.summary = (
+        "Bad stale summary: 0/3 key claims have linked evidence and "
+        "1/30 methods have explicit baseline comparisons."
+    )
+
+    quality = review_graph_quality(graph)
+    message = _build_enriched_review_message("Manuscript text.", graph)
+
+    assert quality["mode"] == "index_only"
+    assert quality["relationship_facts_usable"] is False
+    assert "0/3" not in message
+    assert "1/30" not in message
+    assert "explicit baseline comparisons" not in message
+    assert "section/entity index" in message
+
+
+def test_zero_link_graph_final_guard_removes_relationship_count_claims():
+    graph = KnowledgeGraph()
+    graph.add_node("Paper", "Paper", node_id="paper-root")
+    graph.add_node("VisionHPC", "Method")
+    final_review = {
+        "comments_for_authors": (
+            "The contribution is relevant. 0/3 key claims have linked evidence "
+            "in the graph. Please clarify the evaluation."
+        ),
+        "weaknesses": [
+            {
+                "point": "Evidence/Result edges are absent",
+                "evidence": "Graph evidence shows no baseline comparison edges.",
+                "severity": "high",
+            }
+        ],
+    }
+
+    guarded = sanitize_final_review(
+        _apply_graph_output_guardrail(final_review, graph)
+    )
+
+    assert "0/3" not in guarded["comments_for_authors"]
+    assert "linked evidence" not in guarded["comments_for_authors"]
+    assert guarded["weaknesses"] == []
+
+
+def test_artifact_unknown_status_does_not_become_missing_ad_instruction():
+    instructions = build_review_chair_instructions(
+        artifact_description_status="not_provided_to_protoneo",
+    )
+
+    assert "missing local input" in instructions
+    assert "not as evidence that the paper failed to submit an AD" in instructions
+    assert "Explicit launch metadata says no AD was submitted" not in instructions
+
+
+def test_artifact_not_submitted_status_is_explicit_only():
+    instructions = build_review_chair_instructions(
+        artifact_description_status="not_submitted",
+    )
+
+    assert "Explicit launch metadata says no AD was submitted" in instructions
+    assert "keep it separate from the core technical review" in instructions
 
 
 @pytest.mark.asyncio
@@ -615,7 +750,11 @@ def test_session_to_review_packet_includes_parse_provenance():
             "final_review": {"overall_merit": "borderline"},
         },
         config={
-            "metadata": {"conference": "hpdc26", "paper_title": "Paper"},
+            "metadata": {
+                "conference": "hpdc26",
+                "paper_title": "Paper",
+                "artifact_description_status": "not_provided_to_protoneo",
+            },
             "agents": {},
         },
         knowledge_graph=None,
@@ -627,6 +766,10 @@ def test_session_to_review_packet_includes_parse_provenance():
     assert packet.pc_chair_review["overall_merit"]["label"] == "borderline"
     assert packet.provenance_metadata["parse"]["parser"] == "docling"
     assert packet.provenance_metadata["parse"]["figure_count"] == 2
+    assert (
+        packet.provenance_metadata["session_metadata"]["artifact_description_status"]
+        == "not_provided_to_protoneo"
+    )
 
 
 @pytest.mark.asyncio

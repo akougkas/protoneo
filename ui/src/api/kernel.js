@@ -30,6 +30,7 @@ export function startReview(file, conference, modelMap = {}, maxRounds = 3, user
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
+  if (options.artifactDescriptionStatus) form.append('artifact_description_status', options.artifactDescriptionStatus)
   if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
   return kernel.post('/api/apps/paper_review/review', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -216,6 +217,7 @@ export function startBatchReview(files, conference, modelMap = {}, maxRounds = 3
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
+  if (options.artifactDescriptionStatus) form.append('artifact_description_status', options.artifactDescriptionStatus)
   if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
   return kernel.post('/api/apps/paper_review/batch-review', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -275,6 +277,7 @@ export function reviewWithGraph(graphFile, conference, modelMap = {}, maxRounds 
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
+  if (options.artifactDescriptionStatus) form.append('artifact_description_status', options.artifactDescriptionStatus)
   if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
   return kernel.post('/api/apps/paper_review/review-with-graph', form, {
     headers: { 'Content-Type': 'multipart/form-data' },

@@ -47,9 +47,11 @@ from .pipeline import (
 )
 from .preflight import run_preflight
 from .review import (
+    artifact_description_assumed_from_status,
     build_agent_configs,
     build_deliberation_config,
     build_user_message,
+    normalize_artifact_description_status,
     session_to_review_packet,
 )
 from .schemas import sanitize_final_review
@@ -73,6 +75,8 @@ class ImportedGraphPayload:
     document_text: str = ""
     source_format: str = "knowledge_graph"
     source_session_id: str = ""
+    artifact_description_status: str = ""
+    artifact_description_assumed_present: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -86,6 +90,20 @@ class _MinimalDoc:
         self.markdown = markdown
         self.filename = filename
         self.chunks: list[str] = []
+
+
+def _artifact_status_metadata(
+    value: str = "",
+    *,
+    assumed_present: bool = False,
+    existing: str = "",
+) -> tuple[str, bool]:
+    """Return canonical AD status and legacy assumption flag."""
+    status = normalize_artifact_description_status(
+        value or existing,
+        assumed_present=assumed_present,
+    )
+    return status, artifact_description_assumed_from_status(status)
 
 
 def _graph_title(pg: KnowledgeGraph, fallback: str = "") -> str:
@@ -169,6 +187,10 @@ def _parse_imported_graph_payload(
         document_markdown=str(graph_data.get("document_markdown") or graph_data.get("paper_markdown") or ""),
         document_text=str(graph_data.get("document_text") or ""),
         source_session_id=_extract_source_session_id(filename, graph_data),
+        artifact_description_status=str(graph_data.get("artifact_description_status") or ""),
+        artifact_description_assumed_present=bool(
+            graph_data.get("artifact_description_assumed_present", False)
+        ),
     )
 
     if _should_ingest_as_d3_graph(graph_dict):
@@ -217,6 +239,12 @@ async def _enrich_imported_graph_payload_from_source_session(
         payload.document_text = source_session.document_text or source_session.document_markdown
 
     metadata = source_session.config.get("metadata", {}) if source_session.config else {}
+    if not payload.artifact_description_status:
+        payload.artifact_description_status = str(metadata.get("artifact_description_status") or "")
+    if not payload.artifact_description_assumed_present:
+        payload.artifact_description_assumed_present = bool(
+            metadata.get("artifact_description_assumed_present", False)
+        )
     if not payload.paper_title:
         payload.paper_title = metadata.get("paper_title") or metadata.get("filename") or ""
     if not payload.conference:
@@ -457,6 +485,7 @@ async def start_panel_review(
     skip_graph: bool = Form(False),
     fast_parse: bool = Form(False),
     artifact_description_assumed_present: bool = Form(False),
+    artifact_description_status: str = Form(""),
 ):
     """Create and start a full Paper Review session.
 
@@ -479,6 +508,10 @@ async def start_panel_review(
         model_map = json.loads(model_map_json) if model_map_json else {}
     except json.JSONDecodeError:
         model_map = {}
+    ad_status, ad_assumed_present = _artifact_status_metadata(
+        artifact_description_status,
+        assumed_present=artifact_description_assumed_present,
+    )
 
     upload_dir = _get_upload_dir()
     safe_name = f"{uuid.uuid4().hex}_{file.filename}"
@@ -492,7 +525,8 @@ async def start_panel_review(
         conference_slug=conference,
         model_map=model_map if model_map else None,
         user_instructions=user_instructions,
-        artifact_description_assumed_present=artifact_description_assumed_present,
+        artifact_description_assumed_present=ad_assumed_present,
+        artifact_description_status=ad_status,
     )
 
     reviewer_ids = [k for k in agent_configs if k != "meta"]
@@ -510,7 +544,8 @@ async def start_panel_review(
                 "conference": conference,
                 "filename": file.filename,
                 "paper_title": "",
-                "artifact_description_assumed_present": artifact_description_assumed_present,
+                "artifact_description_status": ad_status,
+                "artifact_description_assumed_present": ad_assumed_present,
             },
         },
         app_name=_APP_NAME,
@@ -884,6 +919,7 @@ async def start_batch_review(
     user_instructions: str = Form(""),
     fast_parse: bool = Form(False),
     artifact_description_assumed_present: bool = Form(False),
+    artifact_description_status: str = Form("not_provided_to_protoneo"),
 ):
     """Upload N PDFs, process each sequentially through the full pipeline.
 
@@ -904,12 +940,17 @@ async def start_batch_review(
         model_map = json.loads(model_map_json) if model_map_json else {}
     except json.JSONDecodeError:
         model_map = {}
+    ad_status, ad_assumed_present = _artifact_status_metadata(
+        artifact_description_status,
+        assumed_present=artifact_description_assumed_present,
+    )
 
     agent_configs = build_agent_configs(
         profile=profile, conference_slug=conference,
         model_map=model_map if model_map else None,
         user_instructions=user_instructions,
-        artifact_description_assumed_present=artifact_description_assumed_present,
+        artifact_description_assumed_present=ad_assumed_present,
+        artifact_description_status=ad_status,
     )
 
     upload_dir = _get_upload_dir()
@@ -938,7 +979,8 @@ async def start_batch_review(
                     "conference": conference,
                     "filename": file.filename,
                     "paper_title": "",
-                    "artifact_description_assumed_present": artifact_description_assumed_present,
+                    "artifact_description_status": ad_status,
+                    "artifact_description_assumed_present": ad_assumed_present,
                 },
             },
             app_name=_APP_NAME,
@@ -1288,6 +1330,7 @@ class LaunchReviewBody(BaseModel):
     max_rounds: int = 0
     user_instructions: str = ""
     artifact_description_assumed_present: bool = False
+    artifact_description_status: str = ""
 
 @router.post("/sessions/{session_id}/launch-review")
 async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
@@ -1315,20 +1358,34 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Conference profile '{conference_slug}' not found")
 
-    # Rebuild agent configs with new model_map if provided
-    if body and (body.model_map or body.user_instructions or body.artifact_description_assumed_present):
+    metadata = session.config.setdefault("metadata", {})
+    existing_status = str(metadata.get("artifact_description_status") or "")
+    ad_status, ad_assumed_present = _artifact_status_metadata(
+        body.artifact_description_status if body else "",
+        assumed_present=body.artifact_description_assumed_present if body else False,
+        existing=existing_status,
+    )
+
+    # Rebuild agent configs with new model_map or review metadata if provided.
+    if body and (
+        body.model_map
+        or body.user_instructions
+        or body.artifact_description_assumed_present
+        or body.artifact_description_status
+    ):
         agent_configs = build_agent_configs(
             profile=profile, conference_slug=conference_slug,
             model_map=body.model_map if body.model_map else None,
             user_instructions=body.user_instructions,
-            artifact_description_assumed_present=body.artifact_description_assumed_present,
+            artifact_description_assumed_present=ad_assumed_present,
+            artifact_description_status=ad_status,
         )
         # Persist the new config
         session.config["agents"] = {k: v.model_dump() for k, v in agent_configs.items()}
         if body.user_instructions:
-            session.config["metadata"]["user_instructions"] = body.user_instructions
-        if body.artifact_description_assumed_present:
-            session.config["metadata"]["artifact_description_assumed_present"] = True
+            metadata["user_instructions"] = body.user_instructions
+        metadata["artifact_description_status"] = ad_status
+        metadata["artifact_description_assumed_present"] = ad_assumed_present
         await _session_manager.update(session)
     else:
         agent_configs_raw = session.config.get("agents", {})
@@ -1624,6 +1681,7 @@ async def review_with_graph(
     max_rounds: int = Form(2),
     user_instructions: str = Form(""),
     artifact_description_assumed_present: bool = Form(False),
+    artifact_description_status: str = Form(""),
 ):
     """Create a session with an imported graph and launch review immediately."""
     _session_manager = get_session_manager()
@@ -1655,12 +1713,19 @@ async def review_with_graph(
         model_map = json.loads(model_map_json) if model_map_json else {}
     except json.JSONDecodeError:
         model_map = {}
+    ad_status, ad_assumed_present = _artifact_status_metadata(
+        artifact_description_status,
+        assumed_present=artifact_description_assumed_present
+        or imported.artifact_description_assumed_present,
+        existing=imported.artifact_description_status,
+    )
 
     agent_configs = build_agent_configs(
         profile=profile, conference_slug=conference,
         model_map=model_map if model_map else None,
         user_instructions=user_instructions,
-        artifact_description_assumed_present=artifact_description_assumed_present,
+        artifact_description_assumed_present=ad_assumed_present,
+        artifact_description_status=ad_status,
     )
     reviewer_ids = [k for k in agent_configs if k != "meta"]
     delib_config = build_deliberation_config(
@@ -1681,7 +1746,8 @@ async def review_with_graph(
                 "graph_import_format": imported.source_format,
                 "source_session_id": imported.source_session_id,
                 "graph_import_warnings": imported.warnings,
-                "artifact_description_assumed_present": artifact_description_assumed_present,
+                "artifact_description_status": ad_status,
+                "artifact_description_assumed_present": ad_assumed_present,
             },
         },
         app_name=_APP_NAME,
@@ -1799,6 +1865,7 @@ class SC26PacketReviewBody(BaseModel):
     force: bool = False
     skip_completed: bool = True
     artifact_description_assumed_present: bool = True
+    artifact_description_status: str = "submitted"
     user_instructions: str = ""
 
 
@@ -1929,6 +1996,7 @@ async def _run_one_sc26_packet_review(
     max_rounds: int,
     user_instructions: str,
     artifact_description_assumed_present: bool,
+    artifact_description_status: str = "",
 ) -> dict[str, Any]:
     _session_manager = get_session_manager()
     template_path = _packet_review_template_path(packet_dir)
@@ -1950,12 +2018,17 @@ async def _run_one_sc26_packet_review(
         **_preset_model_map(preset),
         **(model_map or {}),
     }
+    ad_status, ad_assumed_present = _artifact_status_metadata(
+        artifact_description_status,
+        assumed_present=artifact_description_assumed_present,
+    )
     agent_configs = build_agent_configs(
         profile=profile,
         conference_slug=conference,
         model_map=resolved_model_map if resolved_model_map else None,
         user_instructions=user_instructions,
-        artifact_description_assumed_present=artifact_description_assumed_present,
+        artifact_description_assumed_present=ad_assumed_present,
+        artifact_description_status=ad_status,
     )
     reviewer_ids = [k for k in agent_configs if k != "meta"]
     delib_config = build_deliberation_config(
@@ -1983,7 +2056,8 @@ async def _run_one_sc26_packet_review(
                 "graph_import_warnings": imported.warnings,
                 "packet_paper_id": packet_dir.name,
                 "packet_dir": str(packet_dir),
-                "artifact_description_assumed_present": artifact_description_assumed_present,
+                "artifact_description_status": ad_status,
+                "artifact_description_assumed_present": ad_assumed_present,
                 "preset": preset,
             },
         },
@@ -2049,7 +2123,8 @@ async def _run_one_sc26_packet_review(
         model_map=resolved_model_map,
         preset=preset,
         prompt_pack_version=prompt_pack_version,
-        artifact_description_assumed_present=artifact_description_assumed_present,
+        artifact_description_assumed_present=ad_assumed_present,
+        artifact_description_status=ad_status,
     )
     return {
         "paper_id": packet_dir.name,
@@ -2071,6 +2146,7 @@ async def run_sc26_packet_reviews(
     force: bool = False,
     skip_completed: bool = True,
     artifact_description_assumed_present: bool = True,
+    artifact_description_status: str = "submitted",
     user_instructions: str = "",
 ) -> dict[str, Any]:
     results = []
@@ -2091,6 +2167,7 @@ async def run_sc26_packet_reviews(
                 max_rounds=max_rounds,
                 user_instructions=user_instructions,
                 artifact_description_assumed_present=artifact_description_assumed_present,
+                artifact_description_status=artifact_description_status,
             ))
         except Exception as e:
             logger.error("SC26 packet review failed for %s: %s", packet_dir, e, exc_info=True)
@@ -2133,6 +2210,7 @@ async def start_sc26_packet_review(body: SC26PacketReviewBody):
             force=body.force,
             skip_completed=body.skip_completed,
             artifact_description_assumed_present=body.artifact_description_assumed_present,
+            artifact_description_status=body.artifact_description_status,
             user_instructions=body.user_instructions,
         )
         batch_bus.emit("batch_complete", {

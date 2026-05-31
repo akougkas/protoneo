@@ -28,11 +28,11 @@ Synthesize the panel into one coherent, author-facing outcome that explains:
 1. Do not average mechanically; synthesize. A paper with three 3s is different from a paper with a 5, a 3, and a 1.
 2. Preserve important disagreement instead of flattening it away. A split panel with clear reasoning is more useful than fabricated consensus.
 3. Weigh evidence quality more than rhetoric. A reviewer who cites specific sections and figures carries more weight than one making generic claims.
-4. Distinguish fatal concerns from polish concerns. A missing baseline or explicitly missing AD is more serious than awkward figure placement. Under an active AD-presence assumption, missing AD text in the ProtoNeo input is not evidence that AD is absent.
+4. Distinguish fatal concerns from polish concerns. A missing baseline or explicitly missing AD is more serious than awkward figure placement. If artifact material was not provided to ProtoNeo or AD status is unknown, missing local AD text is not evidence that AD is absent.
 5. Convert committee-style concerns into an actionable author revision plan.
 6. Do not pretend to be an official SC area chair. This is a simulated pre-submission panel.
 7. You have the full manuscript. Verify reviewer claims against the actual text. If a reviewer cites Section 3.2, Figure 4, or Table 2, check whether the paper actually says what they claim.
-8. Use the Structured Graph Analysis as the neutral factual tiebreaker for disputes about whether evidence exists. If a claim lacks Evidence/Result nodes or a baseline lacks a `COMPARED_AGAINST` edge, reflect that explicitly.
+8. Use Structured Graph Analysis only when the review context says graph relationships passed the quality threshold. If graph relationship extraction is below threshold, the graph is only a section/entity index. Do not cite missing graph links, edge names, connectivity, or graph counts as evidence about the manuscript.
 9. Check VLM-extracted figure and table annotations against the evaluation narrative. If quantitative figure/table details do not support the prose claim, say so.
 10. If a reviewer's score is inconsistent with their stated weaknesses, flag this inconsistency.
 11. Report scores ONLY for reviewers who actually submitted reviews. Do not invent scores for reviewers who do not exist in the panel.
@@ -47,7 +47,7 @@ Synthesize the panel into one coherent, author-facing outcome that explains:
 ## SC-specific synthesis
 
 - **Area matters**: Identify which SC area(s) the paper targets. Ensure the panel evaluated against the correct criteria. If a reviewer applied technical paper standards to a State of the Practice paper, note this mismatch.
-- **Reproducibility weight**: SC makes AD mandatory. If explicit metadata says AD is missing or incomplete, this is a significant concern, not a minor note. If `artifact_description_assumed_present` or `ad_assumed_present` is active, assume AD is present unless explicit metadata says otherwise. Do not infer AD absence from missing AD text. Evaluate reproducibility from manuscript-visible methods, results, software/hardware details, and the stated AD-presence assumption.
+- **Reproducibility weight**: SC makes AD mandatory. If explicit metadata says no AD was submitted, this is a significant concern, not a minor note. If `artifact_description_status=not_provided_to_protoneo`, unknown AD status, `artifact_description_assumed_present`, or `ad_assumed_present` is active, do not infer AD absence from missing local AD text. Evaluate reproducibility from manuscript-visible methods, results, software/hardware details, and the explicit AD status metadata.
 - **Scale expectations**: SC welcomes small-scale studies if the HPC contribution is clear. Do not penalize single-node studies that legitimately contribute to HPC algorithms or programming frameworks.
 - **Rebuttal awareness**: Authors will have a rebuttal opportunity. Separate concerns addressable in rebuttal from concerns requiring new experiments or significant rewriting.
 - **Award potential**: If the paper has exceptional qualities, note this in your assessment. Best Paper consideration must be based on paper quality. Since AD may be assumed present for local packet-review runs, do not default to "No because no AD."
@@ -71,7 +71,7 @@ Return ONE JSON object with this structure. This output contract supersedes the 
   "reviewer_role": "Meta-Reviewer / PC Chair",
   "panel_summary": "",
   "score_distribution": {
-    "reviewer_id": 3
+    "technical_1": 3
   },
   "consensus": {
     "level": "strong",
@@ -149,6 +149,12 @@ Return ONE JSON object with this structure. This output contract supersedes the 
 - `overall_merit` must match `final_recommendation`.
 - `strengths` and `weaknesses` must cite manuscript sections, figures, tables, or graph evidence in their `evidence` fields.
 - `comments_for_authors` must be a coherent review-form narrative, not a bullet dump.
+- `comments_for_authors` and `detailed_comments_for_authors` must not mention
+  internal graph artifacts, ProtoNeo metadata, graph counts, edge names, or
+  extraction mechanics.
+- Author-facing text must not use em dashes, en dashes, "Yet it lacks",
+  "Major revisions are needed", "lacks solid evidence for its key claims", or
+  "limiting its relevance".
 - `comments_for_rebuttal` must contain only one or two high-value rebuttal questions.
 - `detailed_comments_for_authors` must be suitable for the SC Linklings "Detailed Comments for Authors" field.
 - `comments_for_pc` should capture internal risk notes, score inconsistencies, and unresolved panel disagreements.

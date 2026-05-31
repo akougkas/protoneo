@@ -334,6 +334,26 @@
         </div>
       </div>
 
+      <!-- Artifact status -->
+      <div class="artifact-status-section">
+        <h2 class="section-heading">Artifact / AD Status</h2>
+        <div class="artifact-status-row">
+          <label
+            v-for="option in artifactStatusOptions"
+            :key="option.value"
+            :class="['artifact-status-option', { selected: artifactDescriptionStatus === option.value }]"
+          >
+            <input
+              v-model="artifactDescriptionStatus"
+              type="radio"
+              :value="option.value"
+            />
+            <span class="artifact-status-label">{{ option.label }}</span>
+            <span class="artifact-status-detail">{{ option.detail }}</span>
+          </label>
+        </div>
+      </div>
+
       <!-- User Instructions -->
       <div class="instructions-section">
         <h2 class="section-heading">4. Reviewer Instructions</h2>
@@ -560,6 +580,7 @@ const launchError = ref('')
 const preflight = ref(null)
 const showFullAbstract = ref(false)
 const userInstructions = ref('')
+const artifactDescriptionStatus = ref('not_provided_to_protoneo')
 const uploadMode = ref('single')  // 'single', 'batch', 'batch-review', 'import'
 const batchFiles = ref([])
 const batchReviewFiles = ref([])
@@ -581,6 +602,24 @@ const reasoningMap = reactive({})
 // Active model assignments from GET /api/settings/active-models.
 // Format: {provider: {model_id, litellm_model, api_base, api_key_source}}
 const activeAssignments = ref({})
+
+const artifactStatusOptions = [
+  {
+    value: 'not_provided_to_protoneo',
+    label: 'Not provided to ProtoNeo',
+    detail: 'Do not grade the paper as missing an AD.',
+  },
+  {
+    value: 'submitted',
+    label: 'Submitted',
+    detail: 'Assume the AD was included with the submission.',
+  },
+  {
+    value: 'not_submitted',
+    label: 'Not submitted',
+    detail: 'Treat missing AD as explicit launch metadata.',
+  },
+]
 
 // Build a list of provider/model_id strings from active assignments
 const activeModelIds = computed(() => {
@@ -1031,6 +1070,13 @@ function truncateAbstract(text) {
   return text.slice(0, 300).replace(/\s+\S*$/, '') + '...'
 }
 
+function reviewLaunchOptions() {
+  return {
+    artifactDescriptionStatus: artifactDescriptionStatus.value,
+    artifactDescriptionAssumedPresent: artifactDescriptionStatus.value === 'submitted',
+  }
+}
+
 async function runPreflightCheck() {
   if (!canLaunch.value) return
   preflighting.value = true
@@ -1057,7 +1103,8 @@ async function doLaunchReview() {
       selectedConference.value,
       enabledMap,
       2,
-      userInstructions.value
+      userInstructions.value,
+      reviewLaunchOptions()
     )
     const sid = res.data.session_id
     const query = { conference: selectedConference.value }
@@ -1150,7 +1197,8 @@ async function launchBatchReview() {
       selectedConference.value,
       enabledMap,
       2,
-      userInstructions.value
+      userInstructions.value,
+      reviewLaunchOptions()
     )
     router.push({ name: 'Batch', params: { batchId: res.data.batch_id } })
   } catch (e) {
@@ -1171,7 +1219,8 @@ async function launchImport() {
       selectedConference.value,
       enabledMap,
       2,
-      userInstructions.value
+      userInstructions.value,
+      reviewLaunchOptions()
     )
     router.push({ name: 'Session', params: { sessionId: res.data.session_id } })
   } catch (e) {
@@ -1198,7 +1247,8 @@ async function launchSavedGraph(sess) {
       selectedConference.value,
       enabledMap,
       2,
-      userInstructions.value
+      userInstructions.value,
+      reviewLaunchOptions()
     )
     router.push({ name: 'Session', params: { sessionId: res.data.session_id } })
   } catch (e) {
@@ -1691,6 +1741,45 @@ async function launchSavedGraph(sess) {
   color: var(--pn-bg);
 }
 .launch-btn.ready:hover { background: #222; }
+
+/* ── Review metadata ── */
+.artifact-status-section {
+  margin-bottom: var(--pn-space-6);
+}
+.artifact-status-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--pn-space-3);
+}
+.artifact-status-option {
+  border: 1px solid var(--pn-border);
+  background: var(--pn-surface);
+  padding: var(--pn-space-3);
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: var(--pn-space-2);
+  row-gap: 2px;
+  min-height: 74px;
+}
+.artifact-status-option.selected {
+  border-color: var(--pn-text);
+  box-shadow: inset 3px 0 0 var(--pn-text);
+}
+.artifact-status-option input {
+  margin-top: 2px;
+}
+.artifact-status-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pn-text);
+}
+.artifact-status-detail {
+  grid-column: 2;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--pn-text-muted);
+}
 
 /* ── Instructions ── */
 .instructions-section { margin-bottom: var(--pn-space-6); }

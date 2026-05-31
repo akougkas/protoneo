@@ -1097,6 +1097,8 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             "session_id": session_id,
             "paper_title": session.config.get("metadata", {}).get("paper_title", ""),
             "conference": session.config.get("metadata", {}).get("conference", ""),
+            "artifact_description_status": session.config.get("metadata", {}).get("artifact_description_status", ""),
+            "artifact_description_assumed_present": session.config.get("metadata", {}).get("artifact_description_assumed_present", False),
             "graph": session.knowledge_graph,
             "document_markdown": session.document_markdown or session.document_text,
         }

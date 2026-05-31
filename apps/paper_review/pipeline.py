@@ -44,86 +44,206 @@ logger = logging.getLogger("protoneo.paper_review.pipeline")
 _session_graphs = get_session_graphs()
 _session_ontologies = get_session_ontologies()
 
+_STRUCTURAL_NODE_TYPES = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+_STRUCTURAL_EDGE_TYPES = {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
+_MIN_REVIEW_SEMANTIC_EDGES = 3
+_GRAPH_ARTIFACT_PATTERNS = (
+    re.compile(r"\b\d+\s*/\s*\d+\b[^\n.]*\b(?:claim|claims|method|methods|baseline|baselines|evidence|edges?)\b", re.I),
+    re.compile(r"\b(?:Evidence/Result|COMPARED_AGAINST|linked evidence|evidence links?|baseline comparison edges?|unsupported by graph|graph evidence|graph artifacts?|graph counts?|edge counts?)\b", re.I),
+)
+
+
+def _semantic_nodes(graph: KnowledgeGraph) -> list[Any]:
+    return [n for n in graph.nodes if n.node_type not in _STRUCTURAL_NODE_TYPES]
+
+
+def _semantic_edges(graph: KnowledgeGraph) -> list[Any]:
+    return [e for e in graph.edges if e.edge_type not in _STRUCTURAL_EDGE_TYPES]
+
+
+def review_graph_quality(graph: KnowledgeGraph) -> dict[str, Any]:
+    """Classify whether graph relationships are safe reviewer evidence."""
+    semantic_nodes = _semantic_nodes(graph)
+    semantic_edges = _semantic_edges(graph)
+    relationship_facts_usable = len(semantic_edges) >= _MIN_REVIEW_SEMANTIC_EDGES
+    if not graph.nodes:
+        mode = "unavailable"
+    elif relationship_facts_usable:
+        mode = "relational"
+    else:
+        mode = "index_only"
+    return {
+        "mode": mode,
+        "relationship_facts_usable": relationship_facts_usable,
+        "semantic_node_count": len(semantic_nodes),
+        "semantic_edge_count": len(semantic_edges),
+        "threshold": _MIN_REVIEW_SEMANTIC_EDGES,
+    }
+
+
+def _build_graph_index_context(graph: KnowledgeGraph) -> str:
+    """Return safe graph context when relationships are not review evidence."""
+    semantic_types = sorted({n.node_type for n in _semantic_nodes(graph)})
+    sections = [s for s in graph.section_names if s]
+    lines = [
+        "\n\n## Knowledge Graph Context\n",
+        "Graph relationship extraction did not meet the review-quality threshold. "
+        "Use the graph only as a manuscript section/entity index for navigation.",
+        "Do not cite graph edge counts, missing evidence links, baseline edges, "
+        "connectivity, or graph unsupportedness as evidence about the paper.",
+        "Base praise and criticism on the manuscript text and verified extracted "
+        "figure/table annotations.",
+    ]
+    if sections:
+        lines.append("Indexed sections: " + ", ".join(sections[:12]))
+    if semantic_types:
+        lines.append("Indexed entity types: " + ", ".join(semantic_types[:12]))
+    return "\n".join(lines) + "\n"
+
+
+def _strip_unusable_graph_claims_from_text(text: str) -> str:
+    """Remove internal graph/edge claims from public review text."""
+    if not text:
+        return ""
+    cleaned = str(text).replace("—", "-").replace("–", "-")
+    chunks = re.split(r"(?<=[.!?])\s+|\n+", cleaned)
+    kept: list[str] = []
+    for chunk in chunks:
+        stripped = chunk.strip()
+        if not stripped:
+            continue
+        if any(pattern.search(stripped) for pattern in _GRAPH_ARTIFACT_PATTERNS):
+            continue
+        kept.append(stripped)
+    return " ".join(kept).strip()
+
+
+def _strip_unusable_graph_claims(value: Any) -> Any:
+    if isinstance(value, str):
+        return _strip_unusable_graph_claims_from_text(value)
+    if isinstance(value, list):
+        return [_strip_unusable_graph_claims(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _strip_unusable_graph_claims(item) for key, item in value.items()}
+    return value
+
+
+def _apply_graph_output_guardrail(
+    final_review: dict[str, Any],
+    graph: KnowledgeGraph | None,
+) -> dict[str, Any]:
+    """Prevent internal graph artifacts from leaking as review evidence."""
+    guarded = dict(final_review)
+    for key in (
+        "panel_summary",
+        "agreements",
+        "disagreements",
+        "author_facing_summary",
+        "paper_summary",
+        "strengths",
+        "weaknesses",
+        "comments_for_rebuttal",
+        "detailed_comments_for_authors",
+        "comments_for_authors",
+        "comments_for_pc",
+        "internal_committee_concerns",
+        "questions_for_authors",
+        "revision_actions",
+        "prioritized_revision_plan",
+        "decision_risk_notes",
+        "reproducibility_committee_focus",
+    ):
+        if key in guarded:
+            guarded[key] = _strip_unusable_graph_claims(guarded[key])
+    return guarded
+
+
+def _review_score_distribution(result: DeliberationResult) -> dict[str, int]:
+    """Derive reviewer scores from actual independent-review outputs."""
+    scores: dict[str, int] = {}
+    for phase in result.phases:
+        if phase.phase_name != "independent_review":
+            continue
+        for output in phase.outputs:
+            parsed = output.structured if isinstance(output.structured, dict) else None
+            if not parsed:
+                try:
+                    parsed = json.loads(strip_json_fences(output.content))
+                except Exception:
+                    parsed = None
+            if not isinstance(parsed, dict):
+                continue
+            merit = parsed.get("overall_merit", {})
+            raw_score = merit.get("score") if isinstance(merit, dict) else merit
+            try:
+                score = int(raw_score)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= score <= 5:
+                scores[output.agent_id or output.agent_role] = score
+    return scores
+
 
 def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
     """Generate structured graph analysis for reviewer context.
 
-    Surfaces claim-evidence gaps, baseline coverage, section entity density,
-    and disconnected entities that the narrative briefing does not capture.
-    Reviewers can reference these findings when grounding their assessments.
+    Surfaces only positive graph facts that passed the relationship-quality gate.
+    Missing edges are never presented as evidence that the manuscript lacks support.
     """
-    if not graph.nodes:
+    quality = review_graph_quality(graph)
+    if quality["mode"] == "unavailable":
         return (
             "\n\n## Structured Graph Analysis\n\n"
             "No knowledge graph entities are available for this session. "
             "Treat the manuscript text and inline figure/table annotations as the "
             "primary evidence source, and explicitly note that graph grounding is unavailable.\n"
         )
+    if quality["mode"] == "index_only":
+        return (
+            "\n\n## Structured Graph Analysis\n\n"
+            "Graph relationship extraction did not meet the review-quality threshold. "
+            "Use the graph as a section/entity index only. Do not infer absent "
+            "paper evidence from missing graph links, do not cite edge counts, and "
+            "do not make relationship claims from the graph for this review.\n"
+        )
 
-    _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
-    _STRUCTURAL_RELS = {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
-
-    semantic = [n for n in graph.nodes if n.node_type not in _STRUCTURAL]
+    semantic = _semantic_nodes(graph)
     if not semantic:
         return (
             "\n\n## Structured Graph Analysis\n\n"
             "The graph contains only structural paper nodes and no semantic claim, "
-            "method, baseline, evidence, result, or dataset entities. Treat this as "
-            "a graph coverage gap when evaluating unsupported claims.\n"
+            "method, baseline, evidence, result, or dataset entities. Use the graph "
+            "only as a navigation aid, not as evidence about missing paper support.\n"
         )
 
-    sem_edges = [e for e in graph.edges if e.edge_type not in _STRUCTURAL_RELS]
-
-    # Build adjacency
-    outgoing: dict[str, list[tuple[str, str]]] = {}
-    incoming: dict[str, list[tuple[str, str]]] = {}
-    for e in sem_edges:
-        outgoing.setdefault(e.source_id, []).append((e.edge_type, e.target_id))
-        incoming.setdefault(e.target_id, []).append((e.edge_type, e.source_id))
+    sem_edges = _semantic_edges(graph)
 
     typed: dict[str, list] = {}
     for n in semantic:
         typed.setdefault(n.node_type, []).append(n)
+    node_labels = {n.id: n.label for n in graph.nodes}
 
-    lines = ["\n\n## Structured Graph Analysis\n"]
+    lines = [
+        "\n\n## Structured Graph Analysis\n",
+        "Use only the relationship facts listed here. Figure and table references "
+        "are usable only when the same figure or table appears in the manuscript "
+        "text or extracted figure/table annotations.",
+    ]
 
-    # 1. Claim-Evidence Gaps
-    claims = typed.get("Claim", [])
-    if claims:
-        _EVIDENCE_RELS = {"SUPPORTS", "EVIDENCED_BY", "EVALUATES_ON"}
-        supported = []
-        unsupported = []
-        for c in claims:
-            has_evidence = any(
-                etype in _EVIDENCE_RELS for etype, _ in incoming.get(c.id, [])
-            ) or any(
-                etype in _EVIDENCE_RELS for etype, _ in outgoing.get(c.id, [])
-            )
-            (supported if has_evidence else unsupported).append(c)
+    # 1. Positive relationship facts only. Missing edges are not paper evidence.
+    if sem_edges:
+        lines.append("\n### Extracted Relationship Facts")
+        for edge in sem_edges[:10]:
+            src = node_labels.get(edge.source_id, edge.source_id)
+            tgt = node_labels.get(edge.target_id, edge.target_id)
+            lines.append(f"- {src[:80]} --[{edge.edge_type}]--> {tgt[:80]}")
 
-        lines.append("### Claim-Evidence Coverage")
-        lines.append(f"{len(supported)}/{len(claims)} claims have linked evidence.")
-        if unsupported:
-            lines.append("Claims without direct evidence links:")
-            for c in unsupported[:5]:
-                sec = f" [{c.source_section}]" if c.source_section else ""
-                lines.append(f"- {c.label[:80]}{sec}")
-
-    # 2. Baseline Coverage
-    methods = typed.get("Method", [])
+    # 2. Baseline entities
     baselines = typed.get("Baseline", [])
-    if methods:
-        compared = [
-            m for m in methods
-            if any(etype == "COMPARED_AGAINST" for etype, _ in outgoing.get(m.id, []))
-        ]
-        lines.append("\n### Baseline Coverage")
-        lines.append(
-            f"{len(compared)}/{len(methods)} methods have explicit baseline comparisons."
-        )
-        if baselines:
-            names = [b.label.split(":")[0].strip() for b in baselines[:8]]
-            lines.append(f"Known baselines: {', '.join(names)}")
+    if baselines:
+        lines.append("\n### Baseline Entities")
+        names = [b.label.split(":")[0].strip() for b in baselines[:8]]
+        lines.append(", ".join(names))
 
     # 3. Section Entity Density
     section_counts: dict[str, int] = {}
@@ -140,20 +260,6 @@ def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
         for sec, count in sorted(section_counts.items(), key=lambda x: -x[1])[:6]:
             lines.append(f"- {sec}: {count} entities")
 
-    # 4. Disconnected Entities
-    connected_ids: set[str] = set()
-    for e in sem_edges:
-        connected_ids.add(e.source_id)
-        connected_ids.add(e.target_id)
-    orphans = [n for n in semantic if n.id not in connected_ids]
-    if orphans:
-        lines.append(f"\n### Disconnected Entities ({len(orphans)})")
-        lines.append(
-            "These entities were extracted but have no relationships to other entities:"
-        )
-        for o in orphans[:5]:
-            lines.append(f"- {o.label} ({o.node_type})")
-
     result = "\n".join(lines) + "\n"
     if len(result) > 2000:
         result = result[:1800].rsplit("\n", 1)[0] + "\n"
@@ -163,8 +269,17 @@ def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
 def _build_enriched_review_message(user_message: str, graph: KnowledgeGraph) -> str:
     """Append graph summary and structured analysis for all reviewer agents."""
     parts = [user_message]
-    if graph.summary:
-        parts.append(graph.summary)
+    quality = review_graph_quality(graph)
+    if quality["relationship_facts_usable"]:
+        parts.append(
+            "\n\n## Knowledge Graph Context\n\n"
+            "Graph relationship extraction passed the review-quality threshold. "
+            "Use only the positive relationship facts listed in Structured Graph "
+            "Analysis. Do not infer paper weaknesses from missing graph edges or "
+            "cite internal graph counts in author-facing prose.\n"
+        )
+    elif quality["mode"] != "unavailable":
+        parts.append(_build_graph_index_context(graph))
     else:
         parts.append(
             "\n\n## Knowledge Graph Summary\n\n"
@@ -324,7 +439,7 @@ async def _run_review_stage(
                     review.model_dump(), agent_id=output.agent_id
                 )
 
-    await _finalize_unified_synthesis(sid, bus, result)
+    await _finalize_unified_synthesis(sid, bus, result, paper_graph)
 
     return result
 
@@ -368,7 +483,10 @@ def _parse_final_review(raw: str) -> dict[str, Any]:
 
 
 async def _finalize_unified_synthesis(
-    sid: str, bus: SessionEventBus, result: DeliberationResult,
+    sid: str,
+    bus: SessionEventBus,
+    result: DeliberationResult,
+    paper_graph: KnowledgeGraph | None = None,
 ) -> None:
     """Persist the meta-reviewer's single synthesis as the final review."""
     _session_manager = get_session_manager()
@@ -384,6 +502,12 @@ async def _finalize_unified_synthesis(
         return
 
     final_review = _parse_final_review(output.content)
+    review_scores = _review_score_distribution(result)
+    if review_scores:
+        final_review["score_distribution"] = review_scores
+    final_review = sanitize_final_review(
+        _apply_graph_output_guardrail(final_review, paper_graph)
+    )
     session = await _session_manager.get(sid)
     if session and session.result:
         conference_slug = session.config.get("metadata", {}).get("conference", "")
