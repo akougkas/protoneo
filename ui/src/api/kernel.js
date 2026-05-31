@@ -63,6 +63,10 @@ export function runPreflight(file, conference) {
   })
 }
 
+export function getPreflightStatus(jobId) {
+  return kernel.get(`/api/apps/paper_review/preflight/${jobId}`)
+}
+
 export function getReviewPacketMd(sessionId) {
   return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/review-packet.md`, {
     responseType: 'blob',

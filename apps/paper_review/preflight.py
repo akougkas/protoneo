@@ -75,7 +75,15 @@ _HPC_KEYWORDS = [
 ]
 
 
-def run_preflight(text: str, filename: str, profile: ConferenceProfile) -> PreflightResult:
+def run_preflight(
+    text: str,
+    filename: str,
+    profile: ConferenceProfile,
+    *,
+    figure_count: int = 0,
+    table_count: int = 0,
+    vlm_status: dict[str, Any] | None = None,
+) -> PreflightResult:
     """Run all preflight checks on extracted manuscript text."""
     text_lower = text.lower()
     checks: list[PreflightCheck] = []
@@ -208,6 +216,48 @@ def run_preflight(text: str, filename: str, profile: ConferenceProfile) -> Prefl
             name="references",
             passed=True,
             detail=f"~{ref_count} unique references detected",
+        ))
+
+    # 7. Visual evidence readiness
+    if figure_count or table_count:
+        status = vlm_status or {}
+        artifacts = f"{figure_count} figures, {table_count} tables"
+        if status.get("configured") and status.get("reachable"):
+            checks.append(PreflightCheck(
+                name="visual_evidence",
+                passed=True,
+                severity="info",
+                detail=(
+                    f"{artifacts} detected. Vision-grounded review ready via "
+                    f"{status.get('model', 'VLM')}."
+                ),
+            ))
+        elif status.get("configured"):
+            checks.append(PreflightCheck(
+                name="visual_evidence",
+                passed=False,
+                severity="warning",
+                detail=(
+                    f"{artifacts} detected but VLM unreachable "
+                    f"({status.get('error', '')}). Review will be TEXT-ONLY."
+                ),
+            ))
+        else:
+            checks.append(PreflightCheck(
+                name="visual_evidence",
+                passed=False,
+                severity="warning",
+                detail=(
+                    f"{artifacts} detected but no VLM configured. Review will be "
+                    "TEXT-ONLY; figures not interpreted."
+                ),
+            ))
+    else:
+        checks.append(PreflightCheck(
+            name="visual_evidence",
+            passed=True,
+            severity="info",
+            detail="No figures/tables detected; text-only grounding is sufficient.",
         ))
 
     # Tally

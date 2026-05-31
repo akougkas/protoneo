@@ -416,12 +416,25 @@ Examples:
         </div>
       </div>
 
+      <div v-if="preflighting" class="preflight-progress">
+        <div class="preflight-progress-top">
+          <span>{{ preflightStageLabel }}</span>
+          <span>{{ preflightProgress }}%</span>
+        </div>
+        <div class="preflight-progress-bar">
+          <div class="preflight-progress-fill" :style="{ width: `${preflightProgress}%` }"></div>
+        </div>
+      </div>
+
       <!-- Preflight Checks -->
       <div v-if="preflight" class="preflight-results">
         <h3 class="preflight-header">
           Preflight Check
           <span :class="['preflight-badge', preflight.block_count > 0 ? 'blocked' : preflight.warn_count > 0 ? 'warnings' : 'clear']">
             {{ preflight.block_count > 0 ? 'Blocked' : preflight.warn_count > 0 ? `${preflight.warn_count} Warning(s)` : 'Clear' }}
+          </span>
+          <span v-if="preflightGroundingLabel" :class="['grounding-badge', preflightGroundingLabel === 'Vision-grounded' ? 'vision' : 'text']">
+            {{ preflightGroundingLabel }}
           </span>
         </h3>
         <div class="preflight-meta">
@@ -451,7 +464,7 @@ Examples:
             :disabled="!canLaunch || launching || preflight.block_count > 0"
             @click="doLaunchReview"
           >
-            {{ launching ? 'Starting review...' : preflight.block_count > 0 ? 'Blocked by preflight' : 'Start Review' }}
+            {{ launching ? 'Starting review...' : preflight.block_count > 0 ? 'Blocked by preflight' : `Start ${preflightGroundingLabel || 'Text-only'} Review` }}
           </button>
         </template>
         <template v-if="uploadMode === 'batch'">
@@ -544,7 +557,7 @@ Examples:
 <script setup>
 import { ref, reactive, computed, inject, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getConferences, getConference, getModels, startReview, runPreflight, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, reviewWithGraph, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
+import { getConferences, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, reviewWithGraph, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
 
 const router = useRouter()
 const activeApp = inject('activeApp', ref(null))
@@ -578,6 +591,10 @@ const launching = ref(false)
 const preflighting = ref(false)
 const launchError = ref('')
 const preflight = ref(null)
+const preflightJob = ref(null)
+const preflightProgress = ref(0)
+const preflightStage = ref('')
+const preflightVlmStatus = ref(null)
 const showFullAbstract = ref(false)
 const userInstructions = ref('')
 const artifactDescriptionStatus = ref('not_provided_to_protoneo')
@@ -782,6 +799,25 @@ const savedGraphSessions = computed(() =>
   )
 )
 
+const preflightStageLabel = computed(() => {
+  const labels = {
+    queued: 'Queued',
+    probing_vlm: 'Checking VLM',
+    parsing: 'Parsing manuscript',
+    checks: 'Running checks',
+    done: 'Complete',
+    error: 'Failed',
+  }
+  return labels[preflightStage.value] || preflightStage.value || 'Preparing'
+})
+
+const preflightGroundingLabel = computed(() => {
+  const status = preflight.value?.vlm_status || preflightVlmStatus.value
+  if (status?.configured && status?.reachable) return 'Vision-grounded'
+  if (preflight.value) return 'Text-only'
+  return ''
+})
+
 const canLaunch = computed(() => {
   if (uploadMode.value === 'single') return selectedConference.value && selectedFile.value
   if (uploadMode.value === 'batch') return selectedConference.value && batchFiles.value.length > 0
@@ -792,6 +828,10 @@ const canLaunch = computed(() => {
 
 watch([selectedFile, selectedConference], () => {
   preflight.value = null
+  preflightJob.value = null
+  preflightProgress.value = 0
+  preflightStage.value = ''
+  preflightVlmStatus.value = null
 })
 
 watch([availableModels, activeAssignments], () => {
@@ -1081,9 +1121,28 @@ async function runPreflightCheck() {
   if (!canLaunch.value) return
   preflighting.value = true
   launchError.value = ''
+  preflight.value = null
+  preflightProgress.value = 0
+  preflightStage.value = 'queued'
+  preflightVlmStatus.value = null
   try {
     const res = await runPreflight(selectedFile.value, selectedConference.value)
-    preflight.value = res.data
+    preflightJob.value = res.data.job_id
+    while (preflightJob.value) {
+      await new Promise(resolve => setTimeout(resolve, 700))
+      const statusRes = await getPreflightStatus(preflightJob.value)
+      const job = statusRes.data
+      preflightProgress.value = job.progress || 0
+      preflightStage.value = job.stage || job.status || ''
+      if (job.result?.vlm_status) preflightVlmStatus.value = job.result.vlm_status
+      if (job.status === 'done') {
+        preflight.value = job.result
+        break
+      }
+      if (job.status === 'error') {
+        throw new Error(job.error || 'Preflight check failed')
+      }
+    }
   } catch (e) {
     launchError.value = e.response?.data?.detail || e.message || 'Preflight check failed'
   } finally {
@@ -1695,7 +1754,43 @@ async function launchSavedGraph(sess) {
 .preflight-badge.warnings { background: var(--pn-warn-dim); color: var(--pn-warn); }
 .preflight-badge.blocked { background: var(--pn-err-dim); color: var(--pn-err); }
 
+.grounding-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  letter-spacing: 0.06em;
+}
+.grounding-badge.vision { background: var(--pn-ok-dim); color: var(--pn-ok); }
+.grounding-badge.text { background: var(--pn-warn-dim); color: var(--pn-warn); }
+
 .preflight-meta { font-size: 11px; color: var(--pn-text-muted); margin-bottom: var(--pn-space-3); }
+
+.preflight-progress {
+  border: 1px solid var(--pn-border);
+  padding: var(--pn-space-4);
+  margin-bottom: var(--pn-space-4);
+}
+.preflight-progress-top {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--pn-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--pn-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--pn-space-2);
+}
+.preflight-progress-bar {
+  height: 6px;
+  background: var(--pn-border);
+  overflow: hidden;
+}
+.preflight-progress-fill {
+  height: 100%;
+  background: var(--pn-text);
+  transition: width 0.25s var(--pn-ease);
+}
 
 .check-row {
   display: flex; align-items: flex-start; gap: var(--pn-space-3);

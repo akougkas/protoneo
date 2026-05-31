@@ -34,7 +34,7 @@ from protoneo.knowledge.chunker import chunk_document
 from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.knowledge.parser import parse_file
 from protoneo.llm.errors import sanitize_error_message
-from protoneo.llm.settings import build_vlm_config
+from protoneo.llm.settings import build_vlm_config, vlm_status
 
 from .conference import ConferenceProfile, list_profiles, load_profile
 _APP_NAME = "paper_review"
@@ -59,6 +59,7 @@ from .schemas import sanitize_final_review
 logger = logging.getLogger("protoneo.paper_review.api")
 
 router = APIRouter()
+_preflight_jobs: dict[str, dict[str, Any]] = {}
 
 _SAVED_GRAPH_FILENAME_RE = re.compile(
     r"(?P<session_id>[0-9a-f]{32})(?:_graph|-graph|\.graph)?\.json$",
@@ -481,7 +482,7 @@ async def preflight_check(
     file: UploadFile = File(...),
     conference: str = Form(...),
 ):
-    """Run fast preflight checks on a manuscript before launching the full review."""
+    """Start fast preflight checks and return a progress job id."""
     try:
         profile = load_profile(conference)
     except FileNotFoundError:
@@ -489,23 +490,81 @@ async def preflight_check(
             status_code=404, detail=f"Conference profile '{conference}' not found"
         )
 
-    upload_dir = _get_upload_dir()
-    safe_name = f"{uuid.uuid4().hex}_{file.filename}"
-    file_path = upload_dir / safe_name
-
     content = await file.read()
-    file_path.write_bytes(content)
+    filename = file.filename or "paper.pdf"
+    job_id = uuid.uuid4().hex
+    _preflight_jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "stage": "queued",
+        "result": None,
+        "error": "",
+    }
 
-    try:
-        doc = parse_file(str(file_path), fast=True, vlm_config=build_vlm_config())
-    except Exception as e:
-        file_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {e}")
-    finally:
-        file_path.unlink(missing_ok=True)
+    async def _run() -> None:
+        file_path: Path | None = None
+        try:
+            _preflight_jobs[job_id].update(
+                status="running",
+                stage="probing_vlm",
+                progress=10,
+            )
+            status = vlm_status()
 
-    result = run_preflight(doc.text, doc.filename, profile)
-    return result.model_dump(mode="json")
+            _preflight_jobs[job_id].update(stage="parsing", progress=30)
+            upload_dir = _get_upload_dir()
+            safe_name = f"{uuid.uuid4().hex}_{filename}"
+            file_path = upload_dir / safe_name
+            file_path.write_bytes(content)
+
+            loop = asyncio.get_running_loop()
+            doc = await loop.run_in_executor(
+                None,
+                lambda: parse_file(str(file_path), fast=True, vlm_config=build_vlm_config()),
+            )
+            file_path.unlink(missing_ok=True)
+
+            _preflight_jobs[job_id].update(stage="checks", progress=80)
+            result = run_preflight(
+                doc.text,
+                doc.filename,
+                profile,
+                figure_count=len(doc.metadata.get("figures") or []),
+                table_count=int(
+                    doc.metadata.get("table_count")
+                    or len(doc.metadata.get("tables") or [])
+                ),
+                vlm_status=status,
+            )
+            payload = result.model_dump(mode="json")
+            payload["vlm_status"] = status
+            _preflight_jobs[job_id].update(
+                status="done",
+                stage="done",
+                progress=100,
+                result=payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if file_path:
+                file_path.unlink(missing_ok=True)
+            logger.warning("Preflight job %s failed: %s", job_id, exc)
+            _preflight_jobs[job_id].update(
+                status="error",
+                stage="error",
+                progress=100,
+                error=str(exc),
+            )
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@router.get("/preflight/{job_id}")
+async def preflight_status(job_id: str):
+    job = _preflight_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="unknown preflight job")
+    return job
 
 # ── Review Sessions ────────────────────────────────────
 

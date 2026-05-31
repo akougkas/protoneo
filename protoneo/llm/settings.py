@@ -533,6 +533,33 @@ def build_vlm_config(settings: ProtoNeoSettings | None = None) -> dict[str, Any]
     return s.vlm_endpoint.model_dump()
 
 
+def vlm_status(settings: ProtoNeoSettings | None = None) -> dict[str, Any]:
+    """Report VLM configuration and reachability for preflight/UX."""
+    active_settings = settings or load_settings()
+    endpoint = active_settings.vlm_endpoint
+    out = {
+        "configured": bool(endpoint.enabled and endpoint.url),
+        "url": endpoint.url,
+        "model": endpoint.model,
+        "reachable": False,
+        "error": "",
+    }
+    if not out["configured"]:
+        out["error"] = "VLM endpoint disabled or unset"
+        return out
+    try:
+        import httpx
+
+        base = endpoint.url.split("/chat/completions")[0].rstrip("/")
+        response = httpx.get(f"{base}/models", timeout=4.0)
+        out["reachable"] = response.status_code == 200
+        if response.status_code != 200:
+            out["error"] = f"HTTP {response.status_code}"
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+    return out
+
+
 # ── Built-in presets ──────────────────────────────────────
 #
 # These ship with ProtoNeo and are always available. Users can
