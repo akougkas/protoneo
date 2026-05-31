@@ -417,6 +417,13 @@ def save_settings(settings: ProtoNeoSettings) -> None:
 def update_settings(patch: dict[str, Any]) -> ProtoNeoSettings:
     """Load, merge partial update, save, and return."""
     current = load_settings()
+    patch = dict(patch)
+    # The Settings UI sends the full runtime settings shape, and a page-level
+    # save can race before endpoint arrays have loaded. Do not let an empty
+    # client-side placeholder wipe configured local/LAN providers.
+    for endpoint_key in ("localhost_endpoints", "lan_endpoints"):
+        if patch.get(endpoint_key) == [] and getattr(current, endpoint_key):
+            patch.pop(endpoint_key, None)
     merged = current.model_dump()
     merged.update(patch)
     updated = ProtoNeoSettings.model_validate(_migrate_settings_data(merged))

@@ -515,6 +515,62 @@ const subscriptionProviders = computed(() =>
 const openrouterAvailable = computed(() => providers.value.find(p => p.provider === 'openrouter')?.has_credentials ?? false)
 const openrouterModelCount = computed(() => discovery.value.openrouter?.models?.length || 0)
 
+function modelListFromCache(providerName, sourceSettings = settings) {
+  const cached = sourceSettings.discovered_models?.[providerName]
+  return Array.isArray(cached) ? cached : []
+}
+
+function endpointDiscoveryGroup(endpoints = [], sourceSettings = settings) {
+  return endpoints.map(ep => {
+    const models = modelListFromCache(ep.id, sourceSettings)
+    const selected = sourceSettings.active_models?.[ep.id] || ''
+    const loadedModel = models.find(m => m.loaded)?.id || selected || null
+    return {
+      id: ep.id,
+      name: ep.id,
+      display_name: ep.display_name || ep.id,
+      location: ep.location || 'lan',
+      url: ep.url,
+      type: ep.type || 'openai',
+      online: models.length > 0,
+      models,
+      loaded_model: loadedModel,
+      loaded_models: models.filter(m => m.loaded).map(m => m.id),
+      nudge: '',
+    }
+  })
+}
+
+function discoveryFromSettings(sourceSettings = settings) {
+  const cached = sourceSettings.discovered_models || {}
+  const out = {}
+  out.localhost = endpointDiscoveryGroup(sourceSettings.localhost_endpoints || [], sourceSettings)
+  out.lan = endpointDiscoveryGroup(sourceSettings.lan_endpoints || [], sourceSettings)
+
+  const endpointIds = new Set([...out.localhost, ...out.lan].map(n => n.id))
+  for (const [providerName, models] of Object.entries(cached)) {
+    if (endpointIds.has(providerName) || !Array.isArray(models)) continue
+    out[providerName] = {
+      provider: providerName,
+      online: models.length > 0,
+      models,
+    }
+  }
+  return out
+}
+
+function mergeDiscovery(base, live) {
+  const merged = { ...base, ...live }
+  for (const group of ['localhost', 'lan']) {
+    if (Array.isArray(base[group]) && Array.isArray(live[group])) {
+      const byId = Object.fromEntries(base[group].map(node => [node.id, node]))
+      for (const node of live[group]) byId[node.id] = { ...(byId[node.id] || {}), ...node }
+      merged[group] = Object.values(byId)
+    }
+  }
+  return merged
+}
+
 const localNodes = computed(() => {
   // Always show configured endpoints, enriched with discovery data.
   // This ensures cards never disappear when toggled off or offline.
@@ -776,6 +832,7 @@ async function loadAll() {
     if (!loaded.vlm_endpoint.timeout) loaded.vlm_endpoint.timeout = 120
     if (!loaded.vlm_endpoint.concurrency) loaded.vlm_endpoint.concurrency = 1
     Object.assign(settings, loaded)
+    discovery.value = discoveryFromSettings(loaded)
     benchmarkResults.value = bRes.data.results || []
     registeredModels.value = mRes.data.models || []
   } catch (e) { console.error('Load failed:', e) }
@@ -783,7 +840,14 @@ async function loadAll() {
 
 async function refreshDiscovery() {
   discovering.value = true
-  try { discovery.value = (await discoverModels()).data || {} }
+  try {
+    const live = (await discoverModels()).data || {}
+    const sRes = await getSettings()
+    const loaded = sRes.data || {}
+    if (!loaded.vlm_endpoint) loaded.vlm_endpoint = settings.vlm_endpoint
+    Object.assign(settings, loaded)
+    discovery.value = mergeDiscovery(discoveryFromSettings(loaded), live)
+  }
   catch (e) { console.error('Discovery failed:', e) }
   finally { discovering.value = false }
 }

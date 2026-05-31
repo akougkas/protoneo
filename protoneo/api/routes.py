@@ -353,6 +353,9 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                 "api_key_source": "env" if os.getenv("OPENROUTER_API_KEY") else "config",
                 "token_type": "api_key",
             }
+            settings.provider_enabled.setdefault("openrouter", True)
+        if provider_credentials.get("openai"):
+            settings.provider_enabled.setdefault("openai", True)
 
         results = await discover_all(
             localhost_endpoints=[ep.model_dump() for ep in settings.localhost_endpoints],
