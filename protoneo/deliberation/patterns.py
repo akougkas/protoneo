@@ -616,6 +616,11 @@ class IndependentSynthesisPattern:
     ) -> DeliberationResult:
         start = time.monotonic()
         phases: list[PhaseResult] = []
+        result_metadata: dict[str, object] = {
+            "configured_deliberation_rounds": rules.max_rounds,
+            "effective_deliberation_rounds": rules.max_rounds,
+            "deliberation_round_policy": "configured",
+        }
 
         # Phase 1: Independent parallel review
         if on_event:
@@ -681,20 +686,23 @@ class IndependentSynthesisPattern:
                 if len(merit_scores) >= 2:
                     score_spread = max(merit_scores) - min(merit_scores)
                     if score_spread <= 1.0:
-                        effective_rounds = min(1, rules.max_rounds)
+                        effective_rounds = rules.max_rounds
                         logger.info(
                             "[Kernel] Consensus achieved (spread=%.1f, scores=%s). "
-                            "Running 1 synthesis round.",
-                            score_spread, merit_scores,
+                            "Preserving configured deliberation depth: %d rounds.",
+                            score_spread, merit_scores, effective_rounds,
                         )
+                        result_metadata["deliberation_round_policy"] = "configured_preserved_low_score_spread"
                         if on_event:
                             on_event("consensus_detected", {
                                 "spread": score_spread,
                                 "scores": merit_scores,
                                 "effective_rounds": effective_rounds,
+                                "reason": "score spread is low, but configured rounds are preserved for review quality",
                             })
                     elif score_spread >= 2.0:
                         effective_rounds = min(max(rules.max_rounds, 3), 4)
+                        result_metadata["deliberation_round_policy"] = "deepened_high_score_spread"
                         logger.info(
                             "[Kernel] Contested reviews (spread=%.1f, scores=%s). "
                             "Deep deliberation: %d rounds.",
@@ -706,6 +714,9 @@ class IndependentSynthesisPattern:
                                 "scores": merit_scores,
                                 "effective_rounds": effective_rounds,
                             })
+                    result_metadata["score_spread"] = score_spread
+                    result_metadata["independent_review_scores"] = merit_scores
+                result_metadata["effective_deliberation_rounds"] = effective_rounds
 
                 adjusted_rules = DeliberationRules(
                     max_rounds=effective_rounds,
@@ -776,4 +787,5 @@ class IndependentSynthesisPattern:
             phases=phases,
             final_output=final_output,
             duration_seconds=time.monotonic() - start,
+            metadata=result_metadata,
         )

@@ -231,3 +231,11 @@ responsible_ai:
     Authors remain responsible for correctness, accuracy, and any venue-specific
     AI disclosure requirements. SC requires disclosure of AI-generated text
     in the acknowledgments section.
+
+local_overrides:
+  sc26_packet_review:
+    artifact_description_assumed_present: true
+    note: >-
+      Local seven-paper packet review mode assumes AD is present because AD
+      existence is a binary eligibility fact external to the text passed into
+      ProtoNeo. This does not change the general SC requirement above.

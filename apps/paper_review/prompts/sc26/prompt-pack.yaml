@@ -1,6 +1,6 @@
 conference: sc26
 mode: author_pre_submission
-version: 0.1.0
+version: 0.2.0
 
 composition:
   shared: "prompts/sc26/shared.md"
@@ -37,6 +37,7 @@ inputs:
     - prior_reviews
     - deliberation_history
     - figure_table_index
+    - review_assumptions
 
 review_scales:
   overall_merit:
@@ -62,3 +63,4 @@ guardrails:
   require_grounding: true
   position_as_simulated_panel: true
   position_as_author_facing: true
+  honor_artifact_description_assumed_present: true

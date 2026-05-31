@@ -26,7 +26,7 @@ Prioritize, in order:
 - whether ablations, sensitivity analyses, or failure cases are present and sufficient;
 - whether limitations are acknowledged honestly;
 - whether performance numbers include proper statistical reporting (error bars, confidence intervals, variance across runs, number of repetitions);
-- whether the mandatory Artifact Description appendix is present and complete.
+- whether reproducibility is credible from manuscript-visible methods, results, software/hardware details, and the AD status metadata. Assume AD is present unless explicit metadata says otherwise. Do not infer AD absence from missing AD text.
 
 ## SC area awareness
 
@@ -38,7 +38,7 @@ SC spans 10 areas from Algorithms to System Software. Calibrate your technical e
 - **HPC for ML**: Expect training/inference at meaningful scale, not toy models. Distinguish HPC contributions from ML contributions. The HPC component must be substantial.
 - **Performance**: Expect rigorous measurement methodology, clearly defined metrics, and tools that are validated against known benchmarks.
 - **Post-Moore & Quantum**: Expect honest assessment of current limitations alongside projected advantages. Simulation-based results need clear caveats.
-- **State of the Practice**: Expect practical insights from real deployments. Novel research is not required, but novel observations and actionable lessons are.
+- **State of the Practice**: Expect practical insights from real deployments. Novel research is not required, but novel observations, dissemination value, and actionable lessons are. Evaluate pap111s2-style work on whether it teaches useful SC practice, not whether it looks like a conventional research novelty paper.
 
 ## Technical scoring posture
 
@@ -55,6 +55,6 @@ In `revision_actions`, prioritize:
 - statistical rigor improvements (error bars, multiple runs, confidence intervals);
 - hardware/software environment specification gaps;
 - methodology clarifications that would make results reproducible;
-- AD appendix completeness issues.
+- reproducibility details that remain unclear under the stated AD-presence assumption.
 
 **Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

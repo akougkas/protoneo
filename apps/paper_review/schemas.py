@@ -106,11 +106,27 @@ _DEFAULT_FINAL_REVIEW: dict[str, Any] = {
     "paper_summary": "",
     "strengths": [],
     "weaknesses": [],
+    "comments_for_rebuttal": "",
+    "detailed_comments_for_authors": "",
     "comments_for_authors": "",
     "comments_for_pc": "",
     "internal_committee_concerns": [],
     "questions_for_authors": [],
     "revision_actions": [],
+    "relevance": {"score": 4, "label": "HIGH", "rationale": ""},
+    "technical_soundness": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "technical_importance": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "originality": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "quality_of_presentation": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "recommended_action": {"score": 3, "label": "WEAK REJECT", "rationale": ""},
+    "level_of_confidence": {"score": 4, "label": "HIGH", "reason": ""},
+    "level_of_expertise": {"score": 4, "label": "HIGH", "reason": ""},
+    "best_paper_consideration": {
+        "nominate": False,
+        "label": "No",
+        "rationale": "",
+    },
+    "reproducibility_committee_focus": "",
     "submission_readiness": {
         "status": "revise_before_submit",
         "reason": "",
@@ -136,6 +152,65 @@ def _coerce_score_dict(value: Any, default: dict[str, Any]) -> dict[str, Any]:
     if isinstance(value, str) and value:
         return {"score": default.get("score", 3), "label": value}
     return dict(default)
+
+
+def _coerce_dimension_dict(value: Any, default: dict[str, Any]) -> dict[str, Any]:
+    """Coerce Linklings-style rating fields while preserving rationale text."""
+    if isinstance(value, dict):
+        result = dict(default)
+        result.update(value)
+        if "label" in result:
+            result["label"] = _coerce_text(result.get("label")).strip()
+        if "rationale" in result:
+            result["rationale"] = _coerce_text(result.get("rationale")).strip()
+        if "reason" in result:
+            result["reason"] = _coerce_text(result.get("reason")).strip()
+        return result
+    if isinstance(value, (int, float)):
+        result = dict(default)
+        result["score"] = int(value)
+        return result
+    if isinstance(value, str) and value:
+        result = dict(default)
+        result["label"] = value.strip()
+        return result
+    return dict(default)
+
+
+def _coerce_best_paper(value: Any) -> dict[str, Any]:
+    default = dict(_DEFAULT_FINAL_REVIEW["best_paper_consideration"])
+    if isinstance(value, dict):
+        result = dict(default)
+        result.update(value)
+        raw_nominate = result.get("nominate", result.get("selected", result.get("yes")))
+        if isinstance(raw_nominate, str):
+            result["nominate"] = raw_nominate.strip().lower() in {
+                "yes",
+                "true",
+                "1",
+                "nominate",
+            }
+        else:
+            result["nominate"] = bool(raw_nominate)
+        result["label"] = _coerce_text(result.get("label") or ("Yes" if result["nominate"] else "No"))
+        result["rationale"] = _coerce_text(result.get("rationale", ""))
+        return result
+    if isinstance(value, bool):
+        return {
+            **default,
+            "nominate": value,
+            "label": "Yes" if value else "No",
+        }
+    if isinstance(value, str) and value:
+        lowered = value.strip().lower()
+        nominate = lowered.startswith("yes") or lowered in {"true", "nominate"}
+        return {
+            **default,
+            "nominate": nominate,
+            "label": "Yes" if nominate else "No",
+            "rationale": value.strip(),
+        }
+    return default
 
 
 def _coerce_list(value: Any) -> list[Any]:
@@ -283,6 +358,15 @@ def normalize_final_review_payload(payload: Any) -> dict[str, Any]:
             or payload.get("author_facing_summary")
             or payload.get("panel_summary")
         ),
+        "comments_for_rebuttal": (
+            source.get("comments_for_rebuttal")
+            or source.get("rebuttal_comments")
+            or source.get("questions_for_rebuttal")
+        ),
+        "detailed_comments_for_authors": (
+            source.get("detailed_comments_for_authors")
+            or source.get("detailed_author_comments")
+        ),
         "comments_for_pc": source.get("comments_for_pc"),
         "internal_committee_concerns": (
             source.get("internal_committee_concerns")
@@ -297,6 +381,47 @@ def normalize_final_review_payload(payload: Any) -> dict[str, Any]:
         "submission_readiness": (
             source.get("submission_readiness")
             or payload.get("submission_readiness")
+        ),
+        "relevance": source.get("relevance") or source.get("venue_relevance"),
+        "technical_soundness": (
+            source.get("technical_soundness")
+            or source.get("soundness")
+        ),
+        "technical_importance": (
+            source.get("technical_importance")
+            or source.get("importance")
+        ),
+        "originality": source.get("originality") or source.get("novelty"),
+        "quality_of_presentation": (
+            source.get("quality_of_presentation")
+            or source.get("presentation_quality")
+            or source.get("presentation")
+        ),
+        "recommended_action": (
+            source.get("recommended_action")
+            or source.get("recommendation")
+            or source.get("overall_merit")
+            or payload.get("final_recommendation")
+        ),
+        "level_of_confidence": (
+            source.get("level_of_confidence")
+            or source.get("confidence")
+            or payload.get("confidence")
+        ),
+        "level_of_expertise": (
+            source.get("level_of_expertise")
+            or source.get("reviewer_expertise")
+            or source.get("expertise")
+            or payload.get("expertise")
+        ),
+        "best_paper_consideration": (
+            source.get("best_paper_consideration")
+            or source.get("best_paper")
+            or source.get("best_paper_nomination")
+        ),
+        "reproducibility_committee_focus": (
+            source.get("reproducibility_committee_focus")
+            or source.get("reproducibility_focus")
         ),
     }
 
@@ -331,6 +456,12 @@ def sanitize_final_review(payload: Any, fallback_comments: str = "") -> dict[str
         "comments_for_authors": _coerce_text(
             source.get("comments_for_authors") or fallback_comments
         ),
+        "comments_for_rebuttal": _coerce_text(
+            source.get("comments_for_rebuttal")
+        ),
+        "detailed_comments_for_authors": _coerce_text(
+            source.get("detailed_comments_for_authors")
+        ),
         "comments_for_pc": _coerce_text(source.get("comments_for_pc")),
         "internal_committee_concerns": _coerce_text_list(
             source.get("internal_committee_concerns")
@@ -342,6 +473,44 @@ def sanitize_final_review(payload: Any, fallback_comments: str = "") -> dict[str
         "submission_readiness": _coerce_string_map(
             source.get("submission_readiness"),
             defaults["submission_readiness"],
+        ),
+        "relevance": _coerce_dimension_dict(
+            source.get("relevance"),
+            defaults["relevance"],
+        ),
+        "technical_soundness": _coerce_dimension_dict(
+            source.get("technical_soundness"),
+            defaults["technical_soundness"],
+        ),
+        "technical_importance": _coerce_dimension_dict(
+            source.get("technical_importance"),
+            defaults["technical_importance"],
+        ),
+        "originality": _coerce_dimension_dict(
+            source.get("originality"),
+            defaults["originality"],
+        ),
+        "quality_of_presentation": _coerce_dimension_dict(
+            source.get("quality_of_presentation"),
+            defaults["quality_of_presentation"],
+        ),
+        "recommended_action": _coerce_dimension_dict(
+            source.get("recommended_action"),
+            defaults["recommended_action"],
+        ),
+        "level_of_confidence": _coerce_dimension_dict(
+            source.get("level_of_confidence"),
+            defaults["level_of_confidence"],
+        ),
+        "level_of_expertise": _coerce_dimension_dict(
+            source.get("level_of_expertise"),
+            defaults["level_of_expertise"],
+        ),
+        "best_paper_consideration": _coerce_best_paper(
+            source.get("best_paper_consideration")
+        ),
+        "reproducibility_committee_focus": _coerce_text(
+            source.get("reproducibility_committee_focus")
         ),
     }
 

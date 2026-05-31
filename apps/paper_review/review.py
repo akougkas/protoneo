@@ -97,6 +97,29 @@ _LOCAL_ENDPOINT_INFERENCE_PREFS: dict[str, dict[str, float | int | str]] = {
     },
 }
 
+AD_ASSUMED_PRESENT_INSTRUCTION = (
+    "artifact_description_assumed_present=true / ad_assumed_present=true. "
+    "Assume AD is present unless explicit metadata says otherwise. Do not infer "
+    "AD absence from missing AD text. Evaluate reproducibility from "
+    "manuscript-visible methods, results, software/hardware details, and the "
+    "stated AD-presence assumption. Best Paper consideration must be based on "
+    "paper quality, not on missing AD text."
+)
+
+
+def build_review_chair_instructions(
+    user_instructions: str = "",
+    *,
+    artifact_description_assumed_present: bool = False,
+) -> str:
+    """Compose per-run review-chair instructions."""
+    parts = []
+    if user_instructions:
+        parts.append(user_instructions.strip())
+    if artifact_description_assumed_present:
+        parts.append(AD_ASSUMED_PRESENT_INSTRUCTION)
+    return "\n\n".join(part for part in parts if part)
+
 
 def _provider_from_model(model_id: str) -> str:
     return model_id.split("/", 1)[0] if "/" in model_id else ""
@@ -449,6 +472,7 @@ def build_agent_configs(
     model_map: dict[str, str] | None = None,
     include_artifact: bool = False,
     user_instructions: str = "",
+    artifact_description_assumed_present: bool = False,
 ) -> dict[str, AgentConfig]:
     """Build AgentConfig instances from a conference profile and prompts.
 
@@ -475,8 +499,12 @@ def build_agent_configs(
         f"Merit scale: {profile.merit_labels()}\n"
         f"Expertise scale: {profile.expertise_labels()}"
     )
-    if user_instructions:
-        conference_context += f"\n\n## Review Chair Instructions\n\n{user_instructions}"
+    chair_instructions = build_review_chair_instructions(
+        user_instructions,
+        artifact_description_assumed_present=artifact_description_assumed_present,
+    )
+    if chair_instructions:
+        conference_context += f"\n\n## Review Chair Instructions\n\n{chair_instructions}"
 
     configs: dict[str, AgentConfig] = {}
 
@@ -757,6 +785,8 @@ def result_to_packet(
                     round_entries = []
                 round_entries.append(
                     {
+                        "round_id": f"round-{rnd}",
+                        "speaker_id": output.agent_id,
                         "agent_id": output.agent_id,
                         "role": output.agent_role,
                         "content": output.content,
@@ -884,5 +914,29 @@ def session_to_review_packet(session: Any) -> ReviewPacket:
     parse_provenance = session.app_data.get("parse") if session.app_data else None
     if parse_provenance:
         packet.provenance_metadata["parse"] = parse_provenance
+
+    metadata = session.config.get("metadata", {}) if session.config else {}
+    if metadata:
+        packet.provenance_metadata["session_metadata"] = {
+            key: metadata.get(key)
+            for key in (
+                "pipeline_mode",
+                "conference",
+                "filename",
+                "paper_title",
+                "graph_source",
+                "graph_import_format",
+                "source_session_id",
+                "source_graph_path",
+                "packet_paper_id",
+                "artifact_description_assumed_present",
+                "preset",
+            )
+            if metadata.get(key) not in (None, "")
+        }
+        if metadata.get("graph_source"):
+            packet.provenance_metadata["graph_source"] = metadata["graph_source"]
+        if metadata.get("source_session_id"):
+            packet.provenance_metadata["source_session_id"] = metadata["source_session_id"]
 
     return packet

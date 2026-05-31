@@ -38,7 +38,7 @@ from protoneo.llm.settings import build_vlm_config
 from .conference import ConferenceProfile, list_profiles, load_profile
 _APP_NAME = "paper_review"
 _APP_VERSION = "0.1.0"
-from .export import packet_to_markdown, packet_to_pdf
+from .export import packet_to_markdown, packet_to_pdf, write_review_artifacts
 from .pipeline import (
     _build_enriched_review_message,
     _run_graph_pipeline,
@@ -455,6 +455,7 @@ async def start_panel_review(
     user_instructions: str = Form(""),
     skip_graph: bool = Form(False),
     fast_parse: bool = Form(False),
+    artifact_description_assumed_present: bool = Form(False),
 ):
     """Create and start a full Paper Review session.
 
@@ -490,6 +491,7 @@ async def start_panel_review(
         conference_slug=conference,
         model_map=model_map if model_map else None,
         user_instructions=user_instructions,
+        artifact_description_assumed_present=artifact_description_assumed_present,
     )
 
     reviewer_ids = [k for k in agent_configs if k != "meta"]
@@ -507,6 +509,7 @@ async def start_panel_review(
                 "conference": conference,
                 "filename": file.filename,
                 "paper_title": "",
+                "artifact_description_assumed_present": artifact_description_assumed_present,
             },
         },
         app_name=_APP_NAME,
@@ -879,6 +882,7 @@ async def start_batch_review(
     max_rounds: int = Form(2),
     user_instructions: str = Form(""),
     fast_parse: bool = Form(False),
+    artifact_description_assumed_present: bool = Form(False),
 ):
     """Upload N PDFs, process each sequentially through the full pipeline.
 
@@ -904,6 +908,7 @@ async def start_batch_review(
         profile=profile, conference_slug=conference,
         model_map=model_map if model_map else None,
         user_instructions=user_instructions,
+        artifact_description_assumed_present=artifact_description_assumed_present,
     )
 
     upload_dir = _get_upload_dir()
@@ -932,6 +937,7 @@ async def start_batch_review(
                     "conference": conference,
                     "filename": file.filename,
                     "paper_title": "",
+                    "artifact_description_assumed_present": artifact_description_assumed_present,
                 },
             },
             app_name=_APP_NAME,
@@ -1280,6 +1286,7 @@ class LaunchReviewBody(BaseModel):
     conference: str = ""
     max_rounds: int = 0
     user_instructions: str = ""
+    artifact_description_assumed_present: bool = False
 
 @router.post("/sessions/{session_id}/launch-review")
 async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
@@ -1308,15 +1315,19 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
         raise HTTPException(status_code=404, detail=f"Conference profile '{conference_slug}' not found")
 
     # Rebuild agent configs with new model_map if provided
-    if body and body.model_map:
+    if body and (body.model_map or body.user_instructions or body.artifact_description_assumed_present):
         agent_configs = build_agent_configs(
             profile=profile, conference_slug=conference_slug,
-            model_map=body.model_map,
+            model_map=body.model_map if body.model_map else None,
+            user_instructions=body.user_instructions,
+            artifact_description_assumed_present=body.artifact_description_assumed_present,
         )
         # Persist the new config
         session.config["agents"] = {k: v.model_dump() for k, v in agent_configs.items()}
         if body.user_instructions:
             session.config["metadata"]["user_instructions"] = body.user_instructions
+        if body.artifact_description_assumed_present:
+            session.config["metadata"]["artifact_description_assumed_present"] = True
         await _session_manager.update(session)
     else:
         agent_configs_raw = session.config.get("agents", {})
@@ -1610,6 +1621,7 @@ async def review_with_graph(
     model_map_json: str = Form("{}"),
     max_rounds: int = Form(2),
     user_instructions: str = Form(""),
+    artifact_description_assumed_present: bool = Form(False),
 ):
     """Create a session with an imported graph and launch review immediately."""
     _session_manager = get_session_manager()
@@ -1646,6 +1658,7 @@ async def review_with_graph(
         profile=profile, conference_slug=conference,
         model_map=model_map if model_map else None,
         user_instructions=user_instructions,
+        artifact_description_assumed_present=artifact_description_assumed_present,
     )
     reviewer_ids = [k for k in agent_configs if k != "meta"]
     delib_config = build_deliberation_config(
@@ -1666,6 +1679,7 @@ async def review_with_graph(
                 "graph_import_format": imported.source_format,
                 "source_session_id": imported.source_session_id,
                 "graph_import_warnings": imported.warnings,
+                "artifact_description_assumed_present": artifact_description_assumed_present,
             },
         },
         app_name=_APP_NAME,
@@ -1756,6 +1770,379 @@ async def review_with_graph(
         "source_session_id": imported.source_session_id,
         "node_count": len(pg.nodes),
         "edge_count": len(pg.edges),
+    }
+
+
+# ── SC26 Packet Review ──────────────────────────────
+
+SC26_PACKET_IDS = (
+    "pap111s2",
+    "pap1162s2",
+    "pap282s2",
+    "pap440s2",
+    "pap535s2",
+    "pap616s2",
+    "pap651s2",
+)
+
+
+class SC26PacketReviewBody(BaseModel):
+    packet_root: str = "submission_packets_sc26"
+    paper_ids: list[str] = Field(default_factory=list)
+    conference: str = "sc26"
+    model_map: dict[str, str] = Field(default_factory=dict)
+    preset: str = ""
+    max_rounds: int = 2
+    force: bool = False
+    skip_completed: bool = True
+    artifact_description_assumed_present: bool = True
+    user_instructions: str = ""
+
+
+def _normalize_title_for_match(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _packet_review_template_path(packet_dir: Path) -> Path:
+    paper_id = packet_dir.name
+    direct = packet_dir / f"{paper_id}_review.txt"
+    if direct.exists():
+        return direct
+    matches = sorted(packet_dir.glob("*_review.txt"))
+    if not matches:
+        raise FileNotFoundError(f"No Linklings review template found in {packet_dir}")
+    return matches[0]
+
+
+def _packet_pdf_path(packet_dir: Path) -> Path:
+    paper_id = packet_dir.name
+    direct = packet_dir / f"{paper_id}.pdf"
+    if direct.exists():
+        return direct
+    matches = sorted(
+        p for p in packet_dir.glob("*.pdf")
+        if not p.name.endswith("_details.pdf")
+    )
+    return matches[0] if matches else Path()
+
+
+def _packet_title_from_template(template_path: Path) -> str:
+    text = template_path.read_text(errors="ignore")
+    match = re.search(r"<<\s*submission reviewed:\s*\([^)]+\)\s*(.*?)\s*>>", text)
+    return match.group(1).strip() if match else template_path.stem
+
+
+def _packet_manifest_complete(packet_dir: Path) -> bool:
+    out = packet_dir / "protoneo_outputs"
+    manifest = out / "run_manifest.json"
+    offline = out / f"{packet_dir.name}_protoneo_offline_review.txt"
+    if not manifest.exists() or not offline.exists():
+        return False
+    try:
+        data = json.loads(manifest.read_text())
+    except Exception:
+        return False
+    return bool(data.get("completed"))
+
+
+def _packet_dirs(packet_root: str | Path, paper_ids: list[str] | None = None) -> list[Path]:
+    root = Path(packet_root)
+    requested = paper_ids or list(SC26_PACKET_IDS)
+    return [root / pid for pid in requested if (root / pid).is_dir()]
+
+
+def _preset_model_map(preset: str) -> dict[str, str]:
+    if not preset:
+        return {}
+    try:
+        from protoneo.llm.settings import load_settings, resolve_preset
+
+        resolved = resolve_preset(preset, load_settings())
+        return dict(resolved.assignments) if resolved else {}
+    except Exception as e:
+        logger.warning("Could not resolve preset %s: %s", preset, e)
+        return {}
+
+
+def _load_graph_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text())
+
+
+def _graph_match_title(path: Path) -> tuple[str, ImportedGraphPayload | None]:
+    try:
+        payload = _parse_imported_graph_payload(
+            _load_graph_json(path),
+            filename=path.name,
+        )
+        return payload.paper_title, payload
+    except Exception as e:
+        logger.debug("Skipping non-matching graph %s: %s", path, e)
+        return "", None
+
+
+def _locate_saved_graph_for_packet(packet_dir: Path, title: str) -> Path | None:
+    out = packet_dir / "protoneo_outputs"
+    local_candidates = [
+        out / "imported_graph.json",
+        out / "graph.json",
+    ]
+    for candidate in local_candidates:
+        if candidate.exists():
+            return candidate
+
+    graph_dir = Path("data/sessions/graphs")
+    if not graph_dir.exists():
+        return None
+
+    target = _normalize_title_for_match(title)
+    target_words = set(target.split())
+    best: tuple[int, Path] | None = None
+    for graph_path in sorted(graph_dir.glob("*.json")):
+        graph_title, payload = _graph_match_title(graph_path)
+        if not payload:
+            continue
+        candidate = _normalize_title_for_match(graph_title)
+        if not candidate:
+            continue
+        score = 0
+        if candidate == target:
+            score = 1000
+        elif target and (target in candidate or candidate in target):
+            score = 750
+        else:
+            common = target_words & set(candidate.split())
+            score = len(common)
+        if score and (best is None or score > best[0]):
+            best = (score, graph_path)
+    return best[1] if best and best[0] >= 3 else None
+
+
+async def _run_one_sc26_packet_review(
+    packet_dir: Path,
+    *,
+    conference: str,
+    model_map: dict[str, str],
+    preset: str,
+    max_rounds: int,
+    user_instructions: str,
+    artifact_description_assumed_present: bool,
+) -> dict[str, Any]:
+    _session_manager = get_session_manager()
+    template_path = _packet_review_template_path(packet_dir)
+    paper_title = _packet_title_from_template(template_path)
+    graph_path = _locate_saved_graph_for_packet(packet_dir, paper_title)
+    if not graph_path:
+        return {
+            "paper_id": packet_dir.name,
+            "status": "missing_graph",
+            "message": f"No saved graph matched {paper_title!r}",
+        }
+
+    profile = load_profile(conference)
+    graph_data = _load_graph_json(graph_path)
+    imported = _parse_imported_graph_payload(graph_data, filename=graph_path.name)
+    imported = await _enrich_imported_graph_payload_from_source_session(imported, _session_manager)
+
+    resolved_model_map = {
+        **_preset_model_map(preset),
+        **(model_map or {}),
+    }
+    agent_configs = build_agent_configs(
+        profile=profile,
+        conference_slug=conference,
+        model_map=resolved_model_map if resolved_model_map else None,
+        user_instructions=user_instructions,
+        artifact_description_assumed_present=artifact_description_assumed_present,
+    )
+    reviewer_ids = [k for k in agent_configs if k != "meta"]
+    delib_config = build_deliberation_config(
+        reviewer_ids=reviewer_ids,
+        max_rounds=max_rounds,
+    )
+
+    pg = imported.graph
+    imported_markdown = imported.document_markdown or imported.document_text
+    paper_pdf = _packet_pdf_path(packet_dir)
+    session = await _session_manager.create(
+        config={
+            "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+            "deliberation": delib_config.model_dump(),
+            "metadata": {
+                "type": "panel_review",
+                "pipeline_mode": "imported_graph_review",
+                "conference": conference,
+                "filename": paper_pdf.name if paper_pdf else packet_dir.name,
+                "paper_title": imported.paper_title or paper_title,
+                "graph_source": "imported",
+                "graph_import_format": imported.source_format,
+                "source_session_id": imported.source_session_id,
+                "source_graph_path": str(graph_path),
+                "graph_import_warnings": imported.warnings,
+                "packet_paper_id": packet_dir.name,
+                "packet_dir": str(packet_dir),
+                "artifact_description_assumed_present": artifact_description_assumed_present,
+                "preset": preset,
+            },
+        },
+        app_name=_APP_NAME,
+        app_version=_APP_VERSION,
+    )
+    session.knowledge_graph = pg.model_dump(mode="json")
+    session.document_markdown = imported_markdown
+    session.document_text = imported.document_text or imported_markdown
+    session.graph_source = "imported"
+    await _session_manager.update(session)
+
+    if imported_markdown:
+        doc_proxy = _MinimalDoc(
+            imported_markdown,
+            imported_markdown,
+            paper_pdf.name if paper_pdf else packet_dir.name,
+        )
+        user_message = build_user_message(doc_proxy, profile)
+    else:
+        user_message = pg.summary
+    enriched_message = _build_enriched_review_message(user_message, pg)
+
+    bus = SessionEventBus()
+    ctl = PipelineControl()
+    await _run_review_stage(
+        session.session_id,
+        agent_configs,
+        delib_config,
+        enriched_message,
+        bus,
+        ctl,
+        pg,
+    )
+
+    completed = await _session_manager.get(session.session_id)
+    if completed:
+        completed.knowledge_graph = pg.model_dump(mode="json")
+        completed.current_stage = "review"
+        completed.status = SessionStatus.COMPLETED
+        await _session_manager.update(completed)
+    else:
+        raise RuntimeError(f"Session {session.session_id} disappeared during packet review")
+
+    packet = session_to_review_packet(completed)
+    output_dir = packet_dir / "protoneo_outputs"
+    prompt_pack_version = ""
+    try:
+        from .prompts import load_prompt_pack
+
+        prompt_pack_version = str(load_prompt_pack(conference).get("version", ""))
+    except Exception:
+        pass
+    manifest = write_review_artifacts(
+        packet,
+        output_dir,
+        source_graph=pg,
+        template_path=template_path,
+        paper_id=packet_dir.name,
+        paper_path=paper_pdf,
+        source_graph_path=graph_path,
+        source_session_id=imported.source_session_id,
+        model_map=resolved_model_map,
+        preset=preset,
+        prompt_pack_version=prompt_pack_version,
+        artifact_description_assumed_present=artifact_description_assumed_present,
+    )
+    return {
+        "paper_id": packet_dir.name,
+        "status": "completed",
+        "session_id": packet.session_id,
+        "output_dir": str(output_dir),
+        "manifest": manifest,
+    }
+
+
+async def run_sc26_packet_reviews(
+    *,
+    packet_root: str = "submission_packets_sc26",
+    paper_ids: list[str] | None = None,
+    conference: str = "sc26",
+    model_map: dict[str, str] | None = None,
+    preset: str = "",
+    max_rounds: int = 2,
+    force: bool = False,
+    skip_completed: bool = True,
+    artifact_description_assumed_present: bool = True,
+    user_instructions: str = "",
+) -> dict[str, Any]:
+    results = []
+    for packet_dir in _packet_dirs(packet_root, paper_ids):
+        if skip_completed and not force and _packet_manifest_complete(packet_dir):
+            results.append({
+                "paper_id": packet_dir.name,
+                "status": "skipped_completed",
+                "output_dir": str(packet_dir / "protoneo_outputs"),
+            })
+            continue
+        try:
+            results.append(await _run_one_sc26_packet_review(
+                packet_dir,
+                conference=conference,
+                model_map=model_map or {},
+                preset=preset,
+                max_rounds=max_rounds,
+                user_instructions=user_instructions,
+                artifact_description_assumed_present=artifact_description_assumed_present,
+            ))
+        except Exception as e:
+            logger.error("SC26 packet review failed for %s: %s", packet_dir, e, exc_info=True)
+            results.append({
+                "paper_id": packet_dir.name,
+                "status": "failed",
+                "error": str(e),
+            })
+    return {
+        "packet_root": str(packet_root),
+        "conference": conference,
+        "results": results,
+    }
+
+
+@router.post("/sc26/packet-review")
+async def start_sc26_packet_review(body: SC26PacketReviewBody):
+    """Run imported-graph review for SC26 packet folders.
+
+    The task runs in the background because each paper may take minutes. Use
+    the returned batch id to correlate logs; artifacts are written under each
+    packet folder.
+    """
+    batch_id = uuid.uuid4().hex
+    batch_bus = SessionEventBus()
+    get_event_buses()[f"sc26_packet_{batch_id}"] = batch_bus
+
+    async def _run() -> None:
+        batch_bus.emit("batch_progress", {
+            "batch_id": batch_id,
+            "status": "running",
+        })
+        result = await run_sc26_packet_reviews(
+            packet_root=body.packet_root,
+            paper_ids=body.paper_ids or None,
+            conference=body.conference,
+            model_map=body.model_map,
+            preset=body.preset,
+            max_rounds=body.max_rounds,
+            force=body.force,
+            skip_completed=body.skip_completed,
+            artifact_description_assumed_present=body.artifact_description_assumed_present,
+            user_instructions=body.user_instructions,
+        )
+        batch_bus.emit("batch_complete", {
+            "batch_id": batch_id,
+            **result,
+        })
+
+    asyncio.create_task(_run())
+    return {
+        "batch_id": batch_id,
+        "status": "running",
+        "packet_root": body.packet_root,
+        "paper_ids": body.paper_ids or list(SC26_PACKET_IDS),
     }
 
 

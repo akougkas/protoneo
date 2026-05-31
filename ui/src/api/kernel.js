@@ -23,13 +23,14 @@ export function getModels() {
   return kernel.get('/api/models')
 }
 
-export function startReview(file, conference, modelMap = {}, maxRounds = 3, userInstructions = '') {
+export function startReview(file, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
   const form = new FormData()
   form.append('file', file)
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
+  if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
   return kernel.post('/api/apps/paper_review/review', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
@@ -208,13 +209,14 @@ export function startBatch(files, conference, modelMap = {}) {
   })
 }
 
-export function startBatchReview(files, conference, modelMap = {}, maxRounds = 3, userInstructions = '') {
+export function startBatchReview(files, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
   const form = new FormData()
   files.forEach(f => form.append('files', f))
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
+  if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
   return kernel.post('/api/apps/paper_review/batch-review', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
@@ -266,13 +268,14 @@ export function exportGraph(sessionId) {
   })
 }
 
-export function reviewWithGraph(graphFile, conference, modelMap = {}, maxRounds = 3, userInstructions = '') {
+export function reviewWithGraph(graphFile, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
   const form = new FormData()
   form.append('graph_file', graphFile)
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
   if (userInstructions) form.append('user_instructions', userInstructions)
+  if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
   return kernel.post('/api/apps/paper_review/review-with-graph', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })

@@ -23,14 +23,14 @@ Before finalizing your review:
 2. Check whether a reviewer's score is consistent with their stated strengths and weaknesses. Flag inconsistencies.
 3. When reviewers disagree, check the graph analysis for claim-evidence links that resolve the dispute.
 4. Ensure that your strengths and weaknesses are grounded in specific sections, figures, or tables.
-5. Check whether the mandatory AD appendix is addressed.
+5. Check whether the mandatory AD appendix is addressed by explicit metadata. If `artifact_description_assumed_present` or `ad_assumed_present` is active, assume AD is present unless explicit metadata says otherwise. Do not infer AD absence from missing AD text.
 
 ## SC 2026 context
 
 - SC spans 10 areas from Algorithms to System Software & Cloud Computing. Ensure the review evaluates against the correct area's expectations.
 - State of the Practice papers are evaluated on practical insights and actionable lessons, not research novelty.
 - Small-scale studies are welcome if the HPC contribution is clear. Do not penalize single-node studies that contribute to algorithms or programming frameworks.
-- AD is mandatory. An incomplete or missing AD is a significant concern.
+- AD is mandatory. An incomplete or missing AD is a significant concern when explicit metadata says AD is absent or no local AD-presence assumption is active. Under the local assumption, evaluate reproducibility from manuscript-visible methods, results, software/hardware details, and the stated AD-presence assumption.
 - The paper checklist is mandatory. Note whether the paper addresses its checklist commitments.
 - Double-anonymous review. Do not speculate about author identity.
 - IEEE format, 10 pages excluding bibliography.
@@ -46,9 +46,22 @@ Return a JSON object with these exact fields:
   "paper_summary": "",
   "strengths": [{"point": "", "evidence": "", "importance": "high"}],
   "weaknesses": [{"point": "", "evidence": "", "severity": "high", "fixability": "medium"}],
+  "comments_for_rebuttal": "",
+  "detailed_comments_for_authors": "",
   "comments_for_authors": "",
+  "comments_for_pc": "",
   "internal_committee_concerns": [""],
   "questions_for_authors": [""],
+  "relevance": {"score": 4, "label": "HIGH", "rationale": ""},
+  "technical_soundness": {"score": 3, "label": "MODERATE", "rationale": ""},
+  "technical_importance": {"score": 3, "label": "MODERATE", "rationale": ""},
+  "originality": {"score": 3, "label": "MODERATE", "rationale": ""},
+  "quality_of_presentation": {"score": 3, "label": "MODERATE", "rationale": ""},
+  "recommended_action": {"score": 3, "label": "WEAK REJECT", "rationale": ""},
+  "level_of_confidence": {"score": 4, "label": "HIGH", "reason": ""},
+  "level_of_expertise": {"score": 4, "label": "HIGH", "reason": ""},
+  "best_paper_consideration": {"nominate": false, "rationale": ""},
+  "reproducibility_committee_focus": "",
   "revision_actions": [{"priority": "must", "action": "", "target_section": "", "why_it_matters": ""}],
   "submission_readiness": {"status": "revise_before_submit", "reason": ""}
 }
@@ -60,5 +73,6 @@ Return a JSON object with these exact fields:
 - Ground every claim in specific sections, figures, tables, or page numbers.
 - Be direct and specific. No generic praise or vague criticism.
 - Prefer 3-5 substantial strengths and weaknesses over long lists.
+- Best Paper consideration must be based on paper quality. If AD is assumed present, do not answer no because AD text was not passed to ProtoNeo.
 - The `revision_actions` field is especially important. Prioritize concrete, fixable actions. Separate what can be addressed in a rebuttal from what requires new experiments.
 - Output ONLY the JSON object, no surrounding text.

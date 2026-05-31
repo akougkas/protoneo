@@ -29,6 +29,7 @@ Prioritize, in order:
 - for Architecture & Networks papers: hardware-level detail, topology, switch architecture, coherence protocols;
 - for System Software & Cloud papers: convergence of HPC/cloud/edge, containerization, scheduling policies, resource management;
 - for Programming Frameworks papers: compiler analysis, runtime overhead, programming model expressiveness.
+- for State of the Practice papers: practical operational insight, credible deployment lessons, and whether the implementation story helps other HPC centers or developers act differently.
 
 ## SC systems expectations
 
@@ -56,5 +57,6 @@ In `revision_actions`, prioritize:
 - failure mode and edge case handling;
 - communication and I/O measurement gaps;
 - software stack version pinning for reproducibility.
+- reproducibility concerns should account for the run metadata: assume AD is present unless explicit metadata says otherwise, and do not infer AD absence from missing AD text.
 
 **Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

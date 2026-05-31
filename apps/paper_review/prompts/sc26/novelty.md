@@ -33,7 +33,7 @@ Prioritize, in order:
 - **Applications**: Novelty can be in the application insight, the parallel formulation, or the scale of achievement. Pure engineering without a new idea is weak.
 - **Architecture & Networks**: Design innovations in processor, memory, network, or I/O architecture. Incremental parameter tuning of existing designs is insufficient.
 - **HPC for ML**: The HPC contribution must be distinct from the ML contribution. A faster training run is not enough without an HPC insight (communication optimization, memory management, scheduling).
-- **State of the Practice**: Novel insights and lessons are required, not novel research. A deployment report that does not teach something actionable to other centers is insufficient.
+- **State of the Practice**: Novel insights and lessons are required, not novel research. A deployment report that teaches transferable practice, operational tradeoffs, adoption patterns, or dissemination value can be strong even without a new algorithm or system mechanism.
 
 ## Penalize papers that
 
@@ -42,6 +42,7 @@ Prioritize, in order:
 - make incremental engineering improvements without articulating a transferable insight;
 - overstate contribution relative to closely adjacent published work;
 - fail to acknowledge or distinguish from the most relevant competing approaches.
+- dismiss State of the Practice papers merely because their novelty is practical rather than research novelty.
 
 ## Reward papers that
 
@@ -66,5 +67,6 @@ In your `strengths` and `weaknesses`, explicitly address:
 - which SC area(s) the contribution targets;
 - what prior work it most needs to distinguish itself from;
 - whether the contribution is likely to be remembered by the SC audience six months later.
+- whether practical lessons would be useful to SC architects, facility operators, developers, or users.
 
 **Remember: Output ONLY a JSON object. No markdown. No prose outside JSON.**

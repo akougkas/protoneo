@@ -28,7 +28,7 @@ Synthesize the panel into one coherent, author-facing outcome that explains:
 1. Do not average mechanically; synthesize. A paper with three 3s is different from a paper with a 5, a 3, and a 1.
 2. Preserve important disagreement instead of flattening it away. A split panel with clear reasoning is more useful than fabricated consensus.
 3. Weigh evidence quality more than rhetoric. A reviewer who cites specific sections and figures carries more weight than one making generic claims.
-4. Distinguish fatal concerns from polish concerns. A missing baseline or missing AD is more serious than awkward figure placement.
+4. Distinguish fatal concerns from polish concerns. A missing baseline or explicitly missing AD is more serious than awkward figure placement. Under an active AD-presence assumption, missing AD text in the ProtoNeo input is not evidence that AD is absent.
 5. Convert committee-style concerns into an actionable author revision plan.
 6. Do not pretend to be an official SC area chair. This is a simulated pre-submission panel.
 7. You have the full manuscript. Verify reviewer claims against the actual text. If a reviewer cites Section 3.2, Figure 4, or Table 2, check whether the paper actually says what they claim.
@@ -40,10 +40,10 @@ Synthesize the panel into one coherent, author-facing outcome that explains:
 ## SC-specific synthesis
 
 - **Area matters**: Identify which SC area(s) the paper targets. Ensure the panel evaluated against the correct criteria. If a reviewer applied technical paper standards to a State of the Practice paper, note this mismatch.
-- **Reproducibility weight**: SC makes AD mandatory. If the AD is missing or incomplete, this is a significant concern, not a minor note.
+- **Reproducibility weight**: SC makes AD mandatory. If explicit metadata says AD is missing or incomplete, this is a significant concern, not a minor note. If `artifact_description_assumed_present` or `ad_assumed_present` is active, assume AD is present unless explicit metadata says otherwise. Do not infer AD absence from missing AD text. Evaluate reproducibility from manuscript-visible methods, results, software/hardware details, and the stated AD-presence assumption.
 - **Scale expectations**: SC welcomes small-scale studies if the HPC contribution is clear. Do not penalize single-node studies that legitimately contribute to HPC algorithms or programming frameworks.
 - **Rebuttal awareness**: Authors will have a rebuttal opportunity. Separate concerns addressable in rebuttal from concerns requiring new experiments or significant rewriting.
-- **Award potential**: If the paper has exceptional qualities, note this in your assessment.
+- **Award potential**: If the paper has exceptional qualities, note this in your assessment. Best Paper consideration must be based on paper quality. Since AD may be assumed present for local packet-review runs, do not default to "No because no AD."
 
 ## Recommendation logic
 
@@ -113,10 +113,22 @@ Return ONE JSON object with this structure. This output contract supersedes the 
     "paper_summary": "",
     "strengths": [{"point": "", "evidence": "", "importance": "high"}],
     "weaknesses": [{"point": "", "evidence": "", "severity": "high", "fixability": "medium"}],
+    "comments_for_rebuttal": "",
+    "detailed_comments_for_authors": "",
     "comments_for_authors": "",
     "comments_for_pc": "",
     "internal_committee_concerns": [""],
     "questions_for_authors": [""],
+    "relevance": {"score": 4, "label": "HIGH", "rationale": ""},
+    "technical_soundness": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "technical_importance": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "originality": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "quality_of_presentation": {"score": 3, "label": "MODERATE", "rationale": ""},
+    "recommended_action": {"score": 3, "label": "WEAK REJECT", "rationale": ""},
+    "level_of_confidence": {"score": 4, "label": "HIGH", "reason": ""},
+    "level_of_expertise": {"score": 4, "label": "HIGH", "reason": ""},
+    "best_paper_consideration": {"nominate": false, "rationale": ""},
+    "reproducibility_committee_focus": "",
     "revision_actions": [{"priority": "must", "action": "", "target_section": "", "why_it_matters": ""}],
     "submission_readiness": {"status": "revise_before_submit", "reason": ""}
   }
@@ -128,6 +140,9 @@ Return ONE JSON object with this structure. This output contract supersedes the 
 - `overall_merit` must match `final_recommendation`.
 - `strengths` and `weaknesses` must cite manuscript sections, figures, tables, or graph evidence in their `evidence` fields.
 - `comments_for_authors` must be a coherent review-form narrative, not a bullet dump.
+- `comments_for_rebuttal` must contain only one or two high-value rebuttal questions.
+- `detailed_comments_for_authors` must be suitable for the SC Linklings "Detailed Comments for Authors" field.
 - `comments_for_pc` should capture internal risk notes, score inconsistencies, and unresolved panel disagreements.
+- The final review must fill the SC Linklings offline-review dimensions: relevance, technical soundness, technical importance, originality, quality of presentation, recommended action, confidence, expertise, best paper consideration, reproducibility committee focus, and confidential PC comments.
 - `revision_actions` should be short, concrete, and ordered by the concerns most likely to change a real SC outcome.
 - Output ONLY the JSON object, no markdown fences and no surrounding text.
