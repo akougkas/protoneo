@@ -358,8 +358,15 @@ async def _run_review_stage(
     _engine = get_engine()
     _session_manager = get_session_manager()
     _agent_buffers: dict[str, str] = {}
+    prompt_snapshots: dict[str, str] = {}
 
     def on_event(evt_type: str, data: dict) -> None:
+        if evt_type == "prompt_rendered":
+            phase = data.get("phase", "")
+            text = data.get("text", "")
+            if phase and text:
+                prompt_snapshots.setdefault(phase, str(text)[:20000])
+
         if evt_type == "phase_start":
             phase = data.get("phase", "")
             if phase == "deliberation" and ctl.current_step != "deliberation":
@@ -429,6 +436,14 @@ async def _run_review_stage(
             "enabled": web_metadata.get("enabled", False),
         })
 
+    session = await _session_manager.get(sid)
+    if session:
+        if not hasattr(session, "app_data") or session.app_data is None:
+            session.app_data = {}
+        rendered = session.app_data.setdefault("rendered_prompts", {})
+        rendered["independent_review"] = enriched_message[:20000]
+        await _session_manager.update(session)
+
     result = await _engine.run(
         session_id=sid,
         agent_configs=agent_configs,
@@ -443,6 +458,11 @@ async def _run_review_stage(
     # Store result and write per-phase review checkpoints
     session = await _session_manager.get(sid)
     if session:
+        if not hasattr(session, "app_data") or session.app_data is None:
+            session.app_data = {}
+        rendered = session.app_data.setdefault("rendered_prompts", {})
+        for phase, text in prompt_snapshots.items():
+            rendered.setdefault(phase, text)
         session.result = result.model_dump(mode="json")
         session.status = SessionStatus.RUNNING
         for phase in result.phases:

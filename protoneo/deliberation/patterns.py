@@ -128,6 +128,11 @@ class ParallelPattern:
         result = PhaseResult(phase_name="parallel", mode="parallel")
 
         failed_agents: list[dict] = []
+        if on_event:
+            on_event("prompt_rendered", {
+                "phase": "independent_review",
+                "text": user_message.content,
+            })
 
         async def run_agent(agent: BaseAgent) -> tuple[Message, AgentOutput]:
             agent_start = time.monotonic()
@@ -481,6 +486,12 @@ class RoundRobinPattern:
                 msg = Message(role="user", content=prompt)
 
                 if on_event:
+                    on_event("prompt_rendered", {
+                        "phase": "deliberation",
+                        "text": prompt,
+                        "agent_id": agent.agent_id,
+                        "round": round_num + 1,
+                    })
                     on_event("agent_start", {
                         "agent_id": agent.agent_id,
                         "role": agent.role,
@@ -835,6 +846,12 @@ class IndependentSynthesisPattern:
                 + context_block
             ),
         )
+
+        if on_event:
+            on_event("prompt_rendered", {
+                "phase": "meta_review",
+                "text": synthesis_prompt.content,
+            })
 
         phase3 = await self._sequential.execute(
             [synthesizer], context, synthesis_prompt, rules, on_event, stream=stream
