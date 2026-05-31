@@ -33,3 +33,12 @@ def test_quality_reports_grounding_mode():
     quality = review_graph_quality(_graph_with_visual(2, 3))
     assert quality["visual_evidence_count"] == 3
     assert quality["described_artifact_count"] == 2
+
+
+def test_graph_payload_carries_grounding_and_edges_not_links():
+    graph = _graph_with_visual(2, 3)
+    d3 = graph.to_d3_format()
+    d3["stats"] = graph.graph_stats()
+    assert "edges" in d3 and "links" not in d3
+    assert d3["stats"]["visual_evidence_count"] == 3
+    assert d3["stats"]["described_artifact_count"] == 2

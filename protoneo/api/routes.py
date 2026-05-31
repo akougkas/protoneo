@@ -1044,12 +1044,26 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                 pg = KnowledgeGraph.model_validate(session.knowledge_graph)
                 d3 = pg.to_d3_format()
                 d3["stats"] = pg.graph_stats()
+                d3["grounding"] = pg.grounding_summary()
                 return d3
             except Exception:
                 pass
 
         if session_id in _session_graphs:
-            return _session_graphs[session_id]
+            cached = dict(_session_graphs[session_id])
+            if "grounding" not in cached:
+                try:
+                    pg = KnowledgeGraph()
+                    pg.ingest_d3_data(cached)
+                    cached["grounding"] = pg.grounding_summary()
+                except Exception:
+                    cached["grounding"] = {
+                        "grounding_mode": "none",
+                        "visual_evidence_count": 0,
+                        "described_artifact_count": 0,
+                        "undescribed_artifact_count": 0,
+                    }
+            return cached
 
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -1063,7 +1077,9 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         metadata = extract_metadata(doc.text)
         pg = KnowledgeGraph()
         pg.ingest_metadata(metadata)
-        return pg.to_d3_format()
+        d3 = pg.to_d3_format()
+        d3["grounding"] = pg.grounding_summary()
+        return d3
 
     @app.get("/api/sessions/{session_id}/graph/step/{step_name}")
     async def get_graph_at_step(session_id: str, step_name: str):
@@ -1078,7 +1094,11 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         try:
             pg = KnowledgeGraph.restore_from_snapshot(snapshot)
-            return {**pg.to_d3_format(), "stats": pg.graph_stats()}
+            return {
+                **pg.to_d3_format(),
+                "stats": pg.graph_stats(),
+                "grounding": pg.grounding_summary(),
+            }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to restore graph: {e}")
 
@@ -1257,6 +1277,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             return {
                 "summary": pg.to_agent_briefing(),
                 "stats": pg.graph_stats(),
+                "grounding": pg.grounding_summary(),
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to generate summary: {e}")

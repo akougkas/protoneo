@@ -478,6 +478,25 @@ class KnowledgeGraph(BaseModel):
 
         self.update_stats()
 
+    def grounding_summary(self) -> dict[str, Any]:
+        """Summarize figure/table visual grounding without app-layer imports."""
+        visual = [n for n in self.nodes if n.node_type in ("Figure", "Table")]
+        described = [n for n in visual if n.attributes.get("description")]
+        if not visual:
+            mode = "none"
+        elif not described:
+            mode = "text_only"
+        elif len(described) == len(visual):
+            mode = "vision_grounded"
+        else:
+            mode = "mixed"
+        return {
+            "grounding_mode": mode,
+            "visual_evidence_count": len(visual),
+            "described_artifact_count": len(described),
+            "undescribed_artifact_count": len(visual) - len(described),
+        }
+
     # ── Export methods ───────────────────────────────────────
 
     def to_d3_format(self) -> dict[str, Any]:
