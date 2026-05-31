@@ -180,7 +180,7 @@ async def verify_graph(
 
     All passes use the full graph and full document text (no truncation).
     """
-    _STRUCTURAL = {"Paper", "Section", "Diagram", "Table"}
+    _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table"}
 
     semantic_nodes = [n for n in knowledge_graph.nodes if n.node_type not in _STRUCTURAL]
     if not semantic_nodes:

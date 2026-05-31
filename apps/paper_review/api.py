@@ -2047,12 +2047,18 @@ def _graph_match_title(path: Path) -> tuple[str, ImportedGraphPayload | None]:
 
 def _locate_saved_graph_for_packet(packet_dir: Path, title: str) -> Path | None:
     out = packet_dir / "protoneo_outputs"
+    paper_id = packet_dir.name
     local_candidates = [
+        packet_dir / f"{paper_id}.graph.json",
         out / "imported_graph.json",
         out / "graph.json",
     ]
     for candidate in local_candidates:
         if candidate.exists():
+            return candidate
+
+    for candidate in sorted(packet_dir.glob("*.graph.json")):
+        if candidate.is_file():
             return candidate
 
     graph_dir = Path("data/sessions/graphs")

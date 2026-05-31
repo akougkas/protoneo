@@ -1918,6 +1918,22 @@ class TestGraphExtraction:
         assert len(result.entities) == 0
         assert len(result.relationships) == 0
 
+    def test_parse_preserves_valid_records_when_relationship_is_malformed(self):
+        from protoneo.knowledge.graph_extractor import _parse_extraction
+        raw = json.dumps({
+            "entities": [
+                {"name": "Method A", "type": "Method", "description": ""},
+                {"name": "Dataset B", "type": "Dataset", "description": ""},
+            ],
+            "relationships": [
+                {"source": "Method A", "target": "Dataset B", "type": "EVALUATES_ON"},
+                {"source": "Method A", "type": "BROKEN"},
+            ],
+        })
+        result = _parse_extraction(raw)
+        assert len(result.entities) == 2
+        assert len(result.relationships) == 1
+
     def test_extracted_to_graph_data(self):
         from protoneo.knowledge.graph_extractor import ExtractedGraph, GraphEntity, GraphRelationship, extracted_to_graph_data
         extracted = ExtractedGraph(

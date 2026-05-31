@@ -199,9 +199,9 @@ class KnowledgeGraph(BaseModel):
 
         Returns entities with full descriptions and their key relationships so
         later sections understand the scientific meaning of earlier extractions.
-        Skips structural nodes (Paper, Section, Diagram, Table).
+        Skips structural nodes (Paper, Section, Diagram, Figure, Table).
         """
-        _STRUCTURAL = {"Paper", "Section", "Diagram", "Table"}
+        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table"}
         node_map = {n.id: n for n in self.nodes}
 
         entity_lines = []
@@ -376,27 +376,49 @@ class KnowledgeGraph(BaseModel):
                     or artifact.get("description")
                     or f"{kind} {artifact.get('index', '?')}"
                 )
+                attributes = {
+                    "kind": artifact.get("kind", kind.lower()),
+                    "page": artifact.get("page", 0),
+                    "bbox": artifact.get("bbox", {}),
+                    "image_path": artifact.get("image_path", ""),
+                    "caption": artifact.get("caption", ""),
+                    "description": artifact.get("description", ""),
+                    "description_source": artifact.get("description_source", "none"),
+                    "numeric_claims": artifact.get("numeric_claims", []),
+                    "model": artifact.get("model", ""),
+                    "endpoint": artifact.get("endpoint", ""),
+                    "grounding": artifact.get("grounding", "extracted_no_vlm"),
+                    "provenance": artifact.get("provenance", {}),
+                    "error": artifact.get("error", ""),
+                }
                 node = self.add_node(
                     label=f"{kind} {artifact.get('index', '?')}: {str(label_source)[:80]}",
                     node_type=kind,
                     description=artifact.get("description", ""),
                     source_section=artifact.get("source_section", ""),
-                    source_text=artifact.get("caption", ""),
+                    source_text=(
+                        artifact.get("source_text")
+                        or artifact.get("caption")
+                        or f"Extracted {kind.lower()} evidence from page {artifact.get('page', 0)}"
+                    ),
                     confidence=float(artifact.get("confidence", 0.0)) if described else 0.0,
-                    attributes={
-                        "kind": artifact.get("kind", kind.lower()),
-                        "page": artifact.get("page", 0),
-                        "bbox": artifact.get("bbox", {}),
-                        "image_path": artifact.get("image_path", ""),
-                        "caption": artifact.get("caption", ""),
-                        "description": artifact.get("description", ""),
-                        "description_source": artifact.get("description_source", "none"),
-                        "numeric_claims": artifact.get("numeric_claims", []),
-                        "model": artifact.get("model", ""),
-                        "endpoint": artifact.get("endpoint", ""),
-                        "grounding": artifact.get("grounding", "extracted_no_vlm"),
-                    },
+                    attributes=attributes,
                 )
+                if not node.source_text:
+                    node.source_text = (
+                        artifact.get("source_text")
+                        or artifact.get("caption")
+                        or f"Extracted {kind.lower()} evidence from page {artifact.get('page', 0)}"
+                    )
+                if described and not node.description:
+                    node.description = artifact.get("description", "")
+                if described:
+                    node.confidence = max(node.confidence, float(artifact.get("confidence", 0.0)))
+                for key, value in attributes.items():
+                    if value not in (None, "", [], {}):
+                        node.attributes[key] = value
+                    elif key not in node.attributes:
+                        node.attributes[key] = value
                 if root is not None and root.id != node.id:
                     self.add_edge(root.id, node.id, "HAS_ARTIFACT")
                 added += 1
@@ -750,7 +772,7 @@ class KnowledgeGraph(BaseModel):
         Returns dict with per_entity, per_reviewer, unreferenced_entities,
         utilization_ratio, and by_type breakdowns.
         """
-        _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
         semantic = [n for n in self.nodes if n.node_type not in _STRUCTURAL and len(n.label) > 3]
 
         if not semantic:
@@ -862,7 +884,7 @@ class KnowledgeGraph(BaseModel):
         Orphaned entities add noise without helping agents. Structural
         nodes (Paper, Section, etc.) are never pruned.
         """
-        _KEEP = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+        _KEEP = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
         connected = set()
         for e in self.edges:
             connected.add(e.source_id)
@@ -886,7 +908,7 @@ class KnowledgeGraph(BaseModel):
         removes nodes flagged as potentially hallucinated by the verification
         pass. Structural nodes are never pruned.
         """
-        _KEEP = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+        _KEEP = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
         kept: list[GraphNode] = []
         removed_ids: set[str] = set()
         for n in self.nodes:
@@ -914,7 +936,7 @@ class KnowledgeGraph(BaseModel):
 
         Returns the number of APPEARS_IN edges created.
         """
-        _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
 
         # Build section label to node ID map
         section_map: dict[str, str] = {}

@@ -166,6 +166,47 @@ Text chunk:
 
 # ── Parsing and validation helpers ─────────────────────────
 
+def _coerce_extracted_graph(data: dict[str, Any]) -> ExtractedGraph:
+    """Build an ExtractedGraph while dropping only malformed records."""
+    entities: list[GraphEntity] = []
+    for item in data.get("entities") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("label") or "").strip()
+        if not name:
+            continue
+        entities.append(GraphEntity(
+            name=name,
+            type=str(item.get("type") or "Concept"),
+            description=str(item.get("description") or ""),
+        ))
+
+    relationships: list[GraphRelationship] = []
+    skipped_relationships = 0
+    for item in data.get("relationships") or []:
+        if not isinstance(item, dict):
+            skipped_relationships += 1
+            continue
+        source = str(item.get("source") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if not source or not target:
+            skipped_relationships += 1
+            continue
+        relationships.append(GraphRelationship(
+            source=source,
+            target=target,
+            type=str(item.get("type") or item.get("edge_type") or "RELATED_TO"),
+            description=str(item.get("description") or ""),
+        ))
+
+    if skipped_relationships:
+        logger.warning(
+            "Skipped %d malformed extracted relationships while preserving valid graph records",
+            skipped_relationships,
+        )
+    return ExtractedGraph(entities=entities, relationships=relationships)
+
+
 def _parse_extraction(raw: str) -> ExtractedGraph:
     """Parse LLM output into an ExtractedGraph, handling various formats."""
     if not raw or not raw.strip():
@@ -177,7 +218,7 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
         allow_thinking_json=True,
     )
     if parsed is not None:
-        return ExtractedGraph(**parsed)
+        return _coerce_extracted_graph(parsed)
 
     raw = sanitize_structured_text(raw)
 
@@ -185,7 +226,7 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
-            return ExtractedGraph(**data)
+            return _coerce_extracted_graph(data)
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
@@ -194,7 +235,7 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
         try:
             data = json.loads(fence_match.group(1))
             if isinstance(data, dict):
-                return ExtractedGraph(**data)
+                return _coerce_extracted_graph(data)
         except (json.JSONDecodeError, TypeError, ValueError):
             continue
 
@@ -228,7 +269,7 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
             break
 
     if best_data:
-        return ExtractedGraph(**best_data)
+        return _coerce_extracted_graph(best_data)
 
     # Last resort: salvage truncated JSON
     salvaged = _salvage_truncated_json(raw)
@@ -713,7 +754,7 @@ async def extract_graph(
                     sec_node = n
                     break
             if sec_node:
-                _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+                _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
                 for nid in new_node_ids:
                     node = knowledge_graph.node_by_id(nid)
                     if node and node.node_type not in _STRUCTURAL:

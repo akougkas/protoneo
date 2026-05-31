@@ -184,7 +184,7 @@ async def resolve_coreferences(
 
     Returns stats dict with merge/alias counts.
     """
-    _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
+    _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
     entities = [
         n for n in knowledge_graph.nodes if n.node_type not in _STRUCTURAL
     ]

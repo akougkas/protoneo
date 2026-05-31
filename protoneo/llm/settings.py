@@ -568,6 +568,17 @@ def vlm_status(settings: ProtoNeoSettings | None = None) -> dict[str, Any]:
 
 _BUILTIN_PRESETS: list[ModelPreset] = [
     ModelPreset(
+        name="mini-nemotron-omni-graph",
+        description="Mini-only Nemotron Omni for graph building and visual evidence extraction",
+        assignments={
+            "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "coref": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "verification": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "artifact": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+        },
+    ),
+    ModelPreset(
         name="dynamo-heavy",
         description="Dynamo runs fast structured graph pipeline, cloud runs reviews",
         assignments={

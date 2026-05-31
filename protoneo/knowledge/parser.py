@@ -138,12 +138,14 @@ def _build_artifact_records(
     figures: list[dict[str, Any]] = []
     for idx, (image_path, page, bbox, caption, element) in enumerate(picture_items, 1):
         description = _collect_picture_annotation(element) if vlm_config else ""
+        source_text = caption or f"Extracted figure image from page {page}"
         figures.append({
             "index": idx,
             "kind": "figure",
             "page": page,
             "bbox": bbox,
             "caption": caption,
+            "source_text": source_text,
             "image_path": image_path,
             "description": description,
             "description_source": "vlm" if description else "none",
@@ -152,6 +154,12 @@ def _build_artifact_records(
             "model": (vlm_config or {}).get("model", ""),
             "endpoint": (vlm_config or {}).get("url", ""),
             "grounding": "visual" if description else "extracted_no_vlm",
+            "provenance": {
+                "parser": "docling",
+                "page": page,
+                "bbox": bbox,
+                "image_path": image_path,
+            },
         })
 
     tables: list[dict[str, Any]] = []
@@ -172,9 +180,96 @@ def _build_artifact_records(
                 "grounding": "extracted_no_vlm",
                 "error": "",
             }
-        record.update({"index": idx, "page": page, "bbox": bbox})
+        source_text = caption or f"Extracted table evidence from page {page}"
+        record.update({
+            "index": idx,
+            "page": page,
+            "bbox": bbox,
+            "source_text": source_text,
+            "provenance": {
+                "parser": "docling",
+                "page": page,
+                "bbox": bbox,
+                "image_path": image_path,
+            },
+        })
         tables.append(record)
     return figures, tables
+
+
+_TABLE_CAPTION_RE = re.compile(
+    r"^\s*(?:TABLE|Table|Tab\.?)\s+([IVXLCDM]+|\d+)\b[:.\s-]*(.*)$"
+)
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+def extract_markdown_table_records(
+    markdown: str,
+    *,
+    start_index: int = 1,
+    existing: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract markdown table blocks as first-class text table evidence."""
+    seen = {
+        (item.get("source_text") or item.get("caption") or "").strip()
+        for item in existing or []
+        if isinstance(item, dict)
+    }
+    records: list[dict[str, Any]] = []
+    lines = markdown.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.lstrip().startswith("|"):
+            i += 1
+            continue
+
+        block_start = i
+        block: list[str] = []
+        while i < len(lines) and lines[i].lstrip().startswith("|"):
+            block.append(lines[i].rstrip())
+            i += 1
+        if len(block) < 2 or not any(_TABLE_SEPARATOR_RE.match(row) for row in block[:3]):
+            continue
+
+        caption = ""
+        for j in range(block_start - 1, max(-1, block_start - 8), -1):
+            prev = lines[j].strip()
+            if not prev:
+                continue
+            if _TABLE_CAPTION_RE.search(prev) or " table " in f" {prev.lower()} ":
+                caption = prev
+                break
+            if prev.startswith("|"):
+                break
+
+        source_text = (caption + "\n" if caption else "") + "\n".join(block)
+        if source_text.strip() in seen:
+            continue
+        seen.add(source_text.strip())
+        index = start_index + len(records)
+        records.append({
+            "index": index,
+            "kind": "table",
+            "page": 0,
+            "bbox": {},
+            "caption": caption or f"Markdown table {index}",
+            "source_text": source_text,
+            "image_path": "",
+            "description": "",
+            "description_source": "markdown",
+            "numeric_claims": extract_numeric_claims(source_text),
+            "confidence": 0.0,
+            "model": "",
+            "endpoint": "",
+            "grounding": "text_table",
+            "provenance": {
+                "parser": "docling_markdown",
+                "source": "markdown_table",
+                "row_count": len(block),
+            },
+        })
+    return records
 
 
 def _read_text_with_fallback(file_path: str) -> str:
@@ -395,6 +490,14 @@ def parse_file(
         markdown = _strip_line_number_pollution(markdown)
         text = _clean_markdown(text)
         markdown = _clean_markdown(markdown)
+        markdown_tables = extract_markdown_table_records(
+            markdown,
+            start_index=len(tables) + 1,
+            existing=tables,
+        )
+        if markdown_tables:
+            tables = [*tables, *markdown_tables]
+            table_count = max(table_count, len(tables))
         return Document(
             document_id=uuid.uuid4().hex,
             filename=path.name,
@@ -417,6 +520,10 @@ def parse_file(
             filename=path.name,
             text=content,
             markdown=content,
+            metadata={
+                "tables": extract_markdown_table_records(content),
+                "parser": "markdown",
+            },
         )
 
     # Plain text
