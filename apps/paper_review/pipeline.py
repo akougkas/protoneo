@@ -35,6 +35,7 @@ from .review import (
     strip_json_fences,
 )
 from .schemas import sanitize_final_review
+from .web_context import build_review_web_context, review_web_search_enabled
 
 logger = logging.getLogger("protoneo.paper_review.pipeline")
 
@@ -253,6 +254,32 @@ async def _run_review_stage(
             })
 
         bus.emit(evt_type, data)
+
+    if review_web_search_enabled():
+        bus.emit("web_search_started", {
+            "stage": "review",
+            "message": "Gathering external web search context...",
+        })
+        session = await _session_manager.get(sid)
+        metadata = (session.config.get("metadata", {}) if session else {}) or {}
+        fallback_title = str(metadata.get("paper_title") or metadata.get("filename") or "")
+        web_context, web_metadata = await build_review_web_context(
+            paper_graph,
+            fallback_title=fallback_title,
+        )
+        if web_context:
+            enriched_message = f"{enriched_message}\n\n{web_context}"
+        web_metadata["markdown"] = web_context
+        if session:
+            session.app_data["web_search"] = web_metadata
+            await _session_manager.update(session)
+        bus.emit("web_search_completed", {
+            "stage": "review",
+            "backend": web_metadata.get("backend", ""),
+            "queries": web_metadata.get("queries", []),
+            "result_count": web_metadata.get("result_count", 0),
+            "enabled": web_metadata.get("enabled", False),
+        })
 
     result = await _engine.run(
         session_id=sid,

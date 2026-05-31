@@ -429,6 +429,11 @@ def write_review_artifacts(
 
     _write_json(graph_name, graph_payload)
     _write_text("graph_summary.md", packet.graph_summary or "")
+    web_search_context = packet.provenance_metadata.get("web_search")
+    if isinstance(web_search_context, dict):
+        _write_json("web_search_context.json", web_search_context)
+        if web_search_context.get("markdown"):
+            _write_text("web_search_context.md", str(web_search_context["markdown"]))
     _write_json("independent_reviews.json", [r.model_dump(mode="json") for r in packet.reviews])
     _write_text("independent_reviews.md", _reviews_to_markdown(packet))
     _write_json("deliberation_transcript.json", [r.model_dump(mode="json") for r in packet.deliberation])

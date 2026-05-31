@@ -3,7 +3,7 @@
 Provides configurable web search via multiple backends:
 - Brave Search API (requires BRAVE_API_KEY)
 - SearXNG self-hosted instance (requires SEARXNG_URL)
-- DuckDuckGo (no API key, fallback)
+- DuckDuckGo (opt-in fallback with PROTONEO_ENABLE_DUCKDUCKGO_SEARCH=1)
 
 Reviewers use web search to check research trends, verify claims,
 and find context beyond the paper's reference list.
@@ -11,11 +11,24 @@ and find context beyond the paper's reference list.
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 
 logger = logging.getLogger("protoneo.tools.web_search")
+
+_TRUEY = {"1", "true", "yes", "on", "enabled"}
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_PROJECT_ROOT / ".env", override=False)
+
+
+def _timeout_seconds(env_name: str, default: float) -> float:
+    try:
+        return max(1.0, float(os.getenv(env_name, str(default))))
+    except ValueError:
+        return default
 
 
 class SearchResult:
@@ -34,7 +47,7 @@ async def search_brave(query: str, count: int = 5) -> list[SearchResult]:
     api_key = os.getenv("BRAVE_API_KEY")
     if not api_key:
         return []
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=_timeout_seconds("BRAVE_SEARCH_TIMEOUT_SECONDS", 10.0)) as client:
         try:
             resp = await client.get(
                 "https://api.search.brave.com/res/v1/web/search",
@@ -52,7 +65,7 @@ async def search_brave(query: str, count: int = 5) -> list[SearchResult]:
                 ))
             return results
         except Exception as e:
-            logger.warning("Brave search failed: %s", e)
+            logger.warning("Brave search failed (%s): %s", type(e).__name__, e)
             return []
 
 
@@ -61,7 +74,7 @@ async def search_searxng(query: str, count: int = 5) -> list[SearchResult]:
     base_url = os.getenv("SEARXNG_URL")
     if not base_url:
         return []
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=_timeout_seconds("SEARXNG_TIMEOUT_SECONDS", 5.0)) as client:
         try:
             resp = await client.get(
                 f"{base_url.rstrip('/')}/search",
@@ -78,13 +91,16 @@ async def search_searxng(query: str, count: int = 5) -> list[SearchResult]:
                 ))
             return results
         except Exception as e:
-            logger.warning("SearXNG search failed: %s", e)
+            logger.warning("SearXNG search failed (%s): %s", type(e).__name__, e)
             return []
 
 
 async def search_duckduckgo(query: str, count: int = 5) -> list[SearchResult]:
     """Search via DuckDuckGo HTML (no API key needed, rate-limited)."""
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=_timeout_seconds("DUCKDUCKGO_SEARCH_TIMEOUT_SECONDS", 10.0),
+        follow_redirects=True,
+    ) as client:
         try:
             resp = await client.get(
                 "https://html.duckduckgo.com/html/",
@@ -109,7 +125,7 @@ async def search_duckduckgo(query: str, count: int = 5) -> list[SearchResult]:
                 results.append(SearchResult(title=title, url=url, snippet=snippet))
             return results
         except Exception as e:
-            logger.warning("DuckDuckGo search failed: %s", e)
+            logger.warning("DuckDuckGo search failed (%s): %s", type(e).__name__, e)
             return []
 
 
@@ -117,6 +133,7 @@ async def web_search(query: str, count: int = 5) -> list[SearchResult]:
     """Search the web using the best available backend.
 
     Tries backends in priority order: Brave > SearXNG > DuckDuckGo.
+    DuckDuckGo is only used when explicitly enabled by environment variable.
     Returns the first successful result set.
     """
     if os.getenv("BRAVE_API_KEY"):
@@ -129,16 +146,25 @@ async def web_search(query: str, count: int = 5) -> list[SearchResult]:
         if results:
             return results
 
-    return await search_duckduckgo(query, count)
+    if os.getenv("PROTONEO_ENABLE_DUCKDUCKGO_SEARCH", "").strip().lower() in _TRUEY:
+        return await search_duckduckgo(query, count)
+    return []
+
+
+def configured_backend_name() -> str:
+    """Return the first configured web-search backend name."""
+    if os.getenv("BRAVE_API_KEY"):
+        return "brave"
+    if os.getenv("SEARXNG_URL"):
+        return "searxng"
+    if os.getenv("PROTONEO_ENABLE_DUCKDUCKGO_SEARCH", "").strip().lower() in _TRUEY:
+        return "duckduckgo"
+    return ""
 
 
 def is_available() -> bool:
     """Check if any web search backend is configured."""
-    return bool(
-        os.getenv("BRAVE_API_KEY")
-        or os.getenv("SEARXNG_URL")
-        or True  # DuckDuckGo always available as fallback
-    )
+    return bool(configured_backend_name())
 
 
 async def search_research_trends(topic: str, count: int = 5) -> str:

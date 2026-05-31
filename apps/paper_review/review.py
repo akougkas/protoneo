@@ -923,6 +923,9 @@ def session_to_review_packet(session: Any) -> ReviewPacket:
     parse_provenance = session.app_data.get("parse") if session.app_data else None
     if parse_provenance:
         packet.provenance_metadata["parse"] = parse_provenance
+    web_search_provenance = session.app_data.get("web_search") if session.app_data else None
+    if web_search_provenance:
+        packet.provenance_metadata["web_search"] = web_search_provenance
 
     metadata = session.config.get("metadata", {}) if session.config else {}
     if metadata:
