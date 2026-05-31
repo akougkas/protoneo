@@ -444,6 +444,30 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                     "results": results,
                 })
                 settings_now = load_settings()
+                try:
+                    from ..llm.discovery import discover_local
+
+                    local_updates: dict[str, Any] = {}
+                    if settings_now.localhost_endpoints:
+                        local_updates["localhost"] = await discover_local(
+                            [ep.model_dump() for ep in settings_now.localhost_endpoints]
+                        )
+                    if settings_now.lan_endpoints:
+                        local_updates["lan"] = await discover_local(
+                            [ep.model_dump() for ep in settings_now.lan_endpoints]
+                        )
+                    if local_updates:
+                        cached, _ = _discovery_cache_updates(
+                            local_updates,
+                            settings_now.discovered_models,
+                        )
+                        settings_now.discovered_models = {
+                            **settings_now.discovered_models,
+                            **cached,
+                        }
+                except Exception as e:
+                    logger.warning("Post-benchmark local discovery refresh failed: %s", e)
+
                 existing_by_key = {
                     f"{r.get('provider','')}/{r.get('model_id','')}": r
                     for r in settings_now.benchmark_results
@@ -474,9 +498,10 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         from ..llm.settings import load_settings
         live = _benchmark_results.get("latest", [])
         stored = load_settings().benchmark_results
+        running = "global" in _benchmark_running
         return {
-            "running": "global" in _benchmark_running,
-            "results": live if live else stored,
+            "running": running,
+            "results": live if (running or live) else stored,
         }
 
     # ── AI Providers (OAuth login for subscription services) ──

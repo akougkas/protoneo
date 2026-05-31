@@ -75,7 +75,20 @@ def normalize_model_entry(
     is_local = info.tier == ModelTier.LOCAL or endpoint is not None
     prompt_price = float(entry.get("cost_prompt") or entry.get("cost_input") or info.cost_per_input_token or 0.0)
     completion_price = float(entry.get("cost_completion") or entry.get("cost_output") or info.cost_per_output_token or 0.0)
-    is_free = bool(entry.get("is_free", is_local or (prompt_price == 0 and completion_price == 0)))
+    has_pricing = any(
+        key in entry
+        for key in ("cost_prompt", "cost_input", "cost_completion", "cost_output")
+    )
+    if "is_free" in entry:
+        is_free = bool(entry.get("is_free"))
+    elif is_local:
+        is_free = True
+    elif provider_id == "openrouter" and raw_id.endswith(":free"):
+        is_free = True
+    elif has_pricing:
+        is_free = prompt_price == 0 and completion_price == 0
+    else:
+        is_free = False
 
     return {
         "provider_id": provider_id,

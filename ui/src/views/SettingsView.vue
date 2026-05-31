@@ -81,7 +81,7 @@
               <span v-if="selectedModelMeta(node.id).speed" class="meta-chip speed">{{ selectedModelMeta(node.id).speed }} t/s</span>
               <span v-if="selectedModelMeta(node.id).registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
               <span v-if="selectedModelMeta(node.id).registry?.supports_vision" class="meta-chip vision">vision</span>
-              <span v-if="selectedModelMeta(node.id).registry?.structured_output !== 'unknown'" class="meta-chip">{{ selectedModelMeta(node.id).registry.structured_output }} json</span>
+              <span v-if="selectedModelMeta(node.id).registry?.structured_output && selectedModelMeta(node.id).registry.structured_output !== 'unknown'" class="meta-chip">{{ selectedModelMeta(node.id).registry.structured_output }} json</span>
               <span v-if="selectedModelMeta(node.id).benchmark" :class="['class-chip', selectedModelMeta(node.id).benchmark.protoneo_class]">
                 {{ selectedModelMeta(node.id).benchmark.protoneo_class }}
               </span>
@@ -145,7 +145,7 @@
               <span v-if="selectedModelMeta(node.id).speed" class="meta-chip speed">{{ selectedModelMeta(node.id).speed }} t/s</span>
               <span v-if="selectedModelMeta(node.id).registry?.supports_reasoning" class="meta-chip warn">reasoning</span>
               <span v-if="selectedModelMeta(node.id).registry?.supports_vision" class="meta-chip vision">vision</span>
-              <span v-if="selectedModelMeta(node.id).registry?.structured_output !== 'unknown'" class="meta-chip">{{ selectedModelMeta(node.id).registry.structured_output }} json</span>
+              <span v-if="selectedModelMeta(node.id).registry?.structured_output && selectedModelMeta(node.id).registry.structured_output !== 'unknown'" class="meta-chip">{{ selectedModelMeta(node.id).registry.structured_output }} json</span>
               <span v-if="selectedModelMeta(node.id).benchmark" :class="['class-chip', selectedModelMeta(node.id).benchmark.protoneo_class]">
                 {{ selectedModelMeta(node.id).benchmark.protoneo_class }}
               </span>
@@ -320,14 +320,14 @@
     </section>
 
     <!-- ═══════════════ ACTIVE MODELS ═══════════════ -->
-    <section class="section">
+    <section class="section serving-section">
       <div class="section-header-row">
         <div>
-          <h2 class="section-title">Active Models</h2>
-          <p class="section-desc">Models selected as defaults across your providers. Select models above, then score them here.</p>
+          <h2 class="section-title">Serving Readiness</h2>
+          <p class="section-desc">Current provider defaults, pre-score fit checks, and benchmark evidence for models ProtoNeo will actually use.</p>
         </div>
         <button class="action-btn-sm bench-btn" @click="runBenchmark" :disabled="benchmarking || !activeModelList.length">
-          {{ benchmarking ? `Scoring ${benchProgress}...` : 'Score Model Capabilities' }}
+          {{ benchmarking ? `Scoring ${benchProgress}...` : 'Score Selected Models' }}
         </button>
       </div>
 
@@ -335,34 +335,74 @@
         No models selected. Use the "Active model" dropdowns above to choose a default model per provider.
       </div>
 
-      <div v-else class="model-table-wrap">
+      <template v-else>
+        <div class="readiness-strip">
+          <div class="readiness-stat">
+            <span class="readiness-value">{{ activeSelectionSummary.total }}</span>
+            <span class="readiness-label">selected</span>
+          </div>
+          <div class="readiness-stat">
+            <span class="readiness-value">{{ activeSelectionSummary.scored }}</span>
+            <span class="readiness-label">scored</span>
+          </div>
+          <div class="readiness-stat">
+            <span class="readiness-value">{{ activeSelectionSummary.reviewReady }}</span>
+            <span class="readiness-label">review-fit</span>
+          </div>
+          <div :class="['readiness-stat', activeSelectionSummary.attention ? 'needs-attention' : 'ready']">
+            <span class="readiness-value">{{ activeSelectionSummary.attention }}</span>
+            <span class="readiness-label">needs attention</span>
+          </div>
+        </div>
+
+        <div v-if="activeSelectionSummary.unscored" class="selection-note">
+          <strong>{{ activeSelectionSummary.unscored }} selected model{{ activeSelectionSummary.unscored === 1 ? '' : 's' }} {{ activeSelectionSummary.unscored === 1 ? 'has' : 'have' }} not been scored.</strong>
+          ProtoNeo can infer routing signals from live discovery, but the capability score is the evidence check for JSON reliability, review depth, reasoning, context use, and instruction following.
+        </div>
+
+        <div class="model-table-wrap">
         <table class="model-table">
           <thead>
             <tr>
               <th>Provider</th>
-              <th>Model</th>
+              <th>Selected model</th>
               <th class="num">Context</th>
-              <th class="num">Speed</th>
-              <th>Tags</th>
+              <th>Serving signals</th>
+              <th>Fit</th>
+              <th>Next action</th>
               <th v-if="hasBench" class="score-band-col">5D Score</th>
               <th v-if="hasBench" class="num">Total</th>
-              <th v-if="hasBench">Class</th>
-              <th v-if="hasBench">Suggested Roles</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="m in activeModelRows" :key="m.provider + '/' + m.id" class="model-row">
               <td><strong :title="m.provider">{{ providerLabel(m.provider) }}</strong></td>
-              <td class="mono model-id-cell" :title="m.id">{{ m.name || m.id }}</td>
+              <td>
+                <div class="model-id-cell" :title="m.id">
+                  <span class="model-display">{{ m.name || m.id }}</span>
+                  <span class="mono model-full-id">{{ m.provider }}/{{ m.id }}</span>
+                </div>
+              </td>
               <td class="num mono">{{ m.context_length ? formatContext(m.context_length) : '--' }}</td>
-              <td class="num mono">{{ benchThroughput(m.provider, m.id) }}</td>
               <td>
                 <div class="cap-chips">
-                  <template v-if="m.benchmark?.tags?.length">
-                    <span v-for="tag in m.benchmark.tags" :key="tag" :class="['cap-chip', tagClass(tag)]">{{ tag }}</span>
+                  <template v-if="m.signals.length">
+                    <span v-for="signal in m.signals" :key="signal.key" :class="['cap-chip', signal.kind]">{{ signal.label }}</span>
                   </template>
-                  <span v-else class="cap-hint">Run benchmark</span>
+                  <span v-else class="cap-hint">Discovery incomplete</span>
                 </div>
+              </td>
+              <td>
+                <div class="fit-stack">
+                  <span :class="['fit-chip', m.fit.tier]">{{ m.fit.label }}</span>
+                  <span class="fit-detail">{{ m.fit.detail }}</span>
+                </div>
+              </td>
+              <td class="next-action-cell">
+                <span :class="['next-action', m.fit.action_kind]">{{ m.fit.action }}</span>
+                <span v-if="m.benchmark?.suggested_roles?.length" class="suggested-roles">
+                  {{ m.benchmark.suggested_roles.join(', ') }}
+                </span>
               </td>
               <template v-if="hasBench">
                 <td class="score-band-cell">
@@ -377,19 +417,12 @@
                   <span v-if="m.benchmark" :class="['bench-score', benchClass(m.benchmark.total_score)]">{{ m.benchmark.total_score }}/100</span>
                   <span v-else class="bench-na">--</span>
                 </td>
-                <td>
-                  <span v-if="m.benchmark" :class="['class-chip', m.benchmark.protoneo_class]">{{ m.benchmark.protoneo_class }}</span>
-                </td>
-                <td>
-                  <span v-if="m.benchmark?.suggested_roles?.length" class="suggested-roles">
-                    {{ m.benchmark.suggested_roles.join(', ') }}
-                  </span>
-                </td>
               </template>
             </tr>
           </tbody>
         </table>
-      </div>
+        </div>
+      </template>
 
       <!-- Benchmark dimension breakdown -->
       <div v-if="benchmarkResults.length" class="bench-details">
@@ -684,14 +717,23 @@ const activeModelList = computed(() => {
     list.push({
       provider,
       id: modelId,
+      full_id: `${provider}/${modelId}`,
       name: registry?.display_name || model?.name || modelId,
       context_length: model?.context_length || registry?.context_length || registry?.max_context || null,
       is_free: registry?.is_free ?? model?.is_free ?? null,
       cost_prompt: registry?.cost_prompt ?? model?.cost_prompt ?? null,
-      provider_type: model?.provider_type || 'local',
+      provider_type: registry?.provider_type || model?.provider_type || 'local',
       loaded: model?.loaded ?? registry?.loaded ?? null,
       temperature: model?.temperature ?? null,
       flash_attention: model?.flash_attention ?? null,
+      supports_reasoning: registry?.supports_reasoning || false,
+      supports_reasoning_effort: registry?.supports_reasoning_effort || false,
+      supports_tools: registry?.supports_tools || false,
+      supports_vision: registry?.supports_vision || false,
+      structured_output: registry?.structured_output || 'unknown',
+      latency_class: registry?.latency_class || 'unknown',
+      speed_tps: registry?.speed_tps || model?.speed_tps || 0,
+      discovery_source: registry?.discovery_source || model?.discovery_source || '',
       registry,
     })
   }
@@ -699,15 +741,32 @@ const activeModelList = computed(() => {
 })
 
 const activeModelRows = computed(() =>
-  activeModelList.value.map(model => ({
-    ...model,
-    benchmark: getBenchResult(model.provider, model.id),
-    dimensionScores: dimKeys.map(key => ({
-      key,
-      score: getBenchDim(model.provider, model.id, key),
-    })),
-  }))
+  activeModelList.value.map(model => {
+    const benchmark = getBenchResult(model.provider, model.id)
+    const row = {
+      ...model,
+      benchmark,
+      dimensionScores: dimKeys.map(key => ({
+        key,
+        score: getBenchDim(model.provider, model.id, key),
+      })),
+    }
+    row.signals = modelSignals(row)
+    row.fit = selectionFit(row)
+    return row
+  })
 )
+
+const activeSelectionSummary = computed(() => {
+  const rows = activeModelRows.value
+  return {
+    total: rows.length,
+    scored: rows.filter(row => row.benchmark && row.benchmark.status !== 'error').length,
+    unscored: rows.filter(row => !row.benchmark).length,
+    reviewReady: rows.filter(row => row.fit.review_ready).length,
+    attention: rows.filter(row => row.fit.needs_attention).length,
+  }
+})
 
 function findConfiguredEndpoint(providerName) {
   return [...settings.localhost_endpoints, ...settings.lan_endpoints].find(ep => ep.id === providerName) || null
@@ -885,10 +944,152 @@ function benchThroughput(provider, modelId) {
   return tps ? `${tps} t/s` : '--'
 }
 function benchClass(score) { return score >= 80 ? 'high' : score >= 50 ? 'mid' : 'low' }
-function dimScoreClass(score) { return score >= 16 ? 'high' : score >= 10 ? 'mid' : 'low' }
+function dimScoreClass(score) {
+  if (score === null || score === undefined) return 'empty'
+  return score >= 16 ? 'high' : score >= 10 ? 'mid' : 'low'
+}
 function tagClass(tag) {
   const map = { 'structured': 'json', 'deep-review': 'depth', 'reasoning': 'reason', 'long-context': 'context', 'precise': 'instruct' }
   return map[tag] || 'default'
+}
+
+function providerIsLocal(provider) {
+  return provider.startsWith('lan-') || provider.startsWith('localhost-')
+}
+
+function addSignal(signals, key, label, kind = 'default') {
+  if (!signals.some(s => s.key === key)) signals.push({ key, label, kind })
+}
+
+function modelSignals(model) {
+  const signals = []
+  if (providerIsLocal(model.provider)) addSignal(signals, 'private', 'private', 'json')
+  else addSignal(signals, 'cloud', 'cloud', 'default')
+  if (model.is_free === true) addSignal(signals, 'free', 'free', 'json')
+  if (model.loaded === true) addSignal(signals, 'loaded', 'loaded', 'json')
+  if (model.loaded === false && providerIsLocal(model.provider)) addSignal(signals, 'unloaded', 'not loaded', 'warn')
+  if (model.supports_reasoning) addSignal(signals, 'reasoning', 'reasoning', 'reason')
+  if (model.supports_reasoning_effort) addSignal(signals, 'effort', activeReasoningEffort(model.provider) || 'effort default', 'reason')
+  if (model.supports_tools) addSignal(signals, 'tools', 'tools', 'context')
+  if (model.supports_vision) addSignal(signals, 'vision', 'vision', 'context')
+  if (model.structured_output && model.structured_output !== 'unknown') addSignal(signals, 'structured', `${model.structured_output} json`, 'json')
+  const measuredTps = model.benchmark?.throughput?.tokens_per_second || model.speed_tps || 0
+  if (measuredTps) addSignal(signals, 'measured-speed', `${measuredTps} t/s`, 'default')
+  if (model.discovery_source && model.discovery_source !== 'live') {
+    addSignal(signals, 'discovery-source', model.discovery_source === 'fallback_seed' ? 'fallback catalog' : model.discovery_source, 'warn')
+  }
+  for (const tag of model.benchmark?.tags || []) addSignal(signals, `bench-${tag}`, tag, tagClass(tag))
+  if (model.benchmark?.status === 'error') addSignal(signals, 'benchmark-error', 'score failed', 'warn')
+  if (model.benchmark?.status === 'partial') addSignal(signals, 'benchmark-partial', 'partial score', 'warn')
+  if (!model.benchmark) addSignal(signals, 'unscored', 'unscored', 'warn')
+  return signals
+}
+
+function selectionFit(model) {
+  const tags = new Set(model.benchmark?.tags || [])
+  const score = model.benchmark?.total_score || 0
+  const strongJson = model.structured_output && model.structured_output !== 'unknown'
+  const graphCandidate = providerIsLocal(model.provider) && (strongJson || tags.has('structured') || (model.context_length || 0) >= 64000)
+  const reviewCandidate = score >= 70 || tags.has('deep-review') || tags.has('reasoning') || (!model.benchmark && (
+    model.supports_reasoning ||
+    model.supports_tools ||
+    (model.context_length || 0) >= 128000
+  ))
+  const issues = []
+
+  if (!model.context_length) issues.push('context unknown')
+  if (providerIsLocal(model.provider) && model.loaded === false) issues.push('selected model is not loaded')
+  if (!model.benchmark) issues.push('score pending')
+  if (model.benchmark?.status === 'error') issues.push('benchmark failed')
+  if (model.benchmark && score < 50) issues.push('low capability score')
+  const hardIssues = issues.filter(i => i !== 'score pending')
+
+  if (model.benchmark?.status === 'error') {
+    return {
+      tier: 'bad',
+      label: 'Benchmark error',
+      detail: model.benchmark.error || 'Last score run failed',
+      action: 'Fix routing, then score again',
+      action_kind: 'bad',
+      needs_attention: true,
+      review_ready: false,
+    }
+  }
+  if (model.benchmark?.status === 'partial') {
+    return {
+      tier: score >= 70 ? 'caution' : 'bad',
+      label: 'Partial score',
+      detail: model.benchmark.error || 'At least one benchmark dimension failed',
+      action: 'Review failed dimension',
+      action_kind: 'caution',
+      needs_attention: true,
+      review_ready: score >= 70,
+    }
+  }
+  if (model.benchmark && score >= 70) {
+    return {
+      tier: 'good',
+      label: 'Verified fit',
+      detail: graphCandidate ? 'Good for graph and review roles' : 'Good for review roles',
+      action: benchThroughput(model.provider, model.id) === '--' ? 'Keep selected' : `${benchThroughput(model.provider, model.id)} measured`,
+      action_kind: 'good',
+      needs_attention: false,
+      review_ready: true,
+    }
+  }
+  if (model.benchmark && score >= 50) {
+    return {
+      tier: 'caution',
+      label: 'Usable',
+      detail: graphCandidate ? 'Prefer for structured/local work' : 'Use with role-specific caution',
+      action: 'Review dimension scores',
+      action_kind: 'caution',
+      needs_attention: hardIssues.length > 0,
+      review_ready: reviewCandidate,
+    }
+  }
+  if (model.benchmark) {
+    return {
+      tier: 'bad',
+      label: 'Weak fit',
+      detail: 'Score suggests this should not be a default reviewer',
+      action: 'Choose another model',
+      action_kind: 'bad',
+      needs_attention: true,
+      review_ready: false,
+    }
+  }
+  if (reviewCandidate) {
+    return {
+      tier: hardIssues.length ? 'caution' : 'unknown',
+      label: 'Plausible fit',
+      detail: hardIssues.length ? hardIssues.join('; ') : 'Discovery signals look useful; score to verify',
+      action: 'Run capability score',
+      action_kind: 'caution',
+      needs_attention: hardIssues.length > 0,
+      review_ready: true,
+    }
+  }
+  if (graphCandidate) {
+    return {
+      tier: 'unknown',
+      label: 'Graph candidate',
+      detail: 'Local/context signals look suitable for graph stages',
+      action: 'Score before review use',
+      action_kind: 'caution',
+      needs_attention: hardIssues.length > 0,
+      review_ready: false,
+    }
+  }
+  return {
+    tier: 'caution',
+    label: 'Needs evidence',
+    detail: hardIssues.join('; ') || 'No strong review signals yet',
+    action: 'Run capability score',
+    action_kind: 'caution',
+    needs_attention: true,
+    review_ready: false,
+  }
 }
 
 // Actions
@@ -974,7 +1175,12 @@ async function runBenchmark() {
       const bRes = await getBenchmarkResults()
       benchmarkResults.value = bRes.data.results || []
       benchProgress.value = `${benchmarkResults.value.length}/${res.data.model_count}`
-      if (!bRes.data.running) { clearInterval(benchPollTimer); benchmarking.value = false; showBenchDetails.value = true }
+      if (!bRes.data.running) {
+        clearInterval(benchPollTimer)
+        benchmarking.value = false
+        showBenchDetails.value = true
+        await loadAll()
+      }
     }, 2000)
   } catch (e) { benchmarking.value = false }
 }
@@ -1249,13 +1455,69 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 
 /* Active models table */
 .empty-state { font-size: 13px; color: #999; padding: 24px; text-align: center; border: 1px dashed #ddd; border-radius: 6px; }
+.readiness-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.readiness-stat {
+  border: 1px solid #e4e4e4;
+  background: #fafafa;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.readiness-stat.ready { border-color: #d7ead7; background: #f6fbf6; }
+.readiness-stat.needs-attention { border-color: #f1d6ae; background: #fffaf2; }
+.readiness-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 19px;
+  font-weight: 700;
+  color: #222;
+}
+.readiness-label {
+  font-size: 10px;
+  color: #777;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.selection-note {
+  border: 1px solid #ead8b8;
+  background: #fffaf2;
+  color: #6b4a14;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
 .model-table-wrap { border: 1px solid #e0e0e0; border-radius: 6px; overflow-x: auto; }
-.model-table { width: 100%; min-width: 1120px; border-collapse: collapse; font-size: 13px; }
+.model-table { width: 100%; min-width: 1180px; border-collapse: collapse; font-size: 13px; }
 .model-table th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #888; padding: 10px 12px; border-bottom: 1px solid #e0e0e0; background: #fafafa; white-space: nowrap; }
 .model-table th.num { text-align: right; }
-.model-table td { padding: 8px 12px; border-bottom: 1px solid #f4f4f4; color: #333; }
+.model-table td { padding: 10px 12px; border-bottom: 1px solid #f4f4f4; color: #333; vertical-align: top; }
 .model-table td.num { text-align: right; }
-.model-id-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-id-cell {
+  max-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.model-display {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.model-full-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #888;
+}
 .score-band-col { min-width: 310px; }
 
 .type-chip { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; }
@@ -1268,7 +1530,47 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 .cap-chip.json { background: #e8f5e9; color: #2e7d32; }
 .cap-chip.scoring { background: #e3f2fd; color: #1565c0; }
 .cap-chip.complete { background: #f3e5f5; color: #7b1fa2; }
+.cap-chip.warn { background: #fff3e0; color: #a06000; }
 .cap-hint { font-size: 10px; color: #ccc; font-style: italic; }
+
+.fit-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+}
+.fit-chip {
+  width: fit-content;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.fit-chip.good { background: #e8f5e9; color: #2a7a2a; }
+.fit-chip.unknown { background: #eef2f5; color: #506070; }
+.fit-chip.caution { background: #fff3e0; color: #a06000; }
+.fit-chip.bad { background: #ffebee; color: #900; }
+.fit-detail {
+  max-width: 220px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #666;
+}
+.next-action-cell {
+  min-width: 170px;
+}
+.next-action {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  color: #555;
+  margin-bottom: 4px;
+}
+.next-action.good { color: #2a7a2a; }
+.next-action.caution { color: #a06000; }
+.next-action.bad { color: #900; }
 
 .bench-score { font-family: 'JetBrains Mono', monospace; font-weight: 700; padding: 1px 6px; border-radius: 3px; }
 .bench-score.high { background: #e8f5e9; color: #2a7a2a; }
@@ -1309,6 +1611,7 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 .score-band-item.high { background: #e8f5e9; color: #2a7a2a; }
 .score-band-item.mid { background: #fff8e1; color: #a07000; }
 .score-band-item.low { background: #ffebee; color: #900; }
+.score-band-item.empty { background: #f5f5f5; color: #aaa; }
 .score-band-label { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
 .score-band-value { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; }
 

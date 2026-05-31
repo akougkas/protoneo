@@ -21,6 +21,18 @@ from typing import Any
 
 logger = logging.getLogger("protoneo.llm.benchmark")
 
+BENCHMARK_VERSION = "capability-5d-v2"
+_CLOUD_PROVIDERS = {"openai", "openrouter"}
+_BENCHMARK_MAX_TOKENS = 800
+_WARMUP_TIMEOUT_SECONDS = 90
+_LOCAL_DIMENSION_TIMEOUT_SECONDS = 180
+_CLOUD_DIMENSION_TIMEOUT_SECONDS = 120
+_BENCHMARK_SYSTEM_PROMPT = (
+    "You are being evaluated by an automated benchmark. Think if needed, "
+    "but always produce a visible final answer that follows the user's "
+    "format instructions exactly. Do not leave the final answer empty."
+)
+
 _REASONING_MODEL_HINTS = (
     "reasoning", "thinking", "qwen3.5", "qwen35", "qwen3", "-i1",
     "o1", "o3", "o4", "deepseek-r1",
@@ -318,30 +330,34 @@ def _score_reasoning(content: str) -> tuple[int, dict]:
         score += 4
 
     # Grand total = O(n log p)
-    total_indicators = [
+    total_literals = [
         "n log p", "n*log(p)", "n * log(p)", "n·log(p)",
         "n log(p)", "o(n log p)", "o(n·log p)", "o(nlogp)",
         "n times log p", "n multiplied by log p",
+    ]
+    total_patterns = [
         "total.*n.*log", "overall.*n.*log",
     ]
-    if any(re.search(kw, full_lower) for kw in total_indicators):
+    if any(kw in full_lower for kw in total_literals) or any(re.search(kw, full_lower) for kw in total_patterns):
         details["total_correct"] = True
         score += 3
 
     # Correct answer: claim is INCORRECT
     # Accept many phrasings, not just the exact word as the last token
-    incorrect_indicators = [
+    incorrect_literals = [
         "incorrect", "not correct", "is wrong", "is false",
         "is invalid", "is erroneous", "claim is flawed",
         "claim does not hold", "does not match",
-        "should be.*n log p", "should be.*o(n",
-        "the correct.*is.*n log", "actually.*n log",
         "overstates", "understates the total",
+    ]
+    incorrect_patterns = [
+        "should be.*n log p", r"should be.*o\(n",
+        "the correct.*is.*n log", "actually.*n log",
         "per-processor.*not total", "per processor.*not total",
         "confus.*per.processor.*total",
         "n/p log p.*per processor", "n/p log p.*not.*total",
     ]
-    if any(re.search(kw, full_lower) for kw in incorrect_indicators):
+    if any(kw in full_lower for kw in incorrect_literals) or any(re.search(kw, full_lower) for kw in incorrect_patterns):
         details["correct_answer"] = True
         score += 6
 
@@ -603,15 +619,13 @@ def _benchmark_kwargs(
 ) -> dict[str, Any]:
     """Build extra request kwargs for a benchmark target."""
     kwargs: dict[str, Any] = {}
-    if api_base:
+    if api_base and provider not in _CLOUD_PROVIDERS:
         kwargs["api_base"] = api_base
         kwargs["api_key"] = "none"
 
     is_reasoning = _supports_reasoning_mode(model_id, provider, litellm_prefix)
-    if is_reasoning:
+    if is_reasoning and provider == "openai":
         kwargs["reasoning_effort"] = "high"
-        kwargs["allowed_openai_params"] = ["reasoning_effort"]
-        kwargs["drop_params"] = True
 
     return kwargs
 
@@ -666,16 +680,17 @@ async def benchmark_model(
     Starts with a warm-up call using a real prompt to load model weights
     into VRAM. Token counts and throughput come from LiteLLM response.usage.
     """
-    effective_model = litellm_model or (
-        f"{litellm_prefix}{model_id}" if litellm_prefix else model_id
-    )
+    target_model = f"{provider}/{model_id}" if provider else model_id
     extra_kwargs = _benchmark_kwargs(model_id, provider, api_base, litellm_prefix)
 
-    logger.info("Benchmarking %s/%s (effective=%s)", provider, model_id, effective_model)
+    logger.info("Benchmarking %s/%s (target=%s)", provider, model_id, target_model)
 
     result = {
         "model_id": model_id,
         "provider": provider,
+        "target_id": target_model,
+        "benchmark_version": BENCHMARK_VERSION,
+        "created_at": time.time(),
         "status": "running",
         "dimensions": {},
         "total_score": 0,
@@ -693,15 +708,21 @@ async def benchmark_model(
 
     # Cloud providers (subscription APIs) don't need warmup. Models are
     # always loaded. Local providers need warmup to load weights into VRAM.
-    is_cloud = provider in ("openai",)  # anthropic removed
+    is_cloud = provider in _CLOUD_PROVIDERS
     if not is_cloud:
         try:
-            await llm_client.complete(
-                model=effective_model,
-                messages=[{"role": "user", "content": "Briefly list 3 strengths of distributed sorting algorithms."}],
-                session_id=session_id,
-                max_tokens=100,
-                **extra_kwargs,
+            await asyncio.wait_for(
+                llm_client.complete(
+                    model=target_model,
+                    messages=[
+                        {"role": "system", "content": _BENCHMARK_SYSTEM_PROMPT},
+                        {"role": "user", "content": "Briefly list 3 strengths of distributed sorting algorithms."},
+                    ],
+                    session_id=session_id,
+                    max_tokens=100,
+                    **extra_kwargs,
+                ),
+                timeout=_WARMUP_TIMEOUT_SECONDS,
             )
         except Exception as e:
             logger.error("Warm-up failed for %s: %s", model_id, e)
@@ -729,11 +750,22 @@ async def benchmark_model(
 
         start = time.monotonic()
         try:
-            response = await llm_client.complete(
-                model=effective_model,
-                messages=[{"role": "user", "content": prompt}],
-                session_id=session_id,
-                **extra_kwargs,
+            response = await asyncio.wait_for(
+                llm_client.complete(
+                    model=target_model,
+                    messages=[
+                        {"role": "system", "content": _BENCHMARK_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    session_id=session_id,
+                    max_tokens=_BENCHMARK_MAX_TOKENS,
+                    **extra_kwargs,
+                ),
+                timeout=(
+                    _CLOUD_DIMENSION_TIMEOUT_SECONDS
+                    if is_cloud
+                    else _LOCAL_DIMENSION_TIMEOUT_SECONDS
+                ),
             )
             elapsed = time.monotonic() - start
             dim_result["latency_seconds"] = round(elapsed, 2)
@@ -776,6 +808,25 @@ async def benchmark_model(
         ),
     }
 
+    failed_dimensions = [
+        key for key, dim in result["dimensions"].items()
+        if isinstance(dim, dict) and dim.get("error")
+    ]
+    if failed_dimensions:
+        first_error = next(
+            (
+                dim.get("error")
+                for dim in result["dimensions"].values()
+                if isinstance(dim, dict) and dim.get("error")
+            ),
+            "benchmark failed",
+        )
+        result["error"] = (
+            "All benchmark dimensions failed: "
+            if len(failed_dimensions) == len(_DIMENSIONS)
+            else f"{len(failed_dimensions)}/{len(_DIMENSIONS)} benchmark dimensions failed: "
+        ) + str(first_error)
+
     # Derive tags
     tags = []
     for dim_key, (threshold, tag) in _TAG_THRESHOLDS.items():
@@ -795,7 +846,10 @@ async def benchmark_model(
     result["suggested_roles"] = suggested
 
     # Classify
-    if total_score >= 85:
+    if len(failed_dimensions) == len(_DIMENSIONS):
+        result["protoneo_class"] = "error"
+        result["status"] = "error"
+    elif total_score >= 85:
         result["protoneo_class"] = "excellent"
     elif total_score >= 70:
         result["protoneo_class"] = "good"
@@ -806,7 +860,8 @@ async def benchmark_model(
     else:
         result["protoneo_class"] = "unsuitable"
 
-    result["status"] = "complete"
+    if result["status"] == "running":
+        result["status"] = "partial" if failed_dimensions else "complete"
     logger.info(
         "Benchmark done: %s/%s total=%d/100 class=%s tags=%s tps=%.1f",
         provider, model_id, total_score, result["protoneo_class"],

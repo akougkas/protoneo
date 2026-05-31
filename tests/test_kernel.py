@@ -25,6 +25,10 @@ from protoneo.knowledge.chunker import chunk_text
 from protoneo.knowledge.parser import parse_file
 from protoneo.llm.client import LLMClient
 from protoneo.llm import discovery as discovery_module
+from protoneo.llm.benchmark import (
+    _score_reasoning as capability_score_reasoning,
+    benchmark_model as capability_benchmark_model,
+)
 from protoneo.llm.model_catalog import build_model_catalog
 from protoneo.llm.registry import CapabilityRegistry
 import protoneo.llm.settings as settings_module
@@ -661,6 +665,121 @@ class TestSettingsRouting:
         assert assignments["openai"]["api_key_source"] == "oauth"
         assert assignments["openai"]["options"] == {"reasoning_effort": "xhigh"}
         assert assignments["openai"]["reasoning_effort"] == "xhigh"
+
+    def test_model_catalog_does_not_treat_unknown_subscription_pricing_as_free(self):
+        settings = ProtoNeoSettings(
+            provider_enabled={"openai": True, "openrouter": True},
+            discovered_models={
+                "openai": [
+                    {
+                        "id": "gpt-5.5-codex",
+                        "source": "openai",
+                        "provider_type": "subscription",
+                        "discovery_source": "fallback_seed",
+                    }
+                ],
+                "openrouter": [
+                    {
+                        "id": "google/gemma-4-31b-it:free",
+                        "source": "openrouter",
+                        "provider_type": "api",
+                    }
+                ],
+            },
+        )
+
+        catalog = build_model_catalog(settings, CapabilityRegistry.from_settings(settings))
+        by_id = {model["provider_model_id"]: model for model in catalog}
+
+        assert by_id["openai/gpt-5.5-codex"]["is_free"] is False
+        assert by_id["openrouter/google/gemma-4-31b-it:free"]["is_free"] is True
+
+
+class TestCapabilityBenchmark:
+    def test_reasoning_score_handles_literal_big_o_notation(self):
+        score, details = capability_score_reasoning(
+            "Each round moves p * n/p = n items, so over log(p) rounds "
+            "the total is O(n log p), not O(n/p log p). The claim is INCORRECT."
+        )
+
+        assert score >= 13
+        assert details["total_correct"] is True
+        assert details["correct_answer"] is True
+
+    @pytest.mark.asyncio
+    async def test_benchmark_routes_local_model_by_provider_id(self):
+        calls = []
+
+        class FakeClient:
+            async def complete(self, **kwargs):
+                calls.append(kwargs)
+                return LLMResponse(
+                    content="{}",
+                    model=kwargs["model"],
+                    usage=TokenUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+                )
+
+        result = await capability_benchmark_model(
+            "local-model",
+            FakeClient(),
+            provider="lan-mini",
+            api_base="http://mini/v1",
+            litellm_model="openai/local-model",
+        )
+
+        assert result["target_id"] == "lan-mini/local-model"
+        assert len(calls) == 6  # warm-up + five dimensions
+        assert calls[0]["model"] == "lan-mini/local-model"
+        assert calls[0]["api_base"] == "http://mini/v1"
+        assert calls[0]["api_key"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_benchmark_skips_cloud_warmup_for_openrouter(self):
+        calls = []
+
+        class FakeClient:
+            async def complete(self, **kwargs):
+                calls.append(kwargs)
+                return LLMResponse(
+                    content="{}",
+                    model=kwargs["model"],
+                    usage=TokenUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+                )
+
+        result = await capability_benchmark_model(
+            "google/gemma-4-31b-it:free",
+            FakeClient(),
+            provider="openrouter",
+            api_base="",
+            litellm_model="openrouter/google/gemma-4-31b-it:free",
+        )
+
+        assert result["target_id"] == "openrouter/google/gemma-4-31b-it:free"
+        assert len(calls) == 5
+        assert all(call["model"] == "openrouter/google/gemma-4-31b-it:free" for call in calls)
+        assert all("api_base" not in call for call in calls)
+
+    @pytest.mark.asyncio
+    async def test_benchmark_marks_all_dimension_failures_as_error(self):
+        calls = []
+
+        class FakeClient:
+            async def complete(self, **kwargs):
+                calls.append(kwargs)
+                raise RuntimeError("model is not supported with this account")
+
+        result = await capability_benchmark_model(
+            "gpt-5.5-codex",
+            FakeClient(),
+            provider="openai",
+        )
+
+        assert len(calls) == 5
+        assert result["status"] == "error"
+        assert result["protoneo_class"] == "error"
+        assert result["total_score"] == 0
+        assert "All benchmark dimensions failed" in result["error"]
+        assert "not supported" in result["error"]
 
 
 # ── Agent ───────────────────────────────────────────────────
