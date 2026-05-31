@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agents.types import Document
+from .visual_evidence import describe_image, extract_numeric_claims, sanitize_description
 
 logger = logging.getLogger("protoneo.knowledge.parser")
 
@@ -119,6 +120,63 @@ def _clean_markdown(md: str) -> str:
     return md.strip()
 
 
+def _collect_picture_annotation(element: Any) -> str:
+    """Return Docling inline VLM description text for a PictureItem, if present."""
+    for annotation in getattr(element, "annotations", []) or []:
+        text = getattr(annotation, "text", "")
+        if text:
+            return sanitize_description(text)
+    return ""
+
+
+def _build_artifact_records(
+    picture_items: list[tuple[str, int, dict[str, Any], str, Any]],
+    table_items: list[tuple[str, int, dict[str, Any], str]],
+    vlm_config: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build provenance-bearing figure/table artifact records."""
+    figures: list[dict[str, Any]] = []
+    for idx, (image_path, page, bbox, caption, element) in enumerate(picture_items, 1):
+        description = _collect_picture_annotation(element) if vlm_config else ""
+        figures.append({
+            "index": idx,
+            "kind": "figure",
+            "page": page,
+            "bbox": bbox,
+            "caption": caption,
+            "image_path": image_path,
+            "description": description,
+            "description_source": "vlm" if description else "none",
+            "numeric_claims": extract_numeric_claims(description) if description else [],
+            "confidence": 0.6 if description else 0.0,
+            "model": (vlm_config or {}).get("model", ""),
+            "endpoint": (vlm_config or {}).get("url", ""),
+            "grounding": "visual" if description else "extracted_no_vlm",
+        })
+
+    tables: list[dict[str, Any]] = []
+    for idx, (image_path, page, bbox, caption) in enumerate(table_items, 1):
+        if vlm_config:
+            record = describe_image(image_path, vlm_config, kind="table", caption=caption)
+        else:
+            record = {
+                "kind": "table",
+                "image_path": image_path,
+                "caption": caption,
+                "description": "",
+                "description_source": "none",
+                "numeric_claims": [],
+                "confidence": 0.0,
+                "model": "",
+                "endpoint": "",
+                "grounding": "extracted_no_vlm",
+                "error": "",
+            }
+        record.update({"index": idx, "page": page, "bbox": bbox})
+        tables.append(record)
+    return figures, tables
+
+
 def _read_text_with_fallback(file_path: str) -> str:
     """Read a text file with charset detection fallback."""
     data = Path(file_path).read_bytes()
@@ -200,14 +258,14 @@ def _build_docling_pipeline_options(vlm_config: dict[str, Any] | None = None):
 def _parse_pdf_docling(
     file_path: str,
     vlm_config: dict[str, Any] | None = None,
-) -> tuple[str, str, list[dict], str]:
+) -> tuple[str, str, list[dict], list[dict], str, int]:
     """Parse a PDF using Docling's layout analysis engine.
 
     When vlm_config is provided, Docling describes every figure inline
     during parsing using the configured VLM endpoint. No separate
     enrichment step needed.
 
-    Returns (text, markdown, figures, figures_dir, table_count).
+    Returns (text, markdown, figures, tables, figures_dir, table_count).
     """
     from docling.datamodel.base_models import InputFormat
     from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -230,8 +288,9 @@ def _parse_pdf_docling(
     logger.info("Parsing %s with Docling", path.name)
     conv_res = converter.convert(path)
 
-    # Extract figures
-    figures: list[dict] = []
+    # Extract figures/tables.
+    picture_items: list[tuple[str, int, dict[str, Any], str, Any]] = []
+    table_items: list[tuple[str, int, dict[str, Any], str]] = []
     picture_counter = 0
     table_counter = 0
 
@@ -257,13 +316,7 @@ def _parse_pdf_docling(
 
                 caption = _resolve_caption(conv_res.document, element)
 
-                figures.append({
-                    "index": picture_counter,
-                    "page": page_no,
-                    "bbox": bbox,
-                    "caption": caption,
-                    "image_path": str(img_path),
-                })
+                picture_items.append((str(img_path), page_no, bbox, caption, element))
 
         if isinstance(element, TableItem):
             table_counter += 1
@@ -272,6 +325,22 @@ def _parse_pdf_docling(
                 img_filename = f"{path.stem}-table-{table_counter}.png"
                 img_path = output_dir / img_filename
                 img.save(str(img_path), "PNG")
+
+                bbox = {}
+                page_no = 0
+                if element.prov:
+                    prov = element.prov[0]
+                    page_no = prov.page_no
+                    if prov.bbox:
+                        bbox = {
+                            "l": prov.bbox.l, "t": prov.bbox.t,
+                            "r": prov.bbox.r, "b": prov.bbox.b,
+                        }
+
+                caption = _resolve_caption(conv_res.document, element)
+                table_items.append((str(img_path), page_no, bbox, caption))
+
+    figures, tables = _build_artifact_records(picture_items, table_items, vlm_config)
 
     markdown = conv_res.document.export_to_markdown(
         image_mode=ImageRefMode.REFERENCED,
@@ -285,7 +354,7 @@ def _parse_pdf_docling(
         picture_counter, table_counter, len(markdown), path.name,
     )
 
-    return text, markdown, figures, str(output_dir), table_counter
+    return text, markdown, figures, tables, str(output_dir), table_counter
 
 
 def parse_file(
@@ -318,7 +387,7 @@ def parse_file(
 
     if suffix == ".pdf":
         effective_vlm = None if fast else vlm_config
-        text, markdown, figures, figures_dir, table_count = _parse_pdf_docling(
+        text, markdown, figures, tables, figures_dir, table_count = _parse_pdf_docling(
             file_path,
             effective_vlm,
         )
@@ -333,9 +402,11 @@ def parse_file(
             markdown=markdown,
             metadata={
                 "figures": figures,
+                "tables": tables,
                 "table_count": table_count,
                 "figures_dir": figures_dir,
                 "parser": "docling",
+                "vlm_used": bool(effective_vlm),
             },
         )
 

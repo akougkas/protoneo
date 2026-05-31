@@ -72,3 +72,41 @@ def test_describe_image_handles_failure(monkeypatch, tmp_path):
     assert rec["description"] == ""
     assert rec["description_source"] == "error"
     assert "connection refused" in rec["error"]
+
+
+def test_parser_attaches_figure_descriptions(monkeypatch):
+    """Docling picture annotations are captured per figure; tables get described."""
+    from protoneo.knowledge import parser as pmod
+
+    calls = {"table": 0}
+
+    def fake_describe(image_path, vlm_config, kind="figure", caption=""):
+        if kind == "table":
+            calls["table"] += 1
+        return {
+            "kind": kind,
+            "image_path": image_path,
+            "description": f"{kind} desc",
+            "description_source": "vlm",
+            "numeric_claims": [],
+            "confidence": 0.5,
+            "model": "omni",
+            "endpoint": "u",
+            "prompt": "p",
+            "grounding": "visual",
+            "error": "",
+            "caption": caption,
+        }
+
+    monkeypatch.setattr(pmod, "describe_image", fake_describe)
+    monkeypatch.setattr(pmod, "_collect_picture_annotation", lambda el: "inline figure desc")
+
+    figures, tables = pmod._build_artifact_records(
+        picture_items=[("/tmp/f1.png", 1, {"l": 0}, "Fig 1 caption", object())],
+        table_items=[("/tmp/t1.png", 2, {}, "Table 1 caption")],
+        vlm_config={"url": "http://h/v1/chat/completions", "model": "omni"},
+    )
+    assert figures[0]["description"] == "inline figure desc"
+    assert figures[0]["description_source"] == "vlm"
+    assert tables[0]["description"] == "table desc"
+    assert calls["table"] == 1
