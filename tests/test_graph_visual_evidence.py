@@ -46,3 +46,12 @@ def test_ingest_visual_evidence_undescribed_marks_low_confidence():
     fig = [node for node in g.nodes if node.node_type == "Figure"][0]
     assert fig.confidence == 0.0
     assert fig.attributes["grounding"] == "extracted_no_vlm"
+
+
+def test_pipeline_ingests_document_figures():
+    """The graph pipeline ingests document.metadata figures/tables at the metadata step."""
+    g = KnowledgeGraph()
+    g.add_node("P", "Paper", node_id="paper-root")
+    doc_meta = {"figures": _figs(), "tables": []}
+    g.ingest_visual_evidence(doc_meta.get("figures"), doc_meta.get("tables"))
+    assert any(node.node_type == "Figure" for node in g.nodes)

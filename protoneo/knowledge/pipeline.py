@@ -158,6 +158,23 @@ class GraphPipeline:
             else:
                 metadata = extract_metadata(document.text)
             paper_graph.ingest_metadata(metadata)
+            visual_added = paper_graph.ingest_visual_evidence(
+                document.metadata.get("figures"),
+                document.metadata.get("tables"),
+            )
+            if visual_added:
+                artifacts = (
+                    (document.metadata.get("figures") or [])
+                    + (document.metadata.get("tables") or [])
+                )
+                bus.emit("visual_evidence_ingested", {
+                    "figures": len(document.metadata.get("figures") or []),
+                    "tables": len(document.metadata.get("tables") or []),
+                    "described": sum(
+                        1 for artifact in artifacts
+                        if isinstance(artifact, dict) and artifact.get("description")
+                    ),
+                })
 
             bus.emit("metadata_extracted", {
                 "title": metadata.title,

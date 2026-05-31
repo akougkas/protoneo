@@ -281,11 +281,42 @@ def _parse_provenance(
     """Build app-owned parse provenance from parser metadata."""
     metadata = getattr(doc, "metadata", {}) or {}
     figures = metadata.get("figures") or []
+    tables = metadata.get("tables") or []
     figure_image_paths = [
         f.get("image_path", "")
         for f in figures
         if isinstance(f, dict) and f.get("image_path")
     ]
+    artifacts = [
+        artifact
+        for artifact in [*figures, *tables]
+        if isinstance(artifact, dict)
+    ]
+    described = sum(1 for artifact in artifacts if artifact.get("description"))
+    total_artifacts = len(artifacts)
+    if total_artifacts == 0:
+        grounding_mode = "no_artifacts"
+    elif described == 0:
+        grounding_mode = "text_only"
+    elif described == total_artifacts:
+        grounding_mode = "vision_grounded"
+    else:
+        grounding_mode = "mixed"
+
+    def _artifact_summary(artifact: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: artifact.get(key)
+            for key in (
+                "index",
+                "page",
+                "caption",
+                "description",
+                "description_source",
+                "numeric_claims",
+                "grounding",
+            )
+        }
+
     return {
         "parser": metadata.get("parser", ""),
         "fast_parse": fast_parse,
@@ -301,6 +332,11 @@ def _parse_provenance(
         "figure_count": len(figures) if isinstance(figures, list) else 0,
         "figure_image_paths": figure_image_paths,
         "table_count": metadata.get("table_count", 0),
+        "grounding_mode": grounding_mode,
+        "artifacts_described": described,
+        "artifacts_total": total_artifacts,
+        "figures": [_artifact_summary(f) for f in figures if isinstance(f, dict)],
+        "tables": [_artifact_summary(t) for t in tables if isinstance(t, dict)],
         "figures_dir": metadata.get("figures_dir", ""),
         "duration_seconds": round(duration_seconds, 3),
     }
