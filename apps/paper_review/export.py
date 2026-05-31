@@ -434,18 +434,23 @@ def write_review_artifacts(
     _write_json("deliberation_transcript.json", [r.model_dump(mode="json") for r in packet.deliberation])
     _write_text("deliberation_transcript.md", _deliberation_to_markdown(packet))
     _write_json("meta_review.json", packet.meta_review.model_dump(mode="json"))
-    _write_json("final_review.json", packet.pc_chair_review)
-    _write_text("final_review.md", final_review_to_markdown(packet.pc_chair_review))
 
+    final_review = dict(packet.pc_chair_review or {})
     offline_path = None
     if template_path:
         template = Path(template_path)
         filled = fill_linklings_offline_review_template(
             template.read_text(),
-            packet.pc_chair_review,
+            final_review,
         )
         offline_name = f"{paper_id or template.stem.replace('_review', '')}_protoneo_offline_review.txt"
         offline_path = _write_text(offline_name, filled)
+        final_review["linklings_offline_review_text"] = filled
+        final_review["offline_review_path"] = str(offline_path)
+
+    packet.pc_chair_review = final_review
+    _write_json("final_review.json", final_review)
+    _write_text("final_review.md", final_review_to_markdown(final_review))
 
     if not model_map:
         agents = packet.provenance_metadata.get("agents", {})
@@ -468,6 +473,7 @@ def write_review_artifacts(
         "source_graph_format": graph_source,
         "prompt_pack_version": prompt_pack_version or packet.provenance_metadata.get("prompt_pack_version", ""),
         "artifact_description_assumed_present": artifact_description_assumed_present,
+        "deliberation": packet.provenance_metadata.get("deliberation", {}),
         "artifact_paths": {
             key: str(path)
             for key, path in artifacts.items()

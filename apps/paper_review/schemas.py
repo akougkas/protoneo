@@ -127,6 +127,8 @@ _DEFAULT_FINAL_REVIEW: dict[str, Any] = {
         "rationale": "",
     },
     "reproducibility_committee_focus": "",
+    "linklings_offline_review_text": "",
+    "offline_review_path": "",
     "submission_readiness": {
         "status": "revise_before_submit",
         "reason": "",
@@ -423,6 +425,11 @@ def normalize_final_review_payload(payload: Any) -> dict[str, Any]:
             source.get("reproducibility_committee_focus")
             or source.get("reproducibility_focus")
         ),
+        "linklings_offline_review_text": (
+            source.get("linklings_offline_review_text")
+            or source.get("offline_review_text")
+        ),
+        "offline_review_path": source.get("offline_review_path"),
     }
 
     for key, value in source.items():
@@ -512,6 +519,10 @@ def sanitize_final_review(payload: Any, fallback_comments: str = "") -> dict[str
         "reproducibility_committee_focus": _coerce_text(
             source.get("reproducibility_committee_focus")
         ),
+        "linklings_offline_review_text": _coerce_text(
+            source.get("linklings_offline_review_text")
+        ),
+        "offline_review_path": _coerce_text(source.get("offline_review_path")),
     }
 
     for key, value in source.items():

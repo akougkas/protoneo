@@ -358,6 +358,22 @@ class RoundRobinPattern:
                 if aid != current_agent_id
             ]
             peer_list = ", ".join(peer_roles) if peer_roles else "your co-reviewers"
+            deliberation_contract = (
+                "\n\nReturn a single JSON object. In addition to the normal "
+                "review fields, include these deliberation-specific top-level "
+                "fields so the meta-reviewer can audit the panel discussion:\n"
+                "- `deliberation_position`: your current accept/reject lean "
+                "after reading the panel.\n"
+                "- `peer_engagement`: a list of named peer claims you agree "
+                "with, disagree with, or modify, each with manuscript or graph "
+                "evidence and decision impact.\n"
+                "- `score_update`: `{previous_score, current_score, changed, "
+                "reason}`.\n"
+                "- `unresolved_disagreements`: the remaining issues, who "
+                "disagrees, and what evidence would resolve them.\n"
+                "Keep the reasoning concise and evidence-facing. Do not include "
+                "hidden chain-of-thought."
+            )
 
             if round_num == 0:
                 delib_instructions = (
@@ -375,7 +391,8 @@ class RoundRobinPattern:
                     f"should weigh in on whether that gap also affects the novelty "
                     f"claim. When the Skeptic raises a concern, others should either "
                     f"supply manuscript evidence that mitigates it or explain why it "
-                    f"matters more (or less) than the Skeptic claims.\n\n"
+                    f"matters more (or less) than the Skeptic claims. If there are "
+                    f"at least two peers, engage at least two distinct peer claims.\n\n"
                     f"**2. Build arguments together.** The best committee discussions "
                     f"produce insights no single reviewer had alone. Connect "
                     f"observations across reviews: if two reviewers noticed related "
@@ -398,7 +415,8 @@ class RoundRobinPattern:
                     f"**6. Update your score if warranted.** If your peers' arguments "
                     f"genuinely changed your assessment, update your merit score and "
                     f"explain what convinced you. If not, hold your ground and "
-                    f"explain why.\n\n"
+                    f"explain why. Name the strongest opposing argument even when "
+                    f"you ultimately reject it.\n\n"
                     f"### What NOT to do\n\n"
                     f"- Do not simply say \"I agree with the Technical Reviewer.\" "
                     f"Explain what you agree with and why it matters from your "
@@ -410,6 +428,7 @@ class RoundRobinPattern:
                     f"toward rejection is not rigor.\n\n"
                     f"Return your deliberation response as a JSON object matching "
                     f"the same output contract as your independent review."
+                    f"{deliberation_contract}"
                 )
             else:
                 delib_instructions = (
@@ -420,18 +439,24 @@ class RoundRobinPattern:
                     f"stage, focus on:\n\n"
                     f"1. **Resolving open questions** from the previous round. "
                     f"If a peer asked you to check something in the manuscript, "
-                    f"report what you found.\n\n"
+                    f"report what you found. Answer at least one concrete peer "
+                    f"challenge unless no peer challenged your position.\n\n"
                     f"2. **Narrowing the key decision points.** The meta-reviewer "
                     f"needs to know: what are the 1-2 issues the committee "
                     f"considers most important, and where does the panel stand "
-                    f"on each?\n\n"
+                    f"on each? Preserve real disagreement instead of forcing "
+                    f"consensus.\n\n"
                     f"3. **Finalizing your score.** State your final merit score "
                     f"with a one-sentence rationale that references the "
-                    f"deliberation, not just your original review.\n\n"
+                    f"deliberation, not just your original review. If your score "
+                    f"changed, identify the peer argument or manuscript evidence "
+                    f"that changed it. If it did not, explain why the best opposing "
+                    f"argument was insufficient.\n\n"
                     f"Keep this response focused and concise. The meta-reviewer "
                     f"will read everything.\n\n"
                     f"Return your response as a JSON object matching "
                     f"the same output contract as your independent review."
+                    f"{deliberation_contract}"
                 )
 
             sections.append(delib_instructions)
@@ -533,12 +558,21 @@ class RoundRobinPattern:
                                     })
                 prev_round_outputs[agent.agent_id] = content_trimmed
 
+                round_id = f"round-{round_num + 1}"
+                turn_index = len(deliberation_turns) + 1
                 output = AgentOutput(
                     agent_id=agent.agent_id,
                     agent_role=agent.role,
                     content=response.content,
                     structured=_try_extract_json(response.content),
-                    metadata={**response.metadata, "round": round_num + 1},
+                    metadata={
+                        **response.metadata,
+                        "round": round_num + 1,
+                        "round_id": round_id,
+                        "speaker_id": agent.agent_id,
+                        "speaker_role": agent.role,
+                        "deliberation_turn": turn_index,
+                    },
                 )
                 context.add_output(output)
                 result.outputs.append(output)
@@ -620,6 +654,7 @@ class IndependentSynthesisPattern:
             "configured_deliberation_rounds": rules.max_rounds,
             "effective_deliberation_rounds": rules.max_rounds,
             "deliberation_round_policy": "configured",
+            "deliberation_stop_reason": "not_started",
         }
 
         # Phase 1: Independent parallel review
@@ -666,6 +701,7 @@ class IndependentSynthesisPattern:
             ]
             if not deliberation_reviewers:
                 logger.error("No reviewers available for deliberation after Phase 1 failures.")
+                result_metadata["deliberation_stop_reason"] = "no_successful_reviewers"
             else:
                 if len(deliberation_reviewers) < len(reviewers):
                     excluded = [r.agent_id for r in reviewers if r.agent_id not in succeeded_ids]
@@ -681,18 +717,24 @@ class IndependentSynthesisPattern:
 
                 # Variance-triggered round adjustment: parse merit scores from
                 # Phase 1 outputs and adapt deliberation depth accordingly.
-                effective_rounds = rules.max_rounds
+                effective_rounds = (
+                    max(2, rules.max_rounds)
+                    if len(deliberation_reviewers) > 1
+                    else rules.max_rounds
+                )
+                if effective_rounds != rules.max_rounds:
+                    result_metadata["deliberation_round_policy"] = "raised_to_minimum_two_round_pc_panel"
                 merit_scores = _extract_merit_scores(phase1)
                 if len(merit_scores) >= 2:
                     score_spread = max(merit_scores) - min(merit_scores)
                     if score_spread <= 1.0:
-                        effective_rounds = rules.max_rounds
                         logger.info(
                             "[Kernel] Consensus achieved (spread=%.1f, scores=%s). "
                             "Preserving configured deliberation depth: %d rounds.",
                             score_spread, merit_scores, effective_rounds,
                         )
-                        result_metadata["deliberation_round_policy"] = "configured_preserved_low_score_spread"
+                        if result_metadata["deliberation_round_policy"] == "configured":
+                            result_metadata["deliberation_round_policy"] = "configured_preserved_low_score_spread"
                         if on_event:
                             on_event("consensus_detected", {
                                 "spread": score_spread,
@@ -701,7 +743,7 @@ class IndependentSynthesisPattern:
                                 "reason": "score spread is low, but configured rounds are preserved for review quality",
                             })
                     elif score_spread >= 2.0:
-                        effective_rounds = min(max(rules.max_rounds, 3), 4)
+                        effective_rounds = min(max(effective_rounds, 3), 4)
                         result_metadata["deliberation_round_policy"] = "deepened_high_score_spread"
                         logger.info(
                             "[Kernel] Contested reviews (spread=%.1f, scores=%s). "
@@ -733,6 +775,9 @@ class IndependentSynthesisPattern:
                 )
                 phase2.phase_name = "deliberation"
                 phases.append(phase2)
+                result_metadata["deliberation_stop_reason"] = "completed_effective_rounds"
+        else:
+            result_metadata["deliberation_stop_reason"] = "disabled_by_config"
 
         # Phase 3: Meta-review (synthesis)
         if on_event:
@@ -768,6 +813,18 @@ class IndependentSynthesisPattern:
                 "against the actual text. If a reviewer cites a section/figure/table, "
                 "check whether it says what they claim. Flag any reviewer who scores "
                 "inconsistently with their own stated weaknesses.\n\n"
+                "DELIBERATION AUDIT: Treat the deliberation transcript as PC-panel "
+                "evidence, not as noise. Identify which reviewers directly engaged "
+                "peer claims, which disagreements were resolved by evidence, which "
+                "disagreements remain, and whether any score moved because of the "
+                "discussion. The final review should reflect that debate in "
+                "`disagreements`, `decision_risk_notes`, `comments_for_pc`, and "
+                "the final recommendation rationale. Do not hide a real split panel "
+                "behind bland consensus language.\n\n"
+                "OFFLINE REVIEW OUTPUT: Populate every `final_review` field needed "
+                "for the SC Linklings offline form. ProtoNeo will deterministically "
+                "render the exact `.txt` template from those fields, so do not leave "
+                "offline-review dimensions blank.\n\n"
                 + "\n\n---\n\n".join(all_outputs)
                 + context_block
             ),

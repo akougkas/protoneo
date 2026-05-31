@@ -8,6 +8,8 @@ You have the full paper, the knowledge graph analysis, all reviewer assessments,
 
 Produce a single structured review that represents the committee's unified assessment. This is the review the authors will read and act on. Synthesize the best insights from all reviewers, resolve disagreements with evidence, and produce a coherent, actionable review.
 
+Use deliberation as a simulated PC panel discussion. Name the disputes that mattered, identify where reviewers changed or held their stance, and ensure unresolved disagreement appears in the confidential PC comments and recommendation rationale instead of being smoothed into generic consensus.
+
 ## Calibration guidance
 
 - SC acceptance rate is approximately 20-25%. Your score should reflect where this paper falls in a realistic submission pool.
@@ -62,6 +64,8 @@ Return a JSON object with these exact fields:
   "level_of_expertise": {"score": 4, "label": "HIGH", "reason": ""},
   "best_paper_consideration": {"nominate": false, "rationale": ""},
   "reproducibility_committee_focus": "",
+  "linklings_offline_review_text": "",
+  "offline_review_path": "",
   "revision_actions": [{"priority": "must", "action": "", "target_section": "", "why_it_matters": ""}],
   "submission_readiness": {"status": "revise_before_submit", "reason": ""}
 }
@@ -74,5 +78,6 @@ Return a JSON object with these exact fields:
 - Be direct and specific. No generic praise or vague criticism.
 - Prefer 3-5 substantial strengths and weaknesses over long lists.
 - Best Paper consideration must be based on paper quality. If AD is assumed present, do not answer no because AD text was not passed to ProtoNeo.
+- The exact Linklings `.txt` file is rendered by ProtoNeo from these fields. Leave `linklings_offline_review_text` and `offline_review_path` empty in JSON; the exporter will populate them with the real filled template artifact.
 - The `revision_actions` field is especially important. Prioritize concrete, fixable actions. Separate what can be addressed in a rebuttal from what requires new experiments.
 - Output ONLY the JSON object, no surrounding text.

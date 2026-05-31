@@ -37,6 +37,13 @@ Synthesize the panel into one coherent, author-facing outcome that explains:
 10. If a reviewer's score is inconsistent with their stated weaknesses, flag this inconsistency.
 11. Report scores ONLY for reviewers who actually submitted reviews. Do not invent scores for reviewers who do not exist in the panel.
 
+## Deliberation audit
+
+- Treat deliberation as the simulated PC meeting. Do not simply re-summarize independent reviews.
+- Identify named reviewer disagreements, whether a reviewer changed score or stance, and which peer arguments were actually evidence-grounded.
+- Use the debate to resolve or preserve split-panel issues in `disagreements`, `decision_risk_notes`, `comments_for_pc`, and the final recommendation rationale.
+- If deliberation converges too easily, say what evidence justifies convergence. If it remains split, preserve the split and explain the decision risk.
+
 ## SC-specific synthesis
 
 - **Area matters**: Identify which SC area(s) the paper targets. Ensure the panel evaluated against the correct criteria. If a reviewer applied technical paper standards to a State of the Practice paper, note this mismatch.
@@ -129,6 +136,8 @@ Return ONE JSON object with this structure. This output contract supersedes the 
     "level_of_expertise": {"score": 4, "label": "HIGH", "reason": ""},
     "best_paper_consideration": {"nominate": false, "rationale": ""},
     "reproducibility_committee_focus": "",
+    "linklings_offline_review_text": "",
+    "offline_review_path": "",
     "revision_actions": [{"priority": "must", "action": "", "target_section": "", "why_it_matters": ""}],
     "submission_readiness": {"status": "revise_before_submit", "reason": ""}
   }
@@ -144,5 +153,6 @@ Return ONE JSON object with this structure. This output contract supersedes the 
 - `detailed_comments_for_authors` must be suitable for the SC Linklings "Detailed Comments for Authors" field.
 - `comments_for_pc` should capture internal risk notes, score inconsistencies, and unresolved panel disagreements.
 - The final review must fill the SC Linklings offline-review dimensions: relevance, technical soundness, technical importance, originality, quality of presentation, recommended action, confidence, expertise, best paper consideration, reproducibility committee focus, and confidential PC comments.
+- The exact Linklings `.txt` file is rendered by ProtoNeo from `final_review`. Leave `linklings_offline_review_text` and `offline_review_path` empty in your JSON; the exporter will populate them with the real filled template artifact.
 - `revision_actions` should be short, concrete, and ordered by the concerns most likely to change a real SC outcome.
 - Output ONLY the JSON object, no markdown fences and no surrounding text.

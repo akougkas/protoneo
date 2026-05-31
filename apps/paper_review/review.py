@@ -578,6 +578,7 @@ def build_deliberation_config(
     """
     if reviewer_ids is None:
         reviewer_ids = ["technical", "novelty", "clarity", "skeptic"]
+    effective_rounds = 0 if max_rounds <= 0 else max(2, max_rounds)
     return DeliberationConfig(
         pattern="independent_synthesis",
         phases=[
@@ -590,7 +591,7 @@ def build_deliberation_config(
                 name="deliberation",
                 mode="round_robin",
                 agents=reviewer_ids,
-                max_rounds=max_rounds,
+                max_rounds=effective_rounds,
                 visibility="open",
             ),
             PhaseConfig(
@@ -773,6 +774,8 @@ def result_to_packet(
             round_entries: list[dict] = []
             for output in phase.outputs:
                 rnd = output.metadata.get("round", 1)
+                round_id = output.metadata.get("round_id") or f"round-{rnd}"
+                speaker_id = output.metadata.get("speaker_id") or output.agent_id
                 if rnd != current_round:
                     if round_entries:
                         deliberation_rounds.append(
@@ -785,10 +788,14 @@ def result_to_packet(
                     round_entries = []
                 round_entries.append(
                     {
-                        "round_id": f"round-{rnd}",
-                        "speaker_id": output.agent_id,
+                        "round_id": round_id,
+                        "speaker_id": speaker_id,
                         "agent_id": output.agent_id,
                         "role": output.agent_role,
+                        "model": output.metadata.get("model", ""),
+                        "turn_index": output.metadata.get("deliberation_turn"),
+                        "structured": output.structured or {},
+                        "metadata": output.metadata,
                         "content": output.content,
                     }
                 )
@@ -837,6 +844,8 @@ def result_to_packet(
             "presence_penalty": cfg.presence_penalty,
             "frequency_penalty": cfg.frequency_penalty,
         }
+    if result.metadata:
+        provenance["deliberation"] = result.metadata
 
     return ReviewPacket(
         session_id=result.session_id,
