@@ -153,6 +153,15 @@ REVIEW_QUALITY_INSTRUCTION = (
     "'lacks solid evidence for its key claims', or 'limiting its relevance'."
 )
 
+VISUAL_EVIDENCE_INSTRUCTION = (
+    "Meta-review evidence guardrail: verify reviewer numeric claims against the "
+    "Visual Evidence Ledger and the manuscript before repeating them. Treat "
+    "figure/table descriptions as evidence extracted from visual artifacts, not "
+    "as independent paper claims. Never convert graph limitations, parse "
+    "limitations, missing graph edges, undescribed figures, or low graph "
+    "extraction confidence into a paper weakness."
+)
+
 
 def normalize_artifact_description_status(
     value: Any = "",
@@ -194,6 +203,7 @@ def build_review_chair_instructions(
     else:
         parts.append(AD_NOT_PROVIDED_INSTRUCTION)
     parts.append(REVIEW_QUALITY_INSTRUCTION)
+    parts.append(VISUAL_EVIDENCE_INSTRUCTION)
     return "\n\n".join(part for part in parts if part)
 
 

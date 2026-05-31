@@ -70,3 +70,13 @@ def test_meta_fields_survive_packet_and_export():
     assert "AF" in markdown or "P" in markdown
     assert "Prioritized Revision Plan" in markdown
     assert "x" in markdown
+
+
+def test_meta_context_includes_visual_ledger_instruction():
+    text = rv.build_review_chair_instructions(
+        artifact_description_status="vision_grounded"
+    )
+    lowered = text.lower()
+    assert "visual evidence ledger" in lowered
+    assert "numeric claims" in lowered
+    assert "graph" in lowered and "paper weakness" in lowered
