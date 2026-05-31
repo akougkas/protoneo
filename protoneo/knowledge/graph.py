@@ -539,8 +539,8 @@ class KnowledgeGraph(BaseModel):
 
         self.update_stats()
 
-        _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
-        _NON_SEMANTIC_RELS = {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
+        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
+        _NON_SEMANTIC_RELS = {"HAS_SECTION", "CONTAINS", "HAS_ARTIFACT", "APPEARS_IN"}
 
         semantic = [n for n in self.nodes if n.node_type not in _STRUCTURAL]
         if not semantic:
@@ -555,9 +555,7 @@ class KnowledgeGraph(BaseModel):
         stats = self.graph_stats()
 
         lines = [
-            f"\n\n## Knowledge Graph Briefing"
-            f" ({stats['semantic_entities']} entities, "
-            f"{stats['connectivity_ratio']:.0%} connected)\n"
+            f"\n\n## Knowledge Graph Briefing ({stats['semantic_entities']} entities)\n"
         ]
 
         # ── Section 1: Key Claims ──
@@ -616,7 +614,7 @@ class KnowledgeGraph(BaseModel):
             lines.append(f"- Result: {r.label[:80]}{sec}")
 
         # Figures/tables referenced by semantic entities
-        _VISUAL_TYPES = {"Diagram", "Table"}
+        _VISUAL_TYPES = {"Diagram", "Figure", "Table"}
         visual_nodes = {n.id: n for n in self.nodes if n.node_type in _VISUAL_TYPES}
         if visual_nodes:
             referenced_visuals: list[str] = []
@@ -640,14 +638,26 @@ class KnowledgeGraph(BaseModel):
                 sec = f" [{lim.source_section}]" if lim.source_section else ""
                 lines.append(f"- {lim.label[:80]}{sec}")
 
-        # ── Section 5: Potential Concerns ──
+        # ── Section 5: Extraction-quality notes ──
         low_confidence = [n for n in semantic if n.confidence < 0.5]
         if low_confidence:
-            lines.append("\n### Potential Concerns")
-            lines.append("*Entities flagged by verification (confidence < 0.5):*")
+            lines.append("\n### Graph Extraction Notes")
+            lines.append(
+                "*These are graph-extraction confidence flags, NOT paper weaknesses. "
+                "Do not treat them as reviewer findings.*"
+            )
             for n in sorted(low_confidence, key=lambda x: x.confidence)[:8]:
+                lines.append(f"- {n.label} ({n.node_type})")
+
+        visual = [
+            n for n in self.nodes
+            if n.node_type in ("Figure", "Table") and n.attributes.get("description")
+        ]
+        if visual:
+            lines.append("\n### Visual Evidence (vision-grounded)")
+            for node in visual[:8]:
                 lines.append(
-                    f"- {n.label} ({n.node_type}, confidence={n.confidence:.2f})"
+                    f"- {node.label[:60]}: {node.attributes['description'][:160]}"
                 )
 
         # ── Coverage stats (compact) ──
@@ -930,8 +940,8 @@ class KnowledgeGraph(BaseModel):
         No opinions, no gap judgments. Just topology facts that describe
         what the graph contains and how connected it is.
         """
-        _STRUCTURAL = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
-        _STRUCTURAL_RELS = {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
+        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
+        _STRUCTURAL_RELS = {"HAS_SECTION", "CONTAINS", "HAS_ARTIFACT", "APPEARS_IN"}
 
         semantic = [n for n in self.nodes if n.node_type not in _STRUCTURAL]
         sem_edges = [e for e in self.edges if e.edge_type not in _STRUCTURAL_RELS]
@@ -954,6 +964,7 @@ class KnowledgeGraph(BaseModel):
         for e in sem_edges:
             edge_dist[e.edge_type] += 1
 
+        visual = [n for n in self.nodes if n.node_type in ("Figure", "Table")]
         return {
             "semantic_entities": len(semantic),
             "semantic_edges": len(sem_edges),
@@ -964,4 +975,8 @@ class KnowledgeGraph(BaseModel):
             "entity_types": len(set(n.node_type for n in semantic)),
             "edge_types": len(edge_dist),
             "edge_distribution": dict(sorted(edge_dist.items(), key=lambda x: -x[1])),
+            "visual_evidence_count": len(visual),
+            "described_artifact_count": sum(
+                1 for n in visual if n.attributes.get("description")
+            ),
         }

@@ -55,3 +55,24 @@ def test_pipeline_ingests_document_figures():
     doc_meta = {"figures": _figs(), "tables": []}
     g.ingest_visual_evidence(doc_meta.get("figures"), doc_meta.get("tables"))
     assert any(node.node_type == "Figure" for node in g.nodes)
+
+
+def test_briefing_has_visual_section_and_no_connectivity_overstatement():
+    g = KnowledgeGraph()
+    g.add_node("P", "Paper", node_id="paper-root")
+    g.add_node("VisionHPC", "Method")
+    g.ingest_visual_evidence(_figs(), [])
+    briefing = g.to_agent_briefing()
+    assert "Visual Evidence" in briefing
+    assert "VisionHPC 4.2x" in briefing
+    assert "% connected" not in briefing
+
+
+def test_d3_marks_visual_nodes_and_provenance():
+    g = KnowledgeGraph()
+    g.add_node("P", "Paper", node_id="paper-root")
+    g.ingest_visual_evidence(_figs(), [])
+    d3 = g.to_d3_format()
+    fig = [node for node in d3["nodes"] if node["type"] == "Figure"][0]
+    assert fig["attributes"]["grounding"] == "visual"
+    assert fig["attributes"]["image_path"] == "/u/f1.png"
