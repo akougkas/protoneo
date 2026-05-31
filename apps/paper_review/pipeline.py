@@ -268,6 +268,31 @@ def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
     return result
 
 
+def _build_visual_evidence_ledger(graph: KnowledgeGraph) -> str:
+    """Concise, reviewer-safe ledger of vision-grounded figure/table descriptions."""
+    visual = [
+        n for n in graph.nodes
+        if n.node_type in ("Figure", "Table") and n.attributes.get("description")
+    ]
+    if not visual:
+        return ""
+
+    lines = [
+        "\n\n## Visual Evidence Ledger\n",
+        "Vision-model descriptions of figures/tables. Treat numeric claims as "
+        "extracted-from-figure and cross-check against the manuscript text.",
+    ]
+    for node in visual[:12]:
+        page = node.attributes.get("page", "?")
+        claims = node.attributes.get("numeric_claims") or []
+        claim_text = f" Numeric: {'; '.join(claims[:4])}." if claims else ""
+        lines.append(
+            f"- {node.label[:60]} (p.{page}): "
+            f"{node.attributes['description'][:240]}{claim_text}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _build_enriched_review_message(user_message: str, graph: KnowledgeGraph) -> str:
     """Append graph summary and structured analysis for all reviewer agents."""
     parts = [user_message]
@@ -288,6 +313,9 @@ def _build_enriched_review_message(user_message: str, graph: KnowledgeGraph) -> 
             "No reviewer-facing graph summary is available for this session.\n"
         )
     parts.append(_build_review_graph_analysis(graph))
+    ledger = _build_visual_evidence_ledger(graph)
+    if ledger:
+        parts.append(ledger)
     return "\n\n".join(p.strip() for p in parts if p)
 
 
