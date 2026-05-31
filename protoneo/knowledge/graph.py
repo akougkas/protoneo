@@ -359,6 +359,52 @@ class KnowledgeGraph(BaseModel):
 
         self.update_stats()
 
+    def ingest_visual_evidence(
+        self,
+        figures: list[dict[str, Any]] | None,
+        tables: list[dict[str, Any]] | None,
+    ) -> int:
+        """Add figure/table images as provenance-bearing visual-evidence nodes."""
+        added = 0
+        root = self.node_by_id("paper-root")
+
+        for kind, items in (("Figure", figures or []), ("Table", tables or [])):
+            for artifact in items:
+                described = bool(artifact.get("description"))
+                label_source = (
+                    artifact.get("caption")
+                    or artifact.get("description")
+                    or f"{kind} {artifact.get('index', '?')}"
+                )
+                node = self.add_node(
+                    label=f"{kind} {artifact.get('index', '?')}: {str(label_source)[:80]}",
+                    node_type=kind,
+                    description=artifact.get("description", ""),
+                    source_section=artifact.get("source_section", ""),
+                    source_text=artifact.get("caption", ""),
+                    confidence=float(artifact.get("confidence", 0.0)) if described else 0.0,
+                    attributes={
+                        "kind": artifact.get("kind", kind.lower()),
+                        "page": artifact.get("page", 0),
+                        "bbox": artifact.get("bbox", {}),
+                        "image_path": artifact.get("image_path", ""),
+                        "caption": artifact.get("caption", ""),
+                        "description": artifact.get("description", ""),
+                        "description_source": artifact.get("description_source", "none"),
+                        "numeric_claims": artifact.get("numeric_claims", []),
+                        "model": artifact.get("model", ""),
+                        "endpoint": artifact.get("endpoint", ""),
+                        "grounding": artifact.get("grounding", "extracted_no_vlm"),
+                    },
+                )
+                if root is not None and root.id != node.id:
+                    self.add_edge(root.id, node.id, "HAS_ARTIFACT")
+                added += 1
+
+        if added:
+            self.update_stats()
+        return added
+
     def ingest_d3_data(self, data: dict[str, Any]) -> None:
         """Absorb nodes and edges from GraphPanel / D3 format.
 
