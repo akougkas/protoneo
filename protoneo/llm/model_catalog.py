@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .errors import classify_model_error
 from .registry import CapabilityRegistry
 from .settings import ProtoNeoSettings, endpoint_map, provider_is_enabled
 from .types import ModelCapability, ModelInfo, ModelTier
@@ -71,6 +72,42 @@ def _entry_availability(entry: dict[str, Any]) -> tuple[str, str]:
         availability = "available"
     reason = str(entry.get("availability_reason") or "").strip()
     return availability, reason
+
+
+def _provider_health(settings: ProtoNeoSettings) -> dict[str, dict[str, Any]]:
+    """Infer provider-wide health from recent persisted benchmark failures."""
+    health: dict[str, dict[str, Any]] = {}
+    for result in settings.benchmark_results or []:
+        if not isinstance(result, dict):
+            continue
+        provider_id = str(result.get("provider") or "")
+        if not provider_id:
+            continue
+        messages = [str(result.get("error") or "")]
+        dimensions = result.get("dimensions") or {}
+        if isinstance(dimensions, dict):
+            for dim in dimensions.values():
+                if isinstance(dim, dict) and dim.get("error"):
+                    messages.append(str(dim.get("error") or ""))
+
+        for message in messages:
+            status, summary = classify_model_error(message)
+            if not status:
+                continue
+            if status == "quota_limited":
+                health[provider_id] = {
+                    "health_status": status,
+                    "health_message": summary,
+                    "review_routable": False,
+                }
+                break
+            if provider_id not in health:
+                health[provider_id] = {
+                    "health_status": status,
+                    "health_message": summary,
+                    "review_routable": True,
+                }
+    return health
 
 
 def normalize_model_entry(
@@ -153,6 +190,9 @@ def normalize_model_entry(
         "custom": bool(entry.get("custom", False)),
         "availability": availability,
         "availability_reason": availability_reason,
+        "health_status": str(entry.get("health_status") or ""),
+        "health_message": str(entry.get("health_message") or ""),
+        "review_routable": bool(entry.get("review_routable", True)),
         "supported_in_api": entry.get("supported_in_api"),
         "standard_openai_api_supported": entry.get("standard_openai_api_supported", entry.get("supported_in_api")),
         "catalog_visibility": str(entry.get("catalog_visibility") or ""),
@@ -206,6 +246,12 @@ def build_model_catalog(
             source="active_selection",
         )
         catalog_by_id[qualified_id] = normalized
+
+    health = _provider_health(settings)
+    for model in catalog_by_id.values():
+        provider_health = health.get(str(model.get("provider_id") or ""))
+        if provider_health:
+            model.update(provider_health)
 
     return sorted(
         catalog_by_id.values(),

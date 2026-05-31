@@ -396,6 +396,76 @@ class TestLLMClient:
         assert "summary" not in captured["json"]["reasoning"]
 
     @pytest.mark.asyncio
+    async def test_openai_codex_stream_yields_sse_deltas(self, monkeypatch):
+        captured = {}
+
+        class FakeStreamResponse:
+            status_code = 200
+
+            async def aiter_lines(self):
+                for line in [
+                    'data: {"type":"response.output_text.delta","delta":"O"}',
+                    'data: {"type":"response.output_text.delta","delta":"K"}',
+                    'data: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}',
+                    "data: [DONE]",
+                ]:
+                    yield line
+
+        class FakeStreamContext:
+            async def __aenter__(self):
+                return FakeStreamResponse()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                captured["session_kwargs"] = kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, method, url, headers=None, json=None):
+                captured["method"] = method
+                captured["url"] = url
+                captured["headers"] = headers or {}
+                captured["json"] = json or {}
+                return FakeStreamContext()
+
+        monkeypatch.setattr("curl_cffi.requests.AsyncSession", FakeSession)
+
+        payload = {"https://api.openai.com/auth": {"chatgpt_account_id": "acct_test"}}
+        encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        token = f"header.{encoded_payload}.signature"
+        reg = CapabilityRegistry(load_builtins=False)
+        reg.register(ModelInfo(
+            model_id="openai/gpt-5.3-codex-spark",
+            provider="openai",
+            capabilities={
+                ModelCapability.EXTENDED_THINKING,
+                ModelCapability.REASONING_CONTROL,
+            },
+        ))
+        client = LLMClient(registry=reg, api_keys={"openai": token})
+        usage = {}
+
+        chunks = []
+        async for chunk in client.stream(
+            "openai/gpt-5.3-codex-spark",
+            [{"role": "user", "content": "Reply OK"}],
+            reasoning_effort="xhigh",
+            usage_callback=lambda u: usage.update(u),
+        ):
+            chunks.append(chunk)
+
+        assert "".join(chunks) == "OK"
+        assert usage == {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+        assert captured["json"]["reasoning"] == {"effort": "xhigh"}
+
+    @pytest.mark.asyncio
     async def test_complete_recovers_json_payload_inside_thinking(self):
         reg = CapabilityRegistry(load_builtins=False)
         reg.register(ModelInfo(model_id="test/model", provider="test"))
@@ -843,6 +913,36 @@ class TestSettingsRouting:
 
         assert by_id["openai/gpt-5.5-codex"]["is_free"] is False
         assert by_id["openrouter/google/gemma-4-31b-it:free"]["is_free"] is True
+
+    def test_model_catalog_marks_openrouter_free_quota_exhausted(self):
+        settings = ProtoNeoSettings(
+            provider_enabled={"openrouter": True},
+            discovered_models={
+                "openrouter": [
+                    {
+                        "id": "nvidia/nemotron-3-super-120b-a12b:free",
+                        "source": "openrouter",
+                        "provider_type": "api",
+                        "is_free": True,
+                    }
+                ]
+            },
+            benchmark_results=[
+                {
+                    "provider": "openrouter",
+                    "model_id": "google/gemma-4-26b-a4b-it:free",
+                    "status": "error",
+                    "error": "Rate limit exceeded: free-models-per-day",
+                }
+            ],
+        )
+
+        catalog = build_model_catalog(settings, CapabilityRegistry.from_settings(settings))
+        model = next(item for item in catalog if item["provider_id"] == "openrouter")
+
+        assert model["health_status"] == "quota_limited"
+        assert model["review_routable"] is False
+        assert "quota" in model["health_message"].lower()
 
 
 class TestCapabilityBenchmark:

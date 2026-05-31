@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from ..agents.base import BaseAgent
 from ..agents.types import Message
+from ..llm.errors import sanitize_error_message
 from ..config.schema import AgentConfig, DeliberationConfig, PhaseConfig
 from ..llm.client import LLMClient
 from .patterns import (
@@ -111,10 +112,11 @@ class DeliberationEngine:
             return result
 
         except Exception as e:
+            error = sanitize_error_message(e)
             session.status = SessionStatus.FAILED
-            session.error = str(e)
+            session.error = error
             await self.session_manager.update(session)
-            logger.error("Session %s failed: %s", session_id, e)
+            logger.error("Session %s failed: %s", session_id, error)
             raise
 
     async def _execute_pattern(

@@ -33,6 +33,7 @@ from protoneo.deliberation.session import SessionStatus, StepState
 from protoneo.knowledge.chunker import chunk_document
 from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.knowledge.parser import parse_file
+from protoneo.llm.errors import sanitize_error_message
 from protoneo.llm.settings import build_vlm_config
 
 from .conference import ConferenceProfile, list_profiles, load_profile
@@ -1395,8 +1396,9 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
         except asyncio.CancelledError:
             bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
         except Exception as e:
-            logger.error("Review failed for session %s: %s", sid, e, exc_info=True)
-            bus.emit("error", {"detail": str(e)})
+            error = sanitize_error_message(e)
+            logger.error("Review failed for session %s: %s", sid, error, exc_info=True)
+            bus.emit("error", {"detail": error})
         finally:
             get_pipeline_controls().pop(sid, None)
 
@@ -1749,13 +1751,14 @@ async def review_with_graph(
                 await _session_manager.update(sess)
             bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
         except Exception as e:
-            logger.error("Review failed for session %s: %s", sid, e, exc_info=True)
+            error = sanitize_error_message(e)
+            logger.error("Review failed for session %s: %s", sid, error, exc_info=True)
             sess = await _session_manager.get(sid)
             if sess:
                 sess.status = SessionStatus.FAILED
-                sess.error = str(e)
+                sess.error = error
                 await _session_manager.update(sess)
-            bus.emit("error", {"detail": str(e)})
+            bus.emit("error", {"detail": error})
         finally:
             get_pipeline_controls().pop(sid, None)
 

@@ -19,6 +19,8 @@ import re
 import time
 from typing import Any
 
+from .errors import sanitize_error_message
+
 logger = logging.getLogger("protoneo.llm.benchmark")
 
 BENCHMARK_VERSION = "capability-5d-v2"
@@ -37,23 +39,6 @@ _REASONING_MODEL_HINTS = (
     "reasoning", "thinking", "qwen3.5", "qwen35", "qwen3", "-i1",
     "o1", "o3", "o4", "deepseek-r1",
 )
-
-_SENSITIVE_ERROR_PATTERNS = (
-    (re.compile(r'("user_id"\s*:\s*)"[^"]+"'), r'\1"[redacted]"'),
-    (re.compile(r'("api_key"\s*:\s*)"[^"]+"', re.IGNORECASE), r'\1"[redacted]"'),
-    (re.compile(r'("access_token"\s*:\s*)"[^"]+"', re.IGNORECASE), r'\1"[redacted]"'),
-    (re.compile(r'("refresh_token"\s*:\s*)"[^"]+"', re.IGNORECASE), r'\1"[redacted]"'),
-    (re.compile(r'(Bearer\s+)[A-Za-z0-9._~+/=-]+', re.IGNORECASE), r'\1[redacted]'),
-    (re.compile(r'\b(sk-[A-Za-z0-9_-]{12,})\b'), "[redacted]"),
-)
-
-
-def sanitize_error_message(error: object) -> str:
-    """Strip provider/account identifiers from UI-facing benchmark errors."""
-    message = str(error)
-    for pattern, replacement in _SENSITIVE_ERROR_PATTERNS:
-        message = pattern.sub(replacement, message)
-    return message
 
 
 # ── Dimension 1: JSON Compliance ─────────────────────────────

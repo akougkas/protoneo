@@ -25,6 +25,7 @@ from protoneo.config.schema import AgentConfig, DeliberationConfig
 from protoneo.deliberation.session import SessionStatus, StageCheckpoint
 from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.graph import KnowledgeGraph
+from protoneo.llm.errors import sanitize_error_message
 from .conference import ConferenceProfile
 from .prompts import apply_output_guardrails, prompt_pack_no_chain_of_thought
 from .review import (
@@ -703,13 +704,14 @@ async def _run_graph_pipeline(
         logger.info("Pipeline cancelled for session %s", sid)
         bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
     except Exception as e:
-        logger.error("Pipeline failed for session %s: %s", sid, e, exc_info=True)
+        error = sanitize_error_message(e)
+        logger.error("Pipeline failed for session %s: %s", sid, error, exc_info=True)
         session = await _session_manager.get(sid)
         if session:
             session.status = SessionStatus.FAILED
-            session.error = str(e)
+            session.error = error
             await _session_manager.update(session)
-        bus.emit("error", {"detail": str(e)})
+        bus.emit("error", {"detail": error})
     finally:
         _pipeline_controls.pop(sid, None)
         # Clean up per-session caches to avoid unbounded memory growth

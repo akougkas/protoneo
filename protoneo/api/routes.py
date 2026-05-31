@@ -160,8 +160,11 @@ async def _run_with_events(
         )
         bus.emit("completed", {"result": result.model_dump(mode="json")})
     except Exception as e:
-        logger.error("Deliberation failed for session %s: %s", session_id, e)
-        bus.emit("error", {"detail": str(e)})
+        from ..llm.errors import sanitize_error_message
+
+        error = sanitize_error_message(e)
+        logger.error("Deliberation failed for session %s: %s", session_id, error)
+        bus.emit("error", {"detail": error})
 
 
 async def _auto_discover_after_login():

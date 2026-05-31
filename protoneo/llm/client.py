@@ -29,6 +29,7 @@ from litellm.exceptions import (
 )
 
 from .policies import policy_for_label
+from .errors import sanitize_error_message
 from .registry import CapabilityRegistry
 from .structured import extract_json_value, strip_thinking_output
 from .types import LLMResponse, ModelCapability, ModelInfo, TokenUsage
@@ -54,6 +55,7 @@ _RETRYABLE_EXCEPTIONS = (
 # OpenAI Codex (ChatGPT subscription) endpoint
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 _CODEX_JWT_CLAIM = "https://api.openai.com/auth"
+_CODEX_TIMEOUT_SECONDS = 600
 
 
 def _is_anthropic_oauth(provider: str, api_key: str) -> bool:
@@ -122,30 +124,19 @@ class LLMClient:
 
     # ── Direct provider calls (subscription OAuth) ───────────
 
-    async def _call_openai_codex(
+    def _build_openai_codex_request(
         self,
         token: str,
         messages: list[dict],
         model_id: str,
-        temperature: float = 1,
-        max_tokens: int | None = None,
         reasoning_effort: str | None = None,
-    ) -> LLMResponse:
-        """Call OpenAI Codex Responses API (chatgpt.com/backend-api).
-
-        Uses the Codex Responses SSE endpoint at chatgpt.com/backend-api/codex/responses.
-        Requires curl_cffi for TLS impersonation (Cloudflare blocks standard Python clients).
-        The API requires stream=True, store=False, and an instructions field.
-        Does not support temperature, max_output_tokens, or other standard OpenAI params.
-        """
-        from curl_cffi.requests import AsyncSession
-
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        """Build the ChatGPT/Codex Responses request body and headers."""
         account_id = _extract_openai_account_id(token)
         if not account_id:
             raise ValueError("Cannot extract accountId from OpenAI OAuth token")
 
-        # Convert messages to Codex Responses API format
-        input_items = []
+        input_items: list[dict[str, Any]] = []
         system_text = "You are a helpful assistant."
         for msg in messages:
             role = msg.get("role", "user")
@@ -178,7 +169,49 @@ class LLMClient:
             "Accept": "text/event-stream",
         }
 
-        async with AsyncSession(impersonate="chrome", timeout=120) as client:
+        return headers, body
+
+    @staticmethod
+    def _parse_codex_sse_line(line: str) -> tuple[str, dict[str, Any] | None, bool]:
+        """Return ``(text_delta, usage, done)`` for one SSE line."""
+        line = line.strip()
+        if not line.startswith("data: "):
+            return "", None, False
+        payload = line[6:]
+        if payload == "[DONE]":
+            return "", None, True
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            return "", None, False
+
+        etype = event.get("type", "")
+        if etype == "response.output_text.delta":
+            return str(event.get("delta", "")), None, False
+        if etype == "response.completed":
+            return "", event.get("response", {}).get("usage", {}) or {}, False
+        return "", None, False
+
+    async def _call_openai_codex(
+        self,
+        token: str,
+        messages: list[dict],
+        model_id: str,
+        temperature: float = 1,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """Call OpenAI Codex Responses API (chatgpt.com/backend-api)."""
+        from curl_cffi.requests import AsyncSession
+
+        headers, body = self._build_openai_codex_request(
+            token,
+            messages,
+            model_id,
+            reasoning_effort=reasoning_effort,
+        )
+
+        async with AsyncSession(impersonate="chrome", timeout=_CODEX_TIMEOUT_SECONDS) as client:
             resp = await client.post(
                 f"{_CODEX_BASE_URL}/codex/responses",
                 headers=headers,
@@ -186,28 +219,19 @@ class LLMClient:
             )
             if resp.status_code != 200:
                 raise RuntimeError(
-                    f"OpenAI Codex API error {resp.status_code}: {resp.text[:500]}"
+                    f"OpenAI Codex API error {resp.status_code}: {sanitize_error_message(resp.text[:500])}"
                 )
 
         # Parse SSE response to extract content and usage
         content = ""
         usage_data = {}
         for line in resp.text.split("\n"):
-            line = line.strip()
-            if not line.startswith("data: "):
-                continue
-            payload = line[6:]
-            if payload == "[DONE]":
+            delta, usage_update, done = self._parse_codex_sse_line(line)
+            if done:
                 break
-            try:
-                event = json.loads(payload)
-                etype = event.get("type", "")
-                if etype == "response.output_text.delta":
-                    content += event.get("delta", "")
-                elif etype == "response.completed":
-                    usage_data = event.get("response", {}).get("usage", {})
-            except json.JSONDecodeError:
-                pass
+            content += delta
+            if usage_update is not None:
+                usage_data = usage_update
 
         usage = TokenUsage(
             prompt_tokens=usage_data.get("input_tokens", 0),
@@ -216,6 +240,52 @@ class LLMClient:
         )
 
         return LLMResponse(content=content, model=model_id, usage=usage, raw={})
+
+    async def _stream_openai_codex(
+        self,
+        token: str,
+        messages: list[dict],
+        model_id: str,
+        reasoning_effort: str | None = None,
+        usage_callback: Callable[[dict[str, int]], None] | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream OpenAI Codex Responses API deltas."""
+        from curl_cffi.requests import AsyncSession
+
+        headers, body = self._build_openai_codex_request(
+            token,
+            messages,
+            model_id,
+            reasoning_effort=reasoning_effort,
+        )
+
+        async with AsyncSession(impersonate="chrome", timeout=_CODEX_TIMEOUT_SECONDS) as client:
+            async with client.stream(
+                "POST",
+                f"{_CODEX_BASE_URL}/codex/responses",
+                headers=headers,
+                json=body,
+            ) as resp:
+                if resp.status_code != 200:
+                    raw = await resp.acontent()
+                    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+                    raise RuntimeError(
+                        f"OpenAI Codex API error {resp.status_code}: {sanitize_error_message(text[:500])}"
+                    )
+
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+                    delta, usage_update, done = self._parse_codex_sse_line(line)
+                    if done:
+                        break
+                    if usage_update is not None and usage_callback:
+                        usage_callback({
+                            "prompt_tokens": int(usage_update.get("input_tokens", 0) or 0),
+                            "completion_tokens": int(usage_update.get("output_tokens", 0) or 0),
+                            "total_tokens": int(usage_update.get("total_tokens", 0) or 0),
+                        })
+                    if delta:
+                        yield delta
 
     # ── LiteLLM kwargs builder (for non-subscription providers) ──
 
@@ -535,26 +605,18 @@ class LLMClient:
         # through the ChatGPT Codex endpoint.
         has_local_endpoint = "api_base" in kwargs or bool(info.api_base)
 
-        # Subscription providers with direct HTTP paths do not yet expose
-        # native streaming here, so reuse complete() and yield one chunk.
         if api_key and not has_local_endpoint:
             if _is_openai_oauth(provider, api_key):
-                response = await self.complete(
-                    model=model,
+                direct_overrides = self._filter_request_overrides(info, kwargs)
+                raw_model = model.split("/", 1)[1] if "/" in model else model
+                async for chunk in self._stream_openai_codex(
+                    token=api_key,
                     messages=messages,
-                    session_id=session_id,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **kwargs,
-                )
-                if usage_callback:
-                    usage_callback({
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens,
-                    })
-                if response.content:
-                    yield response.content
+                    model_id=raw_model,
+                    reasoning_effort=direct_overrides.get("reasoning_effort"),
+                    usage_callback=usage_callback,
+                ):
+                    yield chunk
                 return
 
         call_overrides: dict[str, Any] = {

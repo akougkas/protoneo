@@ -631,7 +631,7 @@ function modelProviderId(model) {
 }
 
 function modelIsRoutable(model) {
-  return model?.availability !== 'unsupported'
+  return model?.availability !== 'unsupported' && model?.review_routable !== false
 }
 
 function modelFullId(model) {
@@ -863,6 +863,8 @@ function modelLabel(m) {
   const suffix = []
   if (m.context_length) suffix.push(`${Math.round(m.context_length / 1000)}K ctx`)
   if (m.availability === 'unverified') suffix.push('unverified')
+  if (m.health_status === 'quota_limited') suffix.push('quota exhausted')
+  else if (m.health_status === 'rate_limited') suffix.push('rate limited')
   if (m.is_free) suffix.push('free')
   if (m.display_name && m.display_name !== mid) {
     return prefix + `${mid} (${[m.display_name, ...suffix].join(' \u00b7 ')})`
@@ -894,6 +896,7 @@ function modelDetail(modelId) {
     if (catalog.supports_reasoning_effort) parts.push('reasoning')
     if (catalog.is_free) parts.push('free')
     if (catalog.availability === 'unverified') parts.push('unverified catalog')
+    if (catalog.health_message) parts.push(catalog.health_message)
     return parts.filter(Boolean).join(' \u00b7 ')
   }
 

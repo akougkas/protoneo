@@ -15,6 +15,7 @@ from typing import Callable
 
 from ..agents.base import BaseAgent
 from ..agents.types import AgentOutput, Message
+from ..llm.errors import sanitize_error_message
 from .session import SessionContext
 from .types import DeliberationResult, DeliberationRules, PhaseResult
 
@@ -175,10 +176,11 @@ class ParallelPattern:
         for i, r in enumerate(results):
             if isinstance(r, Exception):
                 agent = agents[i]
-                logger.warning("Agent %s (%s) failed in parallel phase: %s (will retry)", agent.agent_id, agent.role, r)
+                error = sanitize_error_message(r)
+                logger.warning("Agent %s (%s) failed in parallel phase: %s (will retry)", agent.agent_id, agent.role, error)
                 retry_agents.append(agent)
                 if on_event:
-                    on_event("agent_warning", {"agent_id": agent.agent_id, "role": agent.role, "message": f"Failed: {r}. Retrying..."})
+                    on_event("agent_warning", {"agent_id": agent.agent_id, "role": agent.role, "message": f"Failed: {error}. Retrying..."})
                 continue
             response, output = r
             # Fix 1: Check for empty content after thinking-strip
@@ -225,15 +227,16 @@ class ParallelPattern:
                             "error": "Empty output after retry",
                         })
             except Exception as retry_exc:
-                logger.error("Retry failed for agent %s: %s", agent.agent_id, retry_exc)
+                error = sanitize_error_message(retry_exc)
+                logger.error("Retry failed for agent %s: %s", agent.agent_id, error)
                 failed_agents.append({
                     "agent_id": agent.agent_id, "role": agent.role,
-                    "error": str(retry_exc),
+                    "error": error,
                 })
                 if on_event:
                     on_event("agent_error", {
                         "agent_id": agent.agent_id, "role": agent.role,
-                        "error": f"Retry failed: {retry_exc}",
+                        "error": f"Retry failed: {error}",
                     })
 
         result.failed_agents = failed_agents
@@ -497,9 +500,10 @@ class RoundRobinPattern:
                             context, msg, include_history=False,
                         )
                 except Exception as exc:
+                    error = sanitize_error_message(exc)
                     logger.warning(
                         "Agent %s (%s) failed in round %d: %s (retrying once)",
-                        agent.agent_id, agent.role, round_num + 1, exc,
+                        agent.agent_id, agent.role, round_num + 1, error,
                     )
                     try:
                         if stream and on_event:
@@ -514,22 +518,23 @@ class RoundRobinPattern:
                                 context, msg, include_history=False,
                             )
                     except Exception as retry_exc:
+                        error = sanitize_error_message(retry_exc)
                         logger.error(
                             "Agent %s (%s) retry failed in round %d: %s",
-                            agent.agent_id, agent.role, round_num + 1, retry_exc,
+                            agent.agent_id, agent.role, round_num + 1, error,
                         )
                         if on_event:
                             on_event("agent_error", {
                                 "agent_id": agent.agent_id,
                                 "role": agent.role,
                                 "round": round_num + 1,
-                                "error": str(retry_exc),
+                                "error": error,
                             })
                         result.failed_agents.append({
                             "agent_id": agent.agent_id,
                             "role": agent.role,
                             "round": round_num + 1,
-                            "error": str(retry_exc),
+                            "error": error,
                         })
                         continue
 

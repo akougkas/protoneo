@@ -213,10 +213,13 @@
               <span v-if="selectedModelMeta('openrouter').registry?.supports_tools" class="meta-chip">tools</span>
               <span v-if="selectedModelMeta('openrouter').availability === 'unsupported'" class="meta-chip bad">unsupported</span>
               <span v-else-if="selectedModelMeta('openrouter').availability === 'unverified'" class="meta-chip warn">unverified</span>
+              <span v-if="selectedModelMeta('openrouter').health_status === 'quota_limited'" class="meta-chip bad">quota exhausted</span>
+              <span v-else-if="selectedModelMeta('openrouter').health_status === 'rate_limited'" class="meta-chip warn">rate limited</span>
               <span v-if="selectedModelMeta('openrouter').benchmark" :class="['class-chip', selectedModelMeta('openrouter').benchmark.protoneo_class]">
                 {{ selectedModelMeta('openrouter').benchmark.protoneo_class }}
               </span>
             </div>
+            <div v-if="selectedModelMeta('openrouter')?.health_message" class="card-nudge">{{ selectedModelMeta('openrouter').health_message }}</div>
             <div v-if="selectedModelMeta('openrouter')?.supports_reasoning_effort" class="reasoning-row">
               <label class="select-label">Reasoning effort:</label>
               <select class="provider-model-select" :value="activeReasoningEffort('openrouter')" @change="setReasoningEffort('openrouter', $event.target.value)" :disabled="!isProviderEnabled('openrouter')">
@@ -283,11 +286,14 @@
               <span v-if="selectedModelMeta(p.provider).registry?.supports_tools" class="meta-chip">tools</span>
               <span v-if="selectedModelMeta(p.provider).availability === 'unsupported'" class="meta-chip bad">unsupported</span>
               <span v-else-if="selectedModelMeta(p.provider).availability === 'unverified'" class="meta-chip warn">unverified</span>
+              <span v-if="selectedModelMeta(p.provider).health_status === 'quota_limited'" class="meta-chip bad">quota exhausted</span>
+              <span v-else-if="selectedModelMeta(p.provider).health_status === 'rate_limited'" class="meta-chip warn">rate limited</span>
               <span v-if="selectedModelMeta(p.provider).benchmark" :class="['class-chip', selectedModelMeta(p.provider).benchmark.protoneo_class]">
                 {{ selectedModelMeta(p.provider).benchmark.protoneo_class }}
               </span>
             </div>
             <div v-if="selectedModelMeta(p.provider)?.availability_reason" class="card-nudge">{{ selectedModelMeta(p.provider).availability_reason }}</div>
+            <div v-if="selectedModelMeta(p.provider)?.health_message" class="card-nudge">{{ selectedModelMeta(p.provider).health_message }}</div>
             <div v-if="selectedModelMeta(p.provider)?.supports_reasoning_effort" class="reasoning-row">
               <label class="select-label">Reasoning effort:</label>
               <select class="provider-model-select" :value="activeReasoningEffort(p.provider)" @change="setReasoningEffort(p.provider, $event.target.value)" :disabled="!isProviderEnabled(p.provider)">
@@ -741,6 +747,9 @@ const activeModelList = computed(() => {
       discovery_source: registry?.discovery_source || model?.discovery_source || '',
       availability: registry?.availability || model?.availability || 'available',
       availability_reason: registry?.availability_reason || model?.availability_reason || '',
+      health_status: registry?.health_status || model?.health_status || '',
+      health_message: registry?.health_message || model?.health_message || '',
+      review_routable: registry?.review_routable ?? model?.review_routable ?? true,
       registry,
     })
   }
@@ -842,7 +851,8 @@ function modelOptionLabel(model) {
   const free = model.is_free === true ? ' · free' : ''
   const fallback = model.discovery_source && model.discovery_source !== 'live' ? ` · ${model.discovery_source}` : ''
   const availability = model.availability === 'unsupported' ? ' · unavailable' : model.availability === 'unverified' ? ' · unverified' : ''
-  return `${name}${ctx}${free}${fallback}${availability}`
+  const health = model.health_status === 'quota_limited' ? ' · quota exhausted' : model.health_status === 'rate_limited' ? ' · rate limited' : ''
+  return `${name}${ctx}${free}${fallback}${availability}${health}`
 }
 
 function modelOptionDisabled(model) {
@@ -871,6 +881,9 @@ function selectedModelMeta(provider) {
     supported_reasoning_efforts: registry?.supported_reasoning_efforts || [],
     availability: registry?.availability || model?.availability || 'available',
     availability_reason: registry?.availability_reason || model?.availability_reason || '',
+    health_status: registry?.health_status || model?.health_status || '',
+    health_message: registry?.health_message || model?.health_message || '',
+    review_routable: registry?.review_routable ?? model?.review_routable ?? true,
   }
 }
 
@@ -989,6 +1002,8 @@ function modelSignals(model) {
   if (model.structured_output && model.structured_output !== 'unknown') addSignal(signals, 'structured', `${model.structured_output} json`, 'json')
   if (model.availability === 'unsupported') addSignal(signals, 'unavailable', 'unavailable', 'warn')
   if (model.availability === 'unverified') addSignal(signals, 'unverified', 'unverified catalog', 'warn')
+  if (model.health_status === 'quota_limited') addSignal(signals, 'quota-limited', 'quota exhausted', 'warn')
+  else if (model.health_status === 'rate_limited') addSignal(signals, 'rate-limited', 'rate limited', 'warn')
   const measuredTps = model.benchmark?.throughput?.tokens_per_second || model.speed_tps || 0
   if (measuredTps) addSignal(signals, 'measured-speed', `${measuredTps} t/s`, 'default')
   if (model.discovery_source && model.discovery_source !== 'live') {
@@ -1034,6 +1049,7 @@ function selectionFit(model) {
   if (!model.context_length) issues.push('context unknown')
   if (model.availability === 'unsupported') issues.push('model is not supported for routing')
   if (model.availability === 'unverified') issues.push('fallback catalog only')
+  if (model.review_routable === false) issues.push(model.health_message || 'not routable for review right now')
   if (providerIsLocal(model.provider) && model.loaded === false) issues.push('selected model is not loaded')
   if (!model.benchmark) issues.push('score pending')
   if (model.benchmark?.status === 'error') issues.push('benchmark failed')
