@@ -44,8 +44,8 @@ logger = logging.getLogger("protoneo.paper_review.pipeline")
 _session_graphs = get_session_graphs()
 _session_ontologies = get_session_ontologies()
 
-_STRUCTURAL_NODE_TYPES = {"Paper", "Section", "Diagram", "Table", "Reference", "Equation"}
-_STRUCTURAL_EDGE_TYPES = {"HAS_SECTION", "CONTAINS", "APPEARS_IN"}
+_STRUCTURAL_NODE_TYPES = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
+_STRUCTURAL_EDGE_TYPES = {"HAS_SECTION", "CONTAINS", "HAS_ARTIFACT", "APPEARS_IN"}
 _MIN_REVIEW_SEMANTIC_EDGES = 3
 _GRAPH_ARTIFACT_PATTERNS = (
     re.compile(r"\b\d+\s*/\s*\d+\b[^\n.]*\b(?:claim|claims|method|methods|baseline|baselines|evidence|edges?)\b", re.I),
@@ -65,6 +65,16 @@ def review_graph_quality(graph: KnowledgeGraph) -> dict[str, Any]:
     """Classify whether graph relationships are safe reviewer evidence."""
     semantic_nodes = _semantic_nodes(graph)
     semantic_edges = _semantic_edges(graph)
+    visual = [n for n in graph.nodes if n.node_type in ("Figure", "Table")]
+    described = [n for n in visual if n.attributes.get("description")]
+    if not visual:
+        grounding_mode = "none"
+    elif not described:
+        grounding_mode = "text_only"
+    elif len(described) == len(visual):
+        grounding_mode = "vision_grounded"
+    else:
+        grounding_mode = "mixed"
     relationship_facts_usable = len(semantic_edges) >= _MIN_REVIEW_SEMANTIC_EDGES
     if not graph.nodes:
         mode = "unavailable"
@@ -78,6 +88,10 @@ def review_graph_quality(graph: KnowledgeGraph) -> dict[str, Any]:
         "semantic_node_count": len(semantic_nodes),
         "semantic_edge_count": len(semantic_edges),
         "threshold": _MIN_REVIEW_SEMANTIC_EDGES,
+        "grounding_mode": grounding_mode,
+        "visual_evidence_count": len(visual),
+        "described_artifact_count": len(described),
+        "undescribed_artifact_count": len(visual) - len(described),
     }
 
 
