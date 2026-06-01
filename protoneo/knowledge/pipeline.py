@@ -74,6 +74,7 @@ class GraphPipeline:
         conference_context: str = "",
         graph_cache: dict[str, dict] | None = None,
         ontology_cache: dict[str, Any] | None = None,
+        extraction_batch_size: int = 4,
     ) -> KnowledgeGraph:
         """Run the 6-step graph pipeline with checkpoint-based resume.
 
@@ -162,6 +163,9 @@ class GraphPipeline:
                 document.metadata.get("figures"),
                 document.metadata.get("tables"),
             )
+            equation_added = paper_graph.ingest_equation_evidence(
+                document.metadata.get("equations"),
+            )
             if visual_added:
                 artifacts = (
                     (document.metadata.get("figures") or [])
@@ -173,6 +177,15 @@ class GraphPipeline:
                     "described": sum(
                         1 for artifact in artifacts
                         if isinstance(artifact, dict) and artifact.get("description")
+                    ),
+                })
+            if equation_added:
+                bus.emit("equation_evidence_ingested", {
+                    "equations": len(document.metadata.get("equations") or []),
+                    "not_decoded": sum(
+                        1 for artifact in (document.metadata.get("equations") or [])
+                        if isinstance(artifact, dict)
+                        and artifact.get("grounding") == "formula_not_decoded"
                     ),
                 })
 
@@ -285,6 +298,7 @@ class GraphPipeline:
                 ontology=ontology,
                 knowledge_graph=paper_graph,
                 markdown=document.markdown,
+                batch_size=extraction_batch_size,
             )
 
             graph_cache[session_id] = paper_graph.to_d3_format()

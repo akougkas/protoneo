@@ -274,7 +274,7 @@ export function exportGraph(sessionId) {
   })
 }
 
-export function reviewWithGraph(graphFile, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
+export function importGraphForReview(graphFile, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
   const form = new FormData()
   form.append('graph_file', graphFile)
   form.append('conference', conference)

@@ -58,7 +58,7 @@ PHASE_POLICIES: dict[PhasePolicyLabel, PhasePolicy] = {
         prefer_fast=True,
         structured_output_required=True,
         temperature=0.2,
-        top_k=1,
+        top_k=20,
         enable_thinking=False,
         warning="Reasoning models are discouraged for graph extraction phases.",
     ),

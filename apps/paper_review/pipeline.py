@@ -269,27 +269,52 @@ def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
 
 
 def _build_visual_evidence_ledger(graph: KnowledgeGraph) -> str:
-    """Concise, reviewer-safe ledger of vision-grounded figure/table descriptions."""
+    """Concise, reviewer-safe ledger of figure/table/equation evidence."""
     visual = [
         n for n in graph.nodes
         if n.node_type in ("Figure", "Table") and n.attributes.get("description")
     ]
-    if not visual:
+    equations = [
+        n for n in graph.nodes
+        if n.node_type == "Equation"
+        and n.attributes.get("grounding") in {"formula_not_decoded", "formula_decoded"}
+    ]
+    if not visual and not equations:
         return ""
 
     lines = [
-        "\n\n## Visual Evidence Ledger\n",
-        "Vision-model descriptions of figures/tables. Treat numeric claims as "
-        "extracted-from-figure and cross-check against the manuscript text.",
+        "\n\n## Visual Evidence Ledger\n"
+        if visual else
+        "\n\n## Evidence Artifact Ledger\n"
     ]
-    for node in visual[:12]:
-        page = node.attributes.get("page", "?")
-        claims = node.attributes.get("numeric_claims") or []
-        claim_text = f" Numeric: {'; '.join(claims[:4])}." if claims else ""
+    if visual:
         lines.append(
-            f"- {node.label[:60]} (p.{page}): "
-            f"{node.attributes['description'][:240]}{claim_text}"
+            "Vision-model descriptions of figures/tables. Treat numeric claims as "
+            "extracted-from-figure and cross-check against the manuscript text."
         )
+        for node in visual[:12]:
+            page = node.attributes.get("page", "?")
+            claims = node.attributes.get("numeric_claims") or []
+            claim_text = f" Numeric: {'; '.join(claims[:4])}." if claims else ""
+            lines.append(
+                f"- {node.label[:60]} (p.{page}): "
+                f"{node.attributes['description'][:240]}{claim_text}"
+            )
+    if equations:
+        if visual:
+            lines.append("\n### Equation Evidence")
+        lines.append(
+            "Equation extraction notes. A not-decoded equation means the formula was "
+            "present but Docling did not recover its formula text; do not quote it as decoded."
+        )
+        for node in equations[:12]:
+            page = node.attributes.get("page", "?")
+            context = node.attributes.get("surrounding_context") or {}
+            before = context.get("before", "") if isinstance(context, dict) else ""
+            after = context.get("after", "") if isinstance(context, dict) else ""
+            status = "decoded" if node.attributes.get("grounding") == "formula_decoded" else "not decoded"
+            snippet = node.source_text if status == "decoded" else (before or after or node.source_text)
+            lines.append(f"- {node.label[:60]} ({status}, p.{page}): {str(snippet)[:220]}")
     return "\n".join(lines) + "\n"
 
 

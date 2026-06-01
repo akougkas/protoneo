@@ -101,6 +101,7 @@ def describe_image(
             "model": model,
             "temperature": vlm_config.get("temperature", 0.1),
             "top_p": vlm_config.get("top_p", 0.9),
+            **({"max_tokens": vlm_config["max_tokens"]} if vlm_config.get("max_tokens") else {}),
             "messages": [
                 {
                     "role": "user",

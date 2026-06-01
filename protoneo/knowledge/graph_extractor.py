@@ -125,6 +125,7 @@ RULES:
 9. Extract key data points from markdown tables as entities with relationships.
 10. Extract named equations and what they compute.
 11. Figure descriptions contain quantitative analysis (axes, trends, method comparisons). Extract the findings they report as Result or Metric entities.
+12. The top-level response MUST be a JSON object with "entities" and "relationships". Never answer with a JSON array, a number, a numbered list, or `[1]`.
 
 Respond with ONLY this JSON, nothing else:
 {{"entities": [{{"name": "...", "type": "...", "description": "one sentence with key details"}}], "relationships": [{{"source": "entity name", "target": "entity name", "type": "EDGE_TYPE", "description": "brief context"}}]}}
@@ -189,13 +190,14 @@ def _coerce_extracted_graph(data: dict[str, Any]) -> ExtractedGraph:
             continue
         source = str(item.get("source") or "").strip()
         target = str(item.get("target") or "").strip()
-        if not source or not target:
+        rel_type = str(item.get("type") or item.get("edge_type") or "").strip()
+        if not source or not target or not rel_type:
             skipped_relationships += 1
             continue
         relationships.append(GraphRelationship(
             source=source,
             target=target,
-            type=str(item.get("type") or item.get("edge_type") or "RELATED_TO"),
+            type=rel_type,
             description=str(item.get("description") or ""),
         ))
 
@@ -227,6 +229,8 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
         data = json.loads(raw)
         if isinstance(data, dict):
             return _coerce_extracted_graph(data)
+        if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+            return _coerce_extracted_graph({"entities": data, "relationships": []})
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
@@ -236,6 +240,8 @@ def _parse_extraction(raw: str) -> ExtractedGraph:
             data = json.loads(fence_match.group(1))
             if isinstance(data, dict):
                 return _coerce_extracted_graph(data)
+            if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+                return _coerce_extracted_graph({"entities": data, "relationships": []})
         except (json.JSONDecodeError, TypeError, ValueError):
             continue
 
@@ -592,6 +598,40 @@ def _split_subsections(section_name: str, section_text: str) -> list[tuple[str, 
     return chunks if chunks else [(section_name, section_text)]
 
 
+def _split_oversized_section(
+    section_name: str,
+    section_text: str,
+    *,
+    max_chars: int = 5200,
+    overlap: int = 450,
+) -> list[tuple[str, str]]:
+    """Split long sections into bounded, paragraph-aware chunks for local LLMs."""
+    text = section_text.strip()
+    if len(text) <= max_chars:
+        return [(section_name, text)]
+
+    chunks: list[tuple[str, str]] = []
+    start = 0
+    part = 1
+    while start < len(text):
+        end = min(start + max_chars, len(text))
+        if end < len(text):
+            split = -1
+            for sep in ("\n\n", "\n", ". "):
+                split = text.rfind(sep, start + max_chars // 2, end)
+                if split > start:
+                    end = split + len(sep)
+                    break
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append((f"{section_name} > part {part}", chunk))
+            part += 1
+        if end >= len(text):
+            break
+        start = max(start + 1, end - overlap)
+    return chunks
+
+
 async def extract_graph(
     text: str,
     llm_client: LLMClient,
@@ -657,7 +697,8 @@ async def extract_graph(
         if markdown:
             expanded: list[tuple[str, str]] = []
             for sec_name, sec_body in sections:
-                expanded.extend(_split_subsections(sec_name, sec_body))
+                for sub_name, sub_body in _split_subsections(sec_name, sec_body):
+                    expanded.extend(_split_oversized_section(sub_name, sub_body))
             sections = expanded
 
         logger.info(
@@ -691,18 +732,43 @@ async def extract_graph(
             )
 
             try:
+                messages = [
+                    {"role": "system", "content": _SECTION_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ]
                 response = await llm_client.complete(
                     model=use_model,
-                    messages=[
-                        {"role": "system", "content": _SECTION_SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
+                    messages=messages,
                     session_id=session_id,
                     temperature=0.2,
                     max_tokens=8192,
                     phase_policy="fast_structured",
                 )
                 result = _parse_extraction(response.content)
+                if (
+                    not result.entities
+                    and not result.relationships
+                    and len(section_text.strip()) > 250
+                ):
+                    retry_messages = [
+                        *messages,
+                        {"role": "assistant", "content": response.content[:1000]},
+                        {"role": "user", "content": (
+                            "The previous response did not contain a usable graph object. "
+                            "Return exactly one JSON object with keys \"entities\" and "
+                            "\"relationships\" for the same section. Do not return an array, "
+                            "a number, prose, or markdown."
+                        )},
+                    ]
+                    response = await llm_client.complete(
+                        model=use_model,
+                        messages=retry_messages,
+                        session_id=session_id,
+                        temperature=0.1,
+                        max_tokens=8192,
+                        phase_policy="fast_structured",
+                    )
+                    result = _parse_extraction(response.content)
                 result = _normalize_entities(result)
                 if ontology:
                     result = _validate_against_ontology(result, ontology)

@@ -119,6 +119,27 @@ Return JSON:
 Only flag entities you are confident are NOT in the paper. Include a confidence score (0.0 to 1.0) for the entity's grounding. Empty array is fine."""
 
 
+def _coerce_verification(data: Any) -> dict:
+    """Keep valid verification arrays and ignore malformed records."""
+    if not isinstance(data, dict):
+        return {"grounding_issues": [], "missing_concepts": [], "missing_connections": []}
+
+    def _dicts(key: str, required: tuple[str, ...]) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for item in data.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            if all(str(item.get(field) or "").strip() for field in required):
+                records.append(item)
+        return records
+
+    return {
+        "grounding_issues": _dicts("grounding_issues", ("entity", "issue")),
+        "missing_concepts": _dicts("missing_concepts", ("concept",)),
+        "missing_connections": _dicts("missing_connections", ("source", "target", "type")),
+    }
+
+
 def _parse_verification(raw: str) -> dict:
     """Parse the LLM verification response."""
     parsed = extract_json_object(
@@ -127,18 +148,18 @@ def _parse_verification(raw: str) -> dict:
         allow_thinking_json=True,
     )
     if parsed is not None:
-        return parsed
+        return _coerce_verification(parsed)
 
     raw = sanitize_structured_text(raw)
     try:
-        return json.loads(raw)
+        return _coerce_verification(json.loads(raw))
     except (json.JSONDecodeError, TypeError):
         pass
 
     fence = re.search(r"```(?:json)?\s*\n(.*?)```", raw, re.DOTALL)
     if fence:
         try:
-            return json.loads(fence.group(1))
+            return _coerce_verification(json.loads(fence.group(1)))
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -152,7 +173,7 @@ def _parse_verification(raw: str) -> dict:
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(raw[start : i + 1])
+                        return _coerce_verification(json.loads(raw[start : i + 1]))
                     except (json.JSONDecodeError, TypeError):
                         break
 
@@ -180,7 +201,7 @@ async def verify_graph(
 
     All passes use the full graph and full document text (no truncation).
     """
-    _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table"}
+    _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
 
     semantic_nodes = [n for n in knowledge_graph.nodes if n.node_type not in _STRUCTURAL]
     if not semantic_nodes:

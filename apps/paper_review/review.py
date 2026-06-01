@@ -38,29 +38,26 @@ from .schemas import (
 
 logger = logging.getLogger("protoneo.paper_review.review")
 
-# Provider preferences for automatic model assignment.  Local review defaults
-# deliberately split the panel: Dynamo is the deterministic analytical endpoint;
-# Mini is the more exploratory adversarial endpoint.
+# Provider preferences for automatic model assignment.
 _ROLE_PROVIDER_PREFS: dict[str, list[str]] = {
-    "technical": ["lan-dynamo", "openai"],
-    "systems": ["lan-dynamo", "openai"],
-    "clarity": ["lan-dynamo", "openai"],
-    "meta": ["lan-dynamo", "openai"],
-    "novelty": ["lan-mini", "lan-dynamo", "openai"],
-    "skeptic": ["lan-mini", "lan-dynamo", "openai"],
-    "artifact": ["lan-mini", "lan-dynamo", "openai"],
+    "technical": ["lan-dynamo", "lan-mini", "openai"],
+    "systems": ["lan-dynamo", "lan-mini", "openai"],
+    "clarity": ["lan-dynamo", "lan-mini", "openai"],
+    "meta": ["lan-dynamo", "lan-mini", "openai"],
+    "novelty": ["lan-dynamo", "lan-mini", "openai"],
+    "skeptic": ["lan-dynamo", "lan-mini", "openai"],
+    "artifact": ["lan-dynamo", "lan-mini", "openai"],
 }
 
 _GRAPH_STEPS = {"ontology", "extraction", "coref", "verification"}
 _SUBSCRIPTION_PROVIDERS = {"openai"}
 _GRAPH_PROVIDER_PREFS = [
     "lan-dynamo",
-    "localhost-dynamo",
+    "lan-mini",
     "localhost-lmstudio",
     "local",
     "ollama",
     "lmstudio",
-    "lan-mini",
     "localhost-ollama",
 ]
 
@@ -77,20 +74,14 @@ _ROLE_INFERENCE_PREFS: dict[str, dict[str, float]] = {
 }
 
 _LOCAL_ENDPOINT_INFERENCE_PREFS: dict[str, dict[str, float | int | str]] = {
-    # Analytical, fast, deterministic: tight nucleus, smaller top-k, modest
-    # repeat penalty to keep review JSON stable and evidence-focused.
-    "lan-dynamo": {
-        "temperature": 0.15,
-        "top_p": 0.82,
-        "top_k": 20,
-        "min_p": 0.05,
-        "repeat_penalty": 1.05,
-    },
-    # Creative/adversarial: wider sampler for novelty/skeptic exploration while
-    # still bounded enough for JSON review forms.
+    # Wider sampler for novelty/skeptic exploration while still bounded enough
+    # for JSON review forms.
     "lan-mini": {
-        "temperature": 0.45,
-        "top_p": 0.95,
+        "top_k": 80,
+        "min_p": 0.02,
+        "repeat_penalty": 1.08,
+    },
+    "lan-dynamo": {
         "top_k": 80,
         "min_p": 0.02,
         "repeat_penalty": 1.08,
@@ -518,8 +509,9 @@ def _inference_for(role: str, model_id: str) -> dict[str, float | int | str]:
             merged["temperature"] = 0.25
             merged["top_p"] = 0.9
             merged["top_k"] = min(int(merged.get("top_k", 40)), 40)
-        elif role in {"technical", "systems", "clarity"} and provider == "lan-dynamo":
-            merged["temperature"] = min(float(merged.get("temperature", 0.2)), 0.18)
+        elif role in {"technical", "systems", "clarity"} and provider == "lan-mini":
+            merged["top_k"] = min(int(merged.get("top_k", 40)), 40)
+            merged["repeat_penalty"] = min(float(merged.get("repeat_penalty", 1.08)), 1.05)
         elif role in {"skeptic", "novelty", "artifact"} and provider == "lan-mini":
             merged["temperature"] = max(float(merged.get("temperature", 0.4)), 0.45)
     return merged

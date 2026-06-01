@@ -342,7 +342,7 @@ to evaluate. Output concise valid JSON only. Do not emit hidden reasoning,
 scratchpad, markdown, code fences, or prose."""
 
 _DISCOVER_USER = """\
-Design 3-5 paper-SPECIFIC entity types for reviewer evaluation of this paper.
+Design 3-4 paper-SPECIFIC entity types for reviewer evaluation of this paper.
 
 ## Base types (DO NOT duplicate)
 Entity: Claim, Method, Dataset, Metric, Baseline, Result, Limitation, Concept, Reference, Equation
@@ -353,10 +353,16 @@ Edge: USES, EVALUATES_ON, COMPARED_AGAINST, ACHIEVES, EXTENDS, CITES, PART_OF, C
 
 Design types that capture domain concepts the base types miss. Each type needs:
 - A clear name (PascalCase, e.g., "SensorType" not "Sensor_Type")
-- A description of what it represents and why reviewers care
-- 2-3 concrete examples from THIS paper
+- A short description of what it represents and why reviewers care
+- 1-2 concrete examples from THIS paper
 
-Also design 2-3 paper-specific edge types not in the base set.
+Also design 1-3 paper-specific edge types not in the base set.
+
+Hard limits:
+- Keep every description under 12 words.
+- Keep every example under 6 words.
+- Keep key_contributions to at most 3 items.
+- Finish a valid JSON object. If space is tight, omit optional items rather than truncating.
 
 Output JSON:
 {{"entity_types": [{{"name": "...", "description": "...", "examples": ["from this paper"]}}], "edge_types": [{{"name": "UPPER_CASE", "description": "...", "source_targets": [{{"source": "Type1", "target": "Type2"}}]}}], "paper_domain": "...", "key_contributions": ["..."], "analysis_summary": "..."}}
@@ -461,7 +467,7 @@ async def _discover_ontology_single(
         ],
         session_id=session_id,
         temperature=temperature,
-        max_tokens=4096,
+        max_tokens=3072,
         phase_policy="fast_structured",
     )
     return _parse_ontology(response.content)
@@ -676,13 +682,25 @@ async def _ground_ontology(
 
 def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
     """Parse the grounding verification response."""
+    def _coerce_verified(value: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(value, list):
+            return None
+        out: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("type") or "").strip()
+            if name:
+                out.append({**item, "name": name})
+        return out
+
     parsed = extract_json_object(
         raw,
         required_keys={"verified_types"},
         allow_thinking_json=True,
     )
     if parsed is not None and isinstance(parsed.get("verified_types"), list):
-        return parsed["verified_types"]
+        return _coerce_verified(parsed["verified_types"])
 
     cleaned = sanitize_structured_text(raw)
 
@@ -690,9 +708,9 @@ def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
     try:
         data = json.loads(cleaned)
         if isinstance(data, dict) and "verified_types" in data:
-            return data["verified_types"]
+            return _coerce_verified(data["verified_types"])
         if isinstance(data, list):
-            return data
+            return _coerce_verified(data)
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
@@ -702,7 +720,7 @@ def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
         try:
             data = json.loads(fence.group(1))
             if isinstance(data, dict) and "verified_types" in data:
-                return data["verified_types"]
+                return _coerce_verified(data["verified_types"])
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
@@ -719,7 +737,7 @@ def _parse_ontology_grounding(raw: str) -> list[dict[str, Any]] | None:
                     try:
                         data = json.loads(cleaned[start:i+1])
                         if isinstance(data, dict) and "verified_types" in data:
-                            return data["verified_types"]
+                            return _coerce_verified(data["verified_types"])
                     except (json.JSONDecodeError, TypeError, ValueError):
                         pass
                     break
@@ -762,6 +780,20 @@ def _seeds_to_edge_types(seeds: list) -> list[EdgeType]:
         elif isinstance(s, EdgeType):
             result.append(s)
     return result
+
+
+def _seed_ontology(domain: str, seed_types: list[dict[str, str]]) -> Ontology:
+    return Ontology(
+        entity_types=[
+            EntityType(
+                name=str(seed.get("name") or "").strip(),
+                description=str(seed.get("description") or "").strip(),
+            )
+            for seed in seed_types
+            if str(seed.get("name") or "").strip()
+        ],
+        paper_domain=domain,
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -873,6 +905,148 @@ def ontology_to_extraction_prompt(ontology: Ontology) -> str:
 # Parsing helpers
 # ══════════════════════════════════════════════════════════
 
+def _coerce_ontology_data(data: Any) -> Ontology:
+    """Build an ontology while dropping only malformed type records."""
+    if not isinstance(data, dict):
+        return Ontology()
+
+    entity_types: list[EntityType] = []
+    for item in data.get("entity_types") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        attrs: list[OntologyAttribute] = []
+        for attr in item.get("attributes") or []:
+            if not isinstance(attr, dict):
+                continue
+            attr_name = str(attr.get("name") or "").strip()
+            if attr_name:
+                attrs.append(OntologyAttribute(
+                    name=attr_name,
+                    type=str(attr.get("type") or "text"),
+                    description=str(attr.get("description") or ""),
+                ))
+        examples = item.get("examples") or []
+        if isinstance(examples, str):
+            examples = [examples]
+        entity_types.append(EntityType(
+            name=name,
+            description=str(item.get("description") or name),
+            attributes=attrs,
+            examples=[str(x) for x in examples if str(x).strip()],
+        ))
+
+    edge_types: list[EdgeType] = []
+    for item in data.get("edge_types") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        source_targets = []
+        for pair in item.get("source_targets") or []:
+            if not isinstance(pair, dict):
+                continue
+            source = str(pair.get("source") or "").strip()
+            target = str(pair.get("target") or "").strip()
+            if source and target:
+                source_targets.append({"source": source, "target": target})
+        edge_types.append(EdgeType(
+            name=name,
+            description=str(item.get("description") or name),
+            source_targets=source_targets,
+        ))
+
+    contributions = data.get("key_contributions") or []
+    if isinstance(contributions, str):
+        contributions = [contributions]
+    return Ontology(
+        entity_types=entity_types,
+        edge_types=edge_types,
+        analysis_summary=str(data.get("analysis_summary") or ""),
+        paper_domain=str(data.get("paper_domain") or ""),
+        key_contributions=[str(x) for x in contributions if str(x).strip()],
+    )
+
+
+def _json_string(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value
+
+
+def _json_string_list(raw: str) -> list[str]:
+    return [_json_string(match.group(1)) for match in re.finditer(r'"((?:\\.|[^"\\])*)"', raw or "")]
+
+
+def _salvage_truncated_ontology(raw: str) -> Ontology | None:
+    """Recover complete ontology records from an otherwise truncated JSON object."""
+    cleaned = sanitize_structured_text(raw)
+    entity_region = cleaned
+    edge_region = cleaned
+    edge_pos = cleaned.find('"edge_types"')
+    if edge_pos >= 0:
+        entity_region = cleaned[:edge_pos]
+        edge_region = cleaned[edge_pos:]
+
+    entity_types: list[EntityType] = []
+    entity_pattern = re.compile(
+        r'\{\s*"name"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*'
+        r'"description"\s*:\s*"((?:\\.|[^"\\])*)"'
+        r'(?:\s*,\s*"examples"\s*:\s*\[(.*?)\])?',
+        re.DOTALL,
+    )
+    for match in entity_pattern.finditer(entity_region):
+        name = _json_string(match.group(1)).strip()
+        description = _json_string(match.group(2)).strip()
+        if not name:
+            continue
+        entity_types.append(EntityType(
+            name=name,
+            description=description or name,
+            examples=_json_string_list(match.group(3) or "")[:3],
+        ))
+
+    edge_types: list[EdgeType] = []
+    edge_pattern = re.compile(
+        r'\{\s*"name"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*'
+        r'"description"\s*:\s*"((?:\\.|[^"\\])*)"',
+        re.DOTALL,
+    )
+    for match in edge_pattern.finditer(edge_region):
+        name = _json_string(match.group(1)).strip()
+        description = _json_string(match.group(2)).strip()
+        if not name:
+            continue
+        edge_types.append(EdgeType(name=name, description=description or name, source_targets=[]))
+
+    paper_domain = ""
+    domain_match = re.search(r'"paper_domain"\s*:\s*"((?:\\.|[^"\\])*)"', cleaned)
+    if domain_match:
+        paper_domain = _json_string(domain_match.group(1)).strip()
+
+    key_contributions: list[str] = []
+    contrib_match = re.search(r'"key_contributions"\s*:\s*\[(.*?)\]', cleaned, re.DOTALL)
+    if contrib_match:
+        key_contributions = _json_string_list(contrib_match.group(1))[:5]
+
+    if not entity_types and not edge_types and not key_contributions:
+        return None
+    logger.info(
+        "Salvaged %d ontology entity types and %d edge types from truncated JSON",
+        len(entity_types), len(edge_types),
+    )
+    return Ontology(
+        entity_types=entity_types,
+        edge_types=edge_types,
+        paper_domain=paper_domain,
+        key_contributions=key_contributions,
+    )
+
+
 def _parse_ontology(raw: str) -> Ontology:
     """Parse LLM output into Ontology.
 
@@ -889,7 +1063,7 @@ def _parse_ontology(raw: str) -> Ontology:
         allow_thinking_json=True,
     )
     if parsed is not None:
-        return Ontology(**parsed)
+        return _coerce_ontology_data(parsed)
 
     cleaned = sanitize_structured_text(raw)
 
@@ -897,7 +1071,7 @@ def _parse_ontology(raw: str) -> Ontology:
     try:
         data = json.loads(cleaned)
         if isinstance(data, dict):
-            return Ontology(**data)
+            return _coerce_ontology_data(data)
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
@@ -907,7 +1081,7 @@ def _parse_ontology(raw: str) -> Ontology:
         try:
             data = json.loads(fence.group(1))
             if isinstance(data, dict):
-                return Ontology(**data)
+                return _coerce_ontology_data(data)
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
@@ -941,7 +1115,11 @@ def _parse_ontology(raw: str) -> Ontology:
             break
 
     if best_data:
-        return Ontology(**best_data)
+        return _coerce_ontology_data(best_data)
+
+    salvaged = _salvage_truncated_ontology(raw)
+    if salvaged is not None:
+        return salvaged
 
     logger.warning(
         "Failed to parse ontology output (%d chars). First 500: %s",
@@ -1004,25 +1182,30 @@ async def generate_ontology(
     if conference_context:
         seed_section += f"## Conference Context\n{conference_context}\n\n"
 
+    if not model:
+        logger.info("No ontology model configured; using deterministic domain seeds")
+        return _validate_ontology(_seed_ontology(domain, seed_types), domain_config=domain_config)
+
     # ── Step 2: Self-Consistent Discovery ──────────────────
     paper_text = _build_focused_text(metadata, markdown, text)
     if not paper_text:
         paper_text = (markdown or text)[:15000]
 
     discovery_prompt = domain_config.ontology_discovery_prompt if domain_config else ""
+    local_or_lan_model = model.startswith(("lan-", "localhost-"))
     draft = await _discover_with_consistency(
         paper_text=paper_text,
         seed_section=seed_section,
         llm_client=llm_client,
         model=model,
         session_id=session_id,
-        n_samples=3,
+        n_samples=1 if local_or_lan_model else 3,
         discovery_prompt=discovery_prompt,
     )
 
     if not draft.entity_types and not draft.edge_types:
-        logger.warning("Ontology discovery produced no types, using base types only")
-        return _validate_ontology(Ontology(paper_domain=domain), domain_config=domain_config)
+        logger.warning("Ontology discovery produced no types, using deterministic domain seeds")
+        return _validate_ontology(_seed_ontology(domain, seed_types), domain_config=domain_config)
 
     # ── Step 3: Grounding Verification ─────────────────────
     grounding_prompt = domain_config.ontology_grounding_prompt if domain_config else ""

@@ -198,7 +198,7 @@
             </template>
             <template v-else>
               <div class="drop-prompt">Drop exported graph JSON here</div>
-              <div class="drop-hint">Skip graph building, go straight to review</div>
+              <div class="drop-hint">Skip graph building and create a review-ready graph session</div>
             </template>
           </div>
           <div v-if="uploadMode === 'import' && savedGraphSessions.length > 0" class="saved-graphs">
@@ -220,7 +220,7 @@
                 :disabled="!selectedConference || launching"
                 @click.stop="launchSavedGraph(sess)"
               >
-                Review
+                Import
               </button>
             </div>
           </div>
@@ -491,7 +491,7 @@ Examples:
             :disabled="!importFile || !selectedConference || launching"
             @click="launchImport"
           >
-            {{ launching ? 'Starting review...' : 'Review with Imported Graph' }}
+            {{ launching ? 'Importing graph...' : 'Import Graph for Review' }}
           </button>
         </template>
       </div>
@@ -557,7 +557,7 @@ Examples:
 <script setup>
 import { ref, reactive, computed, inject, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getConferences, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, reviewWithGraph, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
+import { getConferences, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, importGraphForReview, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
 
 const router = useRouter()
 const activeApp = inject('activeApp', ref(null))
@@ -652,13 +652,13 @@ const activeModelIds = computed(() => {
 // Role-to-provider preference for smart defaults.
 // Maps agent role IDs to preferred providers, tried in order.
 const ROLE_PROVIDER_PREF = {
-  technical: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
-  skeptic: ['lan-mini', 'mini', 'lan-dynamo', 'dynamo', 'zbook'],
-  novelty: ['lan-mini', 'mini', 'lan-dynamo', 'dynamo', 'zbook'],
-  clarity: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
-  meta_reviewer: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
-  meta: ['lan-dynamo', 'dynamo', 'zbook', 'lan-mini', 'mini'],
-  artifact: ['lan-mini', 'mini', 'zbook', 'lan-dynamo', 'dynamo'],
+  technical: ['lan-mini', 'mini', 'zbook'],
+  skeptic: ['lan-mini', 'mini', 'zbook'],
+  novelty: ['lan-mini', 'mini', 'zbook'],
+  clarity: ['lan-mini', 'mini', 'zbook'],
+  meta_reviewer: ['lan-mini', 'mini', 'zbook'],
+  meta: ['lan-mini', 'mini', 'zbook'],
+  artifact: ['lan-mini', 'mini', 'zbook'],
 }
 
 const graphSteps = [
@@ -1273,7 +1273,7 @@ async function launchImport() {
   launchError.value = ''
   try {
     const enabledMap = buildReviewModelMap()
-    const res = await reviewWithGraph(
+    const res = await importGraphForReview(
       importFile.value,
       selectedConference.value,
       enabledMap,
@@ -1283,7 +1283,7 @@ async function launchImport() {
     )
     router.push({ name: 'Session', params: { sessionId: res.data.session_id } })
   } catch (e) {
-    launchError.value = e.response?.data?.detail || e.message || 'Failed to start review'
+    launchError.value = e.response?.data?.detail || e.message || 'Failed to import graph'
   } finally {
     launching.value = false
   }
@@ -1301,7 +1301,7 @@ async function launchSavedGraph(sess) {
       `${sess.session_id}_graph.json`,
       { type: 'application/json' }
     )
-    const res = await reviewWithGraph(
+    const res = await importGraphForReview(
       graphFile,
       selectedConference.value,
       enabledMap,
@@ -1311,7 +1311,7 @@ async function launchSavedGraph(sess) {
     )
     router.push({ name: 'Session', params: { sessionId: res.data.session_id } })
   } catch (e) {
-    launchError.value = e.response?.data?.detail || e.message || 'Failed to launch saved graph review'
+    launchError.value = e.response?.data?.detail || e.message || 'Failed to import saved graph'
   } finally {
     launching.value = false
   }

@@ -199,9 +199,9 @@ class KnowledgeGraph(BaseModel):
 
         Returns entities with full descriptions and their key relationships so
         later sections understand the scientific meaning of earlier extractions.
-        Skips structural nodes (Paper, Section, Diagram, Figure, Table).
+        Skips structural nodes (Paper, Section, Diagram, Figure, Table, Equation).
         """
-        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table"}
+        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Equation"}
         node_map = {n.id: n for n in self.nodes}
 
         entity_lines = []
@@ -370,18 +370,24 @@ class KnowledgeGraph(BaseModel):
 
         for kind, items in (("Figure", figures or []), ("Table", tables or [])):
             for artifact in items:
+                index = artifact.get("index", "?")
                 described = bool(artifact.get("description"))
                 label_source = (
                     artifact.get("caption")
                     or artifact.get("description")
-                    or f"{kind} {artifact.get('index', '?')}"
+                    or f"{kind} {index}"
                 )
                 attributes = {
                     "kind": artifact.get("kind", kind.lower()),
+                    "index": index,
                     "page": artifact.get("page", 0),
                     "bbox": artifact.get("bbox", {}),
                     "image_path": artifact.get("image_path", ""),
                     "caption": artifact.get("caption", ""),
+                    "source_text": artifact.get("source_text", ""),
+                    "table_markdown": artifact.get("table_markdown", ""),
+                    "table_html": artifact.get("table_html", ""),
+                    "table_otsl": artifact.get("table_otsl", ""),
                     "description": artifact.get("description", ""),
                     "description_source": artifact.get("description_source", "none"),
                     "numeric_claims": artifact.get("numeric_claims", []),
@@ -391,19 +397,37 @@ class KnowledgeGraph(BaseModel):
                     "provenance": artifact.get("provenance", {}),
                     "error": artifact.get("error", ""),
                 }
-                node = self.add_node(
-                    label=f"{kind} {artifact.get('index', '?')}: {str(label_source)[:80]}",
-                    node_type=kind,
-                    description=artifact.get("description", ""),
-                    source_section=artifact.get("source_section", ""),
-                    source_text=(
-                        artifact.get("source_text")
-                        or artifact.get("caption")
-                        or f"Extracted {kind.lower()} evidence from page {artifact.get('page', 0)}"
-                    ),
-                    confidence=float(artifact.get("confidence", 0.0)) if described else 0.0,
-                    attributes=attributes,
+                source_text = (
+                    artifact.get("source_text")
+                    or artifact.get("caption")
+                    or f"Extracted {kind.lower()} evidence from page {artifact.get('page', 0)}"
                 )
+                placeholder_label = f"{kind} {index}".lower()
+                node = next(
+                    (
+                        existing for existing in self.nodes
+                        if existing.label.lower() == placeholder_label
+                        and existing.node_type in {kind, "Diagram"}
+                    ),
+                    None,
+                )
+                if node is not None:
+                    node.label = f"{kind} {index}: {str(label_source)[:80]}"
+                    node.node_type = kind
+                    node.description = artifact.get("description", "") or node.description
+                    node.source_section = artifact.get("source_section", "") or node.source_section
+                    node.source_text = source_text or node.source_text
+                    node.confidence = float(artifact.get("confidence", 0.0)) if described else node.confidence
+                else:
+                    node = self.add_node(
+                        label=f"{kind} {index}: {str(label_source)[:80]}",
+                        node_type=kind,
+                        description=artifact.get("description", ""),
+                        source_section=artifact.get("source_section", ""),
+                        source_text=source_text,
+                        confidence=float(artifact.get("confidence", 0.0)) if described else 0.0,
+                        attributes=attributes,
+                    )
                 if not node.source_text:
                     node.source_text = (
                         artifact.get("source_text")
@@ -422,6 +446,68 @@ class KnowledgeGraph(BaseModel):
                 if root is not None and root.id != node.id:
                     self.add_edge(root.id, node.id, "HAS_ARTIFACT")
                 added += 1
+
+        if added:
+            self.update_stats()
+        return added
+
+    def ingest_equation_evidence(
+        self,
+        equations: list[dict[str, Any]] | None,
+    ) -> int:
+        """Add formula/equation placeholders as provenance-bearing evidence nodes."""
+        added = 0
+        root = self.node_by_id("paper-root")
+        for artifact in equations or []:
+            if not isinstance(artifact, dict):
+                continue
+            index = artifact.get("index", "?")
+            grounding = artifact.get("grounding", "formula_not_decoded")
+            decoded = grounding == "formula_decoded" or bool(artifact.get("description"))
+            source_text = (
+                artifact.get("source_text")
+                or (f"Equation {index} decoded" if decoded else f"Equation {index} not decoded")
+            )
+            warning = artifact.get("warning", "")
+            label = (
+                f"Equation {index}: {str(source_text)[:80]}"
+                if decoded
+                else f"Equation {index} not decoded"
+            )
+            attributes = {
+                "kind": artifact.get("kind", "equation"),
+                "index": index,
+                "page": artifact.get("page", 0),
+                "bbox": artifact.get("bbox", {}),
+                "image_path": artifact.get("image_path", ""),
+                "source_text": source_text,
+                "surrounding_context": artifact.get("surrounding_context", {}),
+                "description": artifact.get("description", ""),
+                "description_source": artifact.get("description_source", "none"),
+                "vlm_check": artifact.get("vlm_check", ""),
+                "model": artifact.get("model", ""),
+                "endpoint": artifact.get("endpoint", ""),
+                "grounding": grounding,
+                "warning": warning,
+                "provenance": artifact.get("provenance", {}),
+            }
+            node = self.add_node(
+                label=label,
+                node_type="Equation",
+                description=artifact.get("description", ""),
+                source_section=artifact.get("source_section", ""),
+                source_text=source_text,
+                confidence=float(artifact.get("confidence", 0.0)) if decoded else 0.0,
+                attributes=attributes,
+            )
+            for key, value in attributes.items():
+                if value not in (None, "", [], {}):
+                    node.attributes[key] = value
+                elif key not in node.attributes:
+                    node.attributes[key] = value
+            if root is not None and root.id != node.id:
+                self.add_edge(root.id, node.id, "HAS_ARTIFACT")
+            added += 1
 
         if added:
             self.update_stats()
@@ -501,9 +587,22 @@ class KnowledgeGraph(BaseModel):
         self.update_stats()
 
     def grounding_summary(self) -> dict[str, Any]:
-        """Summarize figure/table visual grounding without app-layer imports."""
+        """Summarize artifact grounding without app-layer imports."""
         visual = [n for n in self.nodes if n.node_type in ("Figure", "Table")]
         described = [n for n in visual if n.attributes.get("description")]
+        equations = [
+            n for n in self.nodes
+            if n.node_type == "Equation"
+            and n.attributes.get("grounding") in {"formula_not_decoded", "formula_decoded"}
+        ]
+        not_decoded_equations = [
+            n for n in equations
+            if n.attributes.get("grounding") == "formula_not_decoded"
+        ]
+        decoded_equations = [
+            n for n in equations
+            if n.attributes.get("grounding") == "formula_decoded"
+        ]
         if not visual:
             mode = "none"
         elif not described:
@@ -517,6 +616,10 @@ class KnowledgeGraph(BaseModel):
             "visual_evidence_count": len(visual),
             "described_artifact_count": len(described),
             "undescribed_artifact_count": len(visual) - len(described),
+            "equation_evidence_count": len(equations),
+            "decoded_equation_count": len(decoded_equations),
+            "not_decoded_equation_count": len(not_decoded_equations),
+            "total_evidence_artifact_count": len(visual) + len(equations),
         }
 
     # ── Export methods ───────────────────────────────────────
@@ -700,6 +803,24 @@ class KnowledgeGraph(BaseModel):
                 lines.append(
                     f"- {node.label[:60]}: {node.attributes['description'][:160]}"
                 )
+
+        equations = [
+            n for n in self.nodes
+            if n.node_type == "Equation"
+            and n.attributes.get("grounding") in {"formula_not_decoded", "formula_decoded"}
+        ]
+        if equations:
+            lines.append("\n### Equation Evidence")
+            for node in equations[:8]:
+                if node.attributes.get("grounding") == "formula_decoded":
+                    lines.append(f"- {node.label[:60]}: decoded formula evidence")
+                else:
+                    context = node.attributes.get("surrounding_context") or {}
+                    after = context.get("after", "") if isinstance(context, dict) else ""
+                    lines.append(
+                        f"- {node.label[:60]}: formula present but not decoded"
+                        + (f"; nearby text: {after[:100]}" if after else "")
+                    )
 
         # ── Coverage stats (compact) ──
         lines.append(
@@ -1006,6 +1127,11 @@ class KnowledgeGraph(BaseModel):
             edge_dist[e.edge_type] += 1
 
         visual = [n for n in self.nodes if n.node_type in ("Figure", "Table")]
+        equations = [
+            n for n in self.nodes
+            if n.node_type == "Equation"
+            and n.attributes.get("grounding") in {"formula_not_decoded", "formula_decoded"}
+        ]
         return {
             "semantic_entities": len(semantic),
             "semantic_edges": len(sem_edges),
@@ -1019,5 +1145,9 @@ class KnowledgeGraph(BaseModel):
             "visual_evidence_count": len(visual),
             "described_artifact_count": sum(
                 1 for n in visual if n.attributes.get("description")
+            ),
+            "equation_evidence_count": len(equations),
+            "not_decoded_equation_count": sum(
+                1 for n in equations if n.attributes.get("grounding") == "formula_not_decoded"
             ),
         }

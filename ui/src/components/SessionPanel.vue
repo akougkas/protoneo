@@ -39,6 +39,20 @@
       <span v-if="duration" class="duration">{{ duration }}</span>
     </div>
 
+    <div v-if="importedGraphReady" class="imported-graph-ready">
+      <h3 class="gate-header">Imported Graph Ready</h3>
+      <p class="gate-summary">
+        Saved graph loaded: {{ importedGraphStats.nodes }} entities, {{ importedGraphStats.edges }} relationships.
+      </p>
+      <div class="gate-actions">
+        <button class="gate-btn view-graph" @click="emit('request-graph-focus')">View Graph</button>
+        <button class="gate-btn export-graph" @click="doExportGraph">Export Graph</button>
+        <button class="gate-btn proceed" :disabled="launchingReview" @click="launchImportedReview">
+          {{ launchingReview ? 'Launching...' : 'Launch Review' }}
+        </button>
+      </div>
+    </div>
+
     <!-- Pre-Review Gate (between pre_review and review) -->
     <div v-if="showGate" class="pre-review-gate">
       <h3 class="gate-header">Pre-Review Complete</h3>
@@ -236,7 +250,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { getSession, getReviewPacket, connectStream, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph } from '../api/kernel.js'
+import { getSession, getReviewPacket, connectStream, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph, launchReview } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 import AgentCard from './AgentCard.vue'
 import ReviewPacket from './ReviewPacket.vue'
@@ -315,6 +329,9 @@ const pcChairReview = ref('')
 const finalReview = ref(null)
 const finalReviewRef = ref(null)
 const chairModel = ref('')
+const sessionMeta = ref({})
+const knowledgeGraphStats = ref(null)
+const launchingReview = ref(false)
 const startTime = Date.now()
 
 const stepDescriptions = {
@@ -355,6 +372,7 @@ const statusColor = computed(() => {
 const statusText = computed(() => {
   if (status.value === 'completed') return 'Review complete'
   if (status.value === 'failed') return 'Review failed'
+  if (importedGraphReady.value) return 'Imported graph ready'
   if (showGate.value) return 'Waiting: inspect graph and proceed'
   if (status.value === 'running') {
     const stage = stages.find(s => s.key === currentStage.value)
@@ -365,6 +383,17 @@ const statusText = computed(() => {
   }
   return status.value
 })
+
+const importedGraphReady = computed(() =>
+  status.value === 'created'
+  && sessionMeta.value?.pipeline_mode === 'imported_graph_review'
+  && sessionMeta.value?.graph_source === 'imported'
+)
+
+const importedGraphStats = computed(() => ({
+  nodes: knowledgeGraphStats.value?.node_count || 0,
+  edges: knowledgeGraphStats.value?.edge_count || 0,
+}))
 
 const totalTokens = computed(() => {
   return agents.value.reduce((sum, a) => sum + (a.tokens || 0), 0)
@@ -483,6 +512,22 @@ async function cancelPipelineAction() {
     addEvent('Review cancelled by PC chair')
   } catch (e) {
     error.value = 'Failed to cancel: ' + (e.message || 'unknown')
+  }
+}
+
+async function launchImportedReview() {
+  launchingReview.value = true
+  error.value = ''
+  try {
+    await launchReview(props.sessionId)
+    status.value = 'running'
+    currentStage.value = 'review'
+    addEvent('Launched review from imported graph')
+    startPolling()
+  } catch (e) {
+    error.value = 'Failed to launch review: ' + (e.response?.data?.detail || e.message || 'unknown')
+  } finally {
+    launchingReview.value = false
   }
 }
 
@@ -840,16 +885,24 @@ async function pollSession() {
   try {
     const res = await getSession(props.sessionId)
     const s = res.data
-    if (s.status === 'completed' && status.value !== 'completed') {
+    sessionMeta.value = s.config?.metadata || {}
+    knowledgeGraphStats.value = s.knowledge_graph_stats || null
+    if (s.current_stage) currentStage.value = s.current_stage
+    Object.assign(pipelineSteps, s.pipeline_steps || {})
+    const previousStatus = status.value
+    const nextStatus = s.status || status.value
+    if (nextStatus === 'completed' && previousStatus !== 'completed') {
       status.value = 'completed'
       currentStage.value = 'post_review'
       addEvent('Review session completed')
       fetchPacket()
       clearInterval(pollTimer)
-    } else if (s.status === 'failed' && status.value !== 'failed') {
+    } else if (nextStatus === 'failed' && previousStatus !== 'failed') {
       status.value = 'failed'
       error.value = s.error || 'Unknown error'
       clearInterval(pollTimer)
+    } else {
+      status.value = nextStatus
     }
   } catch (e) {
     // polling failure is non-fatal
@@ -864,6 +917,7 @@ onMounted(() => {
   }, 1000)
 
   try {
+    pollSession()
     ws = connectStream(props.sessionId)
     ws.onopen = () => {
       addEvent('Connected to review session')
@@ -1056,7 +1110,8 @@ onUnmounted(() => {
 }
 
 /* Pre-Review Gate */
-.pre-review-gate {
+.pre-review-gate,
+.imported-graph-ready {
   border: 2px solid #e8a500;
   border-radius: 6px;
   padding: 20px;

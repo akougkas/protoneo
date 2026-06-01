@@ -70,6 +70,33 @@ Return JSON:
 Only include MERGE and ALIAS decisions. Omit DISTINCT pairs."""
 
 
+def _coerce_coref_response(data: Any) -> dict:
+    """Keep valid coref records and drop malformed entries."""
+    if not isinstance(data, dict):
+        return {"merges": [], "aliases": []}
+    merges: list[dict[str, Any]] = []
+    for item in data.get("merges") or []:
+        if not isinstance(item, dict):
+            continue
+        keep = str(item.get("keep") or "").strip()
+        remove = item.get("remove") or []
+        if isinstance(remove, str):
+            remove = [remove]
+        remove = [str(x).strip() for x in remove if str(x).strip()]
+        if keep and remove:
+            merges.append({"keep": keep, "remove": remove})
+
+    aliases: list[dict[str, str]] = []
+    for item in data.get("aliases") or []:
+        if not isinstance(item, dict):
+            continue
+        full = str(item.get("full") or "").strip()
+        abbreviation = str(item.get("abbreviation") or item.get("abbr") or "").strip()
+        if full and abbreviation:
+            aliases.append({"full": full, "abbreviation": abbreviation})
+    return {"merges": merges, "aliases": aliases}
+
+
 def _parse_coref_response(raw: str) -> dict:
     """Parse the LLM co-reference resolution response."""
     parsed = extract_json_object(
@@ -78,18 +105,18 @@ def _parse_coref_response(raw: str) -> dict:
         allow_thinking_json=True,
     )
     if parsed is not None:
-        return parsed
+        return _coerce_coref_response(parsed)
 
     raw = sanitize_structured_text(raw)
     try:
-        return json.loads(raw)
+        return _coerce_coref_response(json.loads(raw))
     except (json.JSONDecodeError, TypeError):
         pass
 
     fence = re.search(r"```(?:json)?\s*\n(.*?)```", raw, re.DOTALL)
     if fence:
         try:
-            return json.loads(fence.group(1))
+            return _coerce_coref_response(json.loads(fence.group(1)))
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -103,7 +130,7 @@ def _parse_coref_response(raw: str) -> dict:
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(raw[start : i + 1])
+                        return _coerce_coref_response(json.loads(raw[start : i + 1]))
                     except (json.JSONDecodeError, TypeError):
                         break
 

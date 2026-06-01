@@ -59,8 +59,8 @@ _KNOWN_HOSTS = {
     "localhost": "localhost-lmstudio",
     "127.0.0.1": "localhost-lmstudio",
     "::1": "localhost-lmstudio",
+    "192.168.86.143": "lan-dynamo",
 }
-
 
 class LocalEndpoint(BaseModel):
     """A configured LLM service endpoint."""
@@ -250,7 +250,6 @@ def _normalize_endpoint_payload(
     endpoint_id = raw_id
     if not endpoint_id or endpoint_id in _LEGACY_PROVIDER_IDS:
         endpoint_id = _canonical_endpoint_id(raw_name or raw_display_name or raw_id or endpoint_type, url, endpoint_type, location)
-
     defaults = _KNOWN_ENDPOINTS.get(endpoint_id, {})
     raw_label = raw_display_name or raw_name
     default_label = str(defaults.get("display_name") or "")
@@ -325,7 +324,6 @@ def _migrate_discovered_models(
                 source = mapped_bucket
             else:
                 continue
-
             item["source"] = source
             migrated.setdefault(source, []).append(item)
 
@@ -564,12 +562,12 @@ def vlm_status(settings: ProtoNeoSettings | None = None) -> dict[str, Any]:
 #
 # These ship with ProtoNeo and are always available. Users can
 # override them or add custom presets via settings.json.
-# Model IDs use the provider-prefixed format (e.g. "lan-dynamo/model-name").
+# Model IDs use the provider-prefixed format (e.g. "lan-mini/model-name").
 
 _BUILTIN_PRESETS: list[ModelPreset] = [
     ModelPreset(
         name="mini-nemotron-omni-graph",
-        description="Mini-only Nemotron Omni for graph building and visual evidence extraction",
+        description="Mini Nemotron Omni for graph building and visual evidence extraction",
         assignments={
             "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
@@ -579,124 +577,35 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         },
     ),
     ModelPreset(
-        name="dynamo-heavy",
-        description="Dynamo runs fast structured graph pipeline, cloud runs reviews",
+        name="dynamo-nemotron-omni-graph",
+        description="Dynamo Nemotron Omni for graph building and visual evidence extraction",
         assignments={
-            # Graph pipeline: local only
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
-            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
-            "coref": "lan-dynamo/qwen3.5-35b-a3b",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b",
-            # Reviews: cloud models
-            "technical": "openai/gpt-5.5",
-            "systems": "openai/gpt-5.5-mini",
-            "novelty": "openai/gpt-5.5",
-            "clarity": "openai/gpt-5.5-mini",
-            "skeptic": "openai/gpt-5.5",
-            "meta_reviewer": "openai/gpt-5.5",
-            "meta": "openai/gpt-5.5",
+            "ontology": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "extraction": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "coref": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "verification": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "artifact": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
         },
     ),
     ModelPreset(
-        name="split-local",
-        description="Dynamo handles fast graph steps, Mini handles review-side local fallback",
+        name="dynamo-gemma-graph",
+        description="Dynamo Gemma for structured semantic graph building; saved visual evidence remains separately attributed",
         assignments={
-            # Graph pipeline: split across nodes
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
-            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
-            "coref": "lan-dynamo/qwen3.5-35b-a3b",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b",
-            # Reviews: cloud models
-            "technical": "openai/gpt-5.5",
-            "systems": "openai/gpt-5.5-mini",
-            "novelty": "openai/gpt-5.5",
-            "clarity": "openai/gpt-5.5-mini",
-            "skeptic": "openai/gpt-5.5",
-            "meta_reviewer": "openai/gpt-5.5",
-            "meta": "openai/gpt-5.5",
-        },
-    ),
-    ModelPreset(
-        name="dynamo-nemotron",
-        description="Nemotron MoE for graph pipeline, cloud for reviews",
-        assignments={
-            "ontology": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "extraction": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "coref": "lan-dynamo/qwen3.5-35b-a3b",
-            "verification": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "technical": "openai/gpt-5.5",
-            "systems": "openai/gpt-5.5-mini",
-            "novelty": "openai/gpt-5.5",
-            "clarity": "openai/gpt-5.5-mini",
-            "skeptic": "openai/gpt-5.5",
-            "meta_reviewer": "openai/gpt-5.5",
-            "meta": "openai/gpt-5.5",
-        },
-    ),
-    ModelPreset(
-        name="dynamo-granite",
-        description="IBM Granite for graph pipeline, cloud for reviews",
-        assignments={
-            "ontology": "lan-dynamo/ibm/granite-4-h-small",
-            "extraction": "lan-dynamo/ibm/granite-4-h-small",
-            "coref": "lan-dynamo/ibm/granite-4-h-micro",
-            "verification": "lan-dynamo/ibm/granite-4-h-small",
-            "technical": "openai/gpt-5.5",
-            "systems": "openai/gpt-5.5-mini",
-            "novelty": "openai/gpt-5.5",
-            "clarity": "openai/gpt-5.5-mini",
-            "skeptic": "openai/gpt-5.5",
-            "meta_reviewer": "openai/gpt-5.5",
-            "meta": "openai/gpt-5.5",
-        },
-    ),
-    ModelPreset(
-        name="dynamo-ministral",
-        description="Mistral Ministral 14B for graph pipeline, cloud for reviews",
-        assignments={
-            "ontology": "lan-dynamo/mistralai/ministral-3-14b",
-            "extraction": "lan-dynamo/mistralai/ministral-3-14b",
-            "coref": "lan-dynamo/mistralai/ministral-3-8b",
-            "verification": "lan-dynamo/mistralai/ministral-3-14b",
-            "technical": "openai/gpt-5.5",
-            "systems": "openai/gpt-5.5-mini",
-            "novelty": "openai/gpt-5.5",
-            "clarity": "openai/gpt-5.5-mini",
-            "skeptic": "openai/gpt-5.5",
-            "meta_reviewer": "openai/gpt-5.5",
-            "meta": "openai/gpt-5.5",
-        },
-    ),
-    ModelPreset(
-        name="nemotron-local",
-        description="Nemotron 30B MoE on Dynamo for all reviewers, Qwen distilled on Mini for meta",
-        assignments={
-            # Graph pipeline: nemotron on dynamo
-            "ontology": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "extraction": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "coref": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "verification": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            # Reviews: nemotron on dynamo (4 parallel via LM Studio)
-            "technical": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "systems": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "novelty": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "clarity": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            "skeptic": "lan-dynamo/nemotron-3-nano-30b-a3b",
-            # Meta + chair: qwen distilled on mini
-            "meta_reviewer": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
-            "meta": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
+            "ontology": "lan-dynamo/gemma-4-31b-it-nvfp4-turbo",
+            "extraction": "lan-dynamo/gemma-4-31b-it-nvfp4-turbo",
+            "coref": "lan-dynamo/gemma-4-31b-it-nvfp4-turbo",
+            "verification": "lan-dynamo/gemma-4-31b-it-nvfp4-turbo",
+            "artifact": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
         },
     ),
     ModelPreset(
         name="openai-only",
-        description="All reviewers on GPT-5.5 Mini, meta and chair on GPT-5.5 (no Anthropic)",
+        description="Mini graph pipeline, GPT-5.5 reviewers, GPT-5.5 meta",
         assignments={
-            # Graph pipeline: local
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
-            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
-            "coref": "lan-dynamo/qwen3.5-35b-a3b",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b",
-            # Reviews: OpenAI only
+            "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "coref": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "verification": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "technical": "openai/gpt-5.5-mini",
             "systems": "openai/gpt-5.5-mini",
             "novelty": "openai/gpt-5.5-mini",
@@ -707,74 +616,55 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         },
     ),
     ModelPreset(
-        name="nemotron-all",
-        description="All Nemotron-Cascade-2 on dynamo for local dry-run reviews (no cloud tokens)",
+        name="nemotron-omni-local",
+        description="Mini Nemotron Omni for graph and local review dry-runs",
         assignments={
-            "ontology": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            "extraction": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            "coref": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            "verification": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            "technical": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "novelty": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "skeptic": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "clarity": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "meta_reviewer": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-            "meta": "lan-dynamo/nemotron-cascade-2-30b-a3b-i1",
-        },
-    ),
-    ModelPreset(
-        name="nemotron-omni-split",
-        description="Nemotron Omni split panel: Dynamo analytical/deterministic, Mini creative/adversarial",
-        assignments={
-            "ontology": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
-            "extraction": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
-            "coref": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
-            "verification": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b",
-            "technical": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
-            "systems": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
-            "clarity": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
-            "meta_reviewer": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
-            "meta": "lan-dynamo/nvidia-nemotron-3-nano-omni-30b-a3b-reasoning",
+            "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "coref": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "verification": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "technical": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "systems": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "clarity": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "novelty": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "skeptic": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "artifact": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "meta_reviewer": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "meta": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
         },
     ),
     ModelPreset(
         name="hpdc26-openai",
-        description="HPDC '26 reviews: fast local graph pipeline, GPT-5.5 for technical/novelty/skeptic/meta, GPT-5.5-mini for clarity",
+        description="HPDC '26 reviews: Mini graph pipeline, GPT-5.5 analytical roles, GPT-5.5-mini clarity",
         assignments={
-            # Graph pipeline: local fast structured extraction
-            "ontology": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            "extraction": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            "coref": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            "verification": "lan-dynamo/nemotron-cascade-2-30b-a3b",
-            # Reviews: GPT-5.5 for analytical/reasoning-heavy roles
+            "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "coref": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "verification": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "technical": "openai/gpt-5.5",
             "novelty": "openai/gpt-5.5",
             "skeptic": "openai/gpt-5.5",
-            # Reviews: GPT-5.5-mini for presentation/formatting roles
             "clarity": "openai/gpt-5.5-mini",
-            # Meta-reviewer and PC Chair: GPT-5.5 (xhigh reasoning, full packet synthesis)
             "meta_reviewer": "openai/gpt-5.5",
             "meta": "openai/gpt-5.5",
         },
     ),
     ModelPreset(
         name="full-local",
-        description="All local, no cloud tokens used (for testing pipeline)",
+        description="Local graph and review dry-run",
         assignments={
-            "ontology": "lan-dynamo/qwen3.5-35b-a3b",
-            "extraction": "lan-dynamo/qwen3.5-35b-a3b",
-            "coref": "lan-dynamo/qwen3.5-35b-a3b",
-            "verification": "lan-dynamo/qwen3.5-35b-a3b",
-            "technical": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "systems": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
-            "novelty": "lan-dynamo/qwen3.5-35b-a3b",
-            "clarity": "lan-mini/Qwen35-Distilled-i1-Q4_K_M",
-            "skeptic": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "meta_reviewer": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
-            "meta": "lan-dynamo/qwen3.5-35b-a3b-claude-4.6-opus-reasoning-distilled-i1",
+            "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "coref": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "verification": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "technical": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "systems": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "novelty": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "clarity": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "skeptic": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "artifact": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "meta_reviewer": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "meta": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
         },
     ),
 ]
@@ -784,7 +674,11 @@ def get_all_presets(settings: ProtoNeoSettings | None = None) -> list[ModelPrese
     """Return built-in presets plus any user-defined ones from settings."""
     s = settings or load_settings()
     builtin_names = {p.name for p in _BUILTIN_PRESETS}
-    user_presets = [p for p in s.presets if p.name not in builtin_names]
+    user_presets = [
+        p
+        for p in s.presets
+        if p.name not in builtin_names
+    ]
     return _BUILTIN_PRESETS + user_presets
 
 

@@ -9,35 +9,16 @@ import logging
 from pathlib import Path
 
 from ..types import ParseResult
+from ..parser import (
+    _build_docling_pipeline_options,
+    _docling_version,
+    _export_table_payload,
+    _resolve_caption,
+)
 
 logger = logging.getLogger("protoneo.knowledge.parsers.docling")
 
 _IMAGE_RESOLUTION_SCALE = 2.0
-
-
-def _resolve_caption(document, element) -> str:
-    """Resolve caption text from a PictureItem's RefItem references."""
-    captions = getattr(element, "captions", [])
-    if not captions:
-        return ""
-    for cap_ref in captions:
-        cref = getattr(cap_ref, "cref", "")
-        if not cref:
-            continue
-        parts = cref.lstrip("#/").split("/")
-        if len(parts) == 2:
-            collection_name, idx_str = parts
-            try:
-                idx = int(idx_str)
-            except ValueError:
-                continue
-            collection = getattr(document, collection_name, [])
-            if idx < len(collection):
-                item = collection[idx]
-                text = getattr(item, "text", "")
-                if text:
-                    return text
-    return ""
 
 
 class DoclingParser:
@@ -65,7 +46,6 @@ class DoclingParser:
 
     async def parse(self, path: Path, options: dict | None = None) -> ParseResult:
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
 
@@ -74,10 +54,16 @@ class DoclingParser:
         if not output_dir:
             output_dir = path.parent / f"{path.stem}_figures"
 
-        pipeline_options = PdfPipelineOptions()
-        pipeline_options.images_scale = _IMAGE_RESOLUTION_SCALE
-        pipeline_options.generate_page_images = False
-        pipeline_options.generate_picture_images = True
+        pipeline_options = _build_docling_pipeline_options(
+            docling_options={
+                "images_scale": options.get("images_scale", _IMAGE_RESOLUTION_SCALE),
+                "generate_page_images": options.get("generate_page_images", True),
+                "generate_picture_images": options.get("generate_picture_images", True),
+                "do_ocr": options.get("do_ocr", False),
+                "do_formula_enrichment": options.get("do_formula_enrichment", False),
+                "do_code_enrichment": options.get("do_code_enrichment", False),
+            }
+        )
 
         converter = DocumentConverter(
             format_options={
@@ -93,6 +79,7 @@ class DoclingParser:
         # Extract figures and tables
         output_dir.mkdir(parents=True, exist_ok=True)
         figures: list[dict] = []
+        tables: list[dict] = []
         picture_counter = 0
         table_counter = 0
 
@@ -119,7 +106,6 @@ class DoclingParser:
                                 "b": prov.bbox.b,
                             }
 
-                    # Resolve caption from document reference
                     caption = _resolve_caption(conv_res.document, element)
 
                     figures.append({
@@ -133,11 +119,37 @@ class DoclingParser:
             if isinstance(element, TableItem):
                 table_counter += 1
                 img = element.get_image(conv_res.document)
+                bbox = {}
+                page_no = 0
+                if element.prov:
+                    prov = element.prov[0]
+                    page_no = prov.page_no
+                    if prov.bbox:
+                        bbox = {
+                            "l": prov.bbox.l,
+                            "t": prov.bbox.t,
+                            "r": prov.bbox.r,
+                            "b": prov.bbox.b,
+                        }
+                caption = _resolve_caption(conv_res.document, element)
+                table_payload = _export_table_payload(element, conv_res.document)
                 if img:
                     img_filename = f"{path.stem}-table-{table_counter}.png"
                     img_path = output_dir / img_filename
                     img.save(str(img_path), "PNG")
+                else:
+                    img_path = Path("")
 
+                source_parts = [part for part in (caption, table_payload.get("table_markdown", "")) if part]
+                tables.append({
+                    "index": table_counter,
+                    "page": page_no,
+                    "bbox": bbox,
+                    "caption": caption,
+                    "image_path": str(img_path) if str(img_path) else "",
+                    "source_text": "\n\n".join(source_parts),
+                    **table_payload,
+                })
         # Export markdown with image references
         markdown = conv_res.document.export_to_markdown(
             image_mode=ImageRefMode.REFERENCED,
@@ -160,7 +172,9 @@ class DoclingParser:
             figures=figures,
             metadata={
                 "parser": "docling",
+                "docling_version": _docling_version(),
                 "figure_count": picture_counter,
                 "table_count": table_counter,
+                "tables": tables,
             },
         )

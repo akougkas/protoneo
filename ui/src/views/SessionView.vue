@@ -86,6 +86,7 @@ const viewMode = ref('split')
 const sessionStatus = ref('running')
 const currentPhase = ref('')
 const paperTitle = ref('')
+const sessionMeta = ref({})
 
 // Graph data generated from paper metadata
 const paperGraphData = ref(null)
@@ -95,7 +96,7 @@ const graphLoading = ref(false)
 let statusPoll = null
 
 const isReviewing = computed(() =>
-  sessionStatus.value === 'running' || sessionStatus.value === 'created'
+  sessionStatus.value === 'running'
 )
 
 const graphPhase = computed(() => isReviewing.value ? 3 : 2)
@@ -118,6 +119,11 @@ const statusClass = computed(() => {
 const statusText = computed(() => {
   if (sessionStatus.value === 'completed') return 'Complete'
   if (sessionStatus.value === 'failed') return 'Failed'
+  if (
+    sessionStatus.value === 'created'
+    && sessionMeta.value?.pipeline_mode === 'imported_graph_review'
+    && sessionMeta.value?.graph_source === 'imported'
+  ) return 'Graph Ready'
   return 'Reviewing'
 })
 
@@ -177,9 +183,10 @@ async function pollSession() {
     if (status) sessionStatus.value = status
     // Extract paper title from session config
     const cfg = res.data?.config || res.data?.metadata
-    if (!paperTitle.value && cfg) {
+    if (cfg) {
       const meta = cfg.metadata || cfg
-      if (meta.paper_title) paperTitle.value = meta.paper_title
+      sessionMeta.value = meta || {}
+      if (!paperTitle.value && meta.paper_title) paperTitle.value = meta.paper_title
     }
     if (status === 'completed' || status === 'failed') {
       stopPolling()

@@ -1778,10 +1778,12 @@ async def review_with_graph(
     artifact_description_assumed_present: bool = Form(False),
     artifact_description_status: str = Form(""),
 ):
-    """Create a session with an imported graph and launch review immediately."""
+    """Create a review-ready session with an imported graph.
+
+    Importing a graph must not launch reviewers. Review launch is the explicit
+    next action through /sessions/{session_id}/launch-review.
+    """
     _session_manager = get_session_manager()
-    _event_buses = get_event_buses()
-    _pipeline_controls = get_pipeline_controls()
 
     try:
         profile = load_profile(conference)
@@ -1852,86 +1854,24 @@ async def review_with_graph(
     session.document_markdown = imported_markdown
     session.document_text = imported.document_text or imported_markdown
     session.graph_source = "imported"
+    session.current_stage = "pre_review"
+    session.graph_after_step["imported_graph"] = pg.snapshot()
+    session.pipeline_steps["imported_graph"] = StepState(
+        status="complete",
+        nodes_added=len(pg.nodes),
+        edges_added=len(pg.edges),
+    ).model_dump()
     await _session_manager.update(session)
-
-    # Build enriched message with paper content (not just graph summary)
-    if imported_markdown:
-        doc_proxy = _MinimalDoc(
-            imported_markdown,
-            imported_markdown,
-            paper_title or Path(graph_file.filename or "imported-graph").name,
-        )
-        user_message = build_user_message(doc_proxy, profile)
-    else:
-        user_message = pg.summary
-    from .pipeline import _build_enriched_review_message
-    enriched_message = _build_enriched_review_message(user_message, pg)
-
-    bus = SessionEventBus()
-    _event_buses[session.session_id] = bus
-    ctl = PipelineControl()
-    _pipeline_controls[session.session_id] = ctl
-
-    session.status = SessionStatus.RUNNING
-    await _session_manager.update(session)
-
-    async def _run_imported_review(sid: str) -> None:
-        try:
-            ctl.enter_stage("review")
-            bus.emit("stage_started", {
-                "stage": "review", "step": "independent_reviews",
-                "message": "Starting peer review with imported graph...",
-            })
-            ctl.enter_step("independent_reviews")
-            bus.emit("step_started", {
-                "stage": "review", "step": "independent_reviews",
-                "message": "Starting independent peer reviews...",
-            })
-
-            result = await _run_review_stage(
-                sid, agent_configs, delib_config,
-                enriched_message, bus, ctl, pg,
-            )
-
-            sess = await _session_manager.get(sid)
-            if sess:
-                sess.knowledge_graph = pg.model_dump(mode="json")
-                sess.current_stage = "review"
-                sess.status = SessionStatus.COMPLETED
-                await _session_manager.update(sess)
-
-            get_session_graphs()[sid] = pg.to_d3_format()
-            ctl.stage_done("review")
-            bus.emit("stage_complete", {"stage": "review"})
-            bus.emit("completed", {"result": sess.result if sess else {}})
-        except asyncio.CancelledError:
-            sess = await _session_manager.get(sid)
-            if sess:
-                sess.status = SessionStatus.STOPPED
-                sess.error = "Review cancelled"
-                await _session_manager.update(sess)
-            bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
-        except Exception as e:
-            error = sanitize_error_message(e)
-            logger.error("Review failed for session %s: %s", sid, error, exc_info=True)
-            sess = await _session_manager.get(sid)
-            if sess:
-                sess.status = SessionStatus.FAILED
-                sess.error = error
-                await _session_manager.update(sess)
-            bus.emit("error", {"detail": error})
-        finally:
-            get_pipeline_controls().pop(sid, None)
-
-    task = asyncio.create_task(_run_imported_review(session.session_id))
-    ctl.set_task(task)
+    get_session_graphs()[session.session_id] = pg.to_d3_format()
 
     return {
         "session_id": session.session_id,
-        "status": "running",
+        "status": session.status.value,
+        "pipeline_mode": "imported_graph_review",
         "graph_source": "imported",
         "graph_import_format": imported.source_format,
         "source_session_id": imported.source_session_id,
+        "document_markdown_length": len(session.document_markdown),
         "node_count": len(pg.nodes),
         "edge_count": len(pg.edges),
     }
