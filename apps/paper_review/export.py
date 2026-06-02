@@ -547,9 +547,13 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
     # Knowledge Graph
     if packet.graph_node_count or packet.graph_summary:
         lines.append(f"**Knowledge Graph:** {packet.graph_node_count} nodes, {packet.graph_edge_count} edges")
-        if packet.graph_utilization and packet.graph_utilization.get("overall_ratio") is not None:
-            ratio = packet.graph_utilization["overall_ratio"]
-            lines.append(f" | Utilization: {ratio:.0%}")
+        if packet.graph_utilization:
+            ratio = packet.graph_utilization.get(
+                "utilization_ratio",
+                packet.graph_utilization.get("overall_ratio"),
+            )
+            if ratio is not None:
+                lines.append(f" | Utilization: {float(ratio):.0%}")
         lines.append("")
 
     # Individual reviews

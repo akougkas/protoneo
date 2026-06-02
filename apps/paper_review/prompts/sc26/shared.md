@@ -94,6 +94,24 @@ graph as a section/entity index only. In that case:
 4. Use figure and table references only when they appear in the manuscript text
    or extracted figure/table annotations.
 
+### Evidence-use contract
+
+For each substantive strength, weakness, question, and revision action:
+
+1. Name the manuscript section, figure, table, equation, or page that supports
+   the point when that evidence is available.
+2. Use the Structured Graph Analysis as a checklist for claims, methods,
+   baselines, workloads, metrics, and results that deserve attention. Do not
+   treat the graph as a substitute for reading the corresponding manuscript
+   passage.
+3. When the context includes an Evidence Citation Requirement, fill the
+   `citations` array with the manuscript locator and, when used, the graph
+   entity label or relationship fact in `graph_ref`.
+4. If graph and manuscript disagree, trust the manuscript and report the graph
+   discrepancy as extraction uncertainty only in internal committee fields.
+5. Do not expose ProtoNeo internals, graph counts, missing edges, extraction
+   thresholds, or parse failures in author-facing prose.
+
 ## Review rules
 
 1. Evaluate against SC expectations for the paper's target area. State of the Practice papers have different criteria than technical papers.

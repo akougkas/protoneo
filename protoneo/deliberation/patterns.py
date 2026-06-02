@@ -356,6 +356,13 @@ class RoundRobinPattern:
         # Track deliberation turns separately (accumulated across rounds).
         deliberation_turns: list[AgentOutput] = []
 
+        def _phase_context(phase_name: str) -> str:
+            phase_contexts = context.metadata.get("phase_contexts", {})
+            if not isinstance(phase_contexts, dict):
+                return ""
+            value = phase_contexts.get(phase_name, "")
+            return value if isinstance(value, str) else ""
+
         def _build_deliberation_prompt(
             current_agent_id: str,
             current_role: str,
@@ -369,20 +376,17 @@ class RoundRobinPattern:
             """
             sections = []
 
-            # 1. Paper context (graph summary only to save tokens;
-            #    the full paper is already in the agent's system prompt
-            #    context from Phase 1).
-            if paper_context:
-                graph_marker = "## Paper Knowledge Graph"
-                if graph_marker in paper_context:
-                    graph_idx = paper_context.index(graph_marker)
-                    sections.append(
-                        "## Manuscript Context\n\n"
-                        "The full paper was provided in your initial review. "
-                        "Below is the knowledge graph summary for reference "
-                        "when citing specific evidence.\n\n"
-                        + paper_context[graph_idx:]
-                    )
+            # 1. Optional app-provided source context. The kernel does not parse
+            # app-specific prompt headings; applications decide what compact
+            # evidence context is useful in later phases.
+            source_context = _phase_context("deliberation")
+            if source_context:
+                sections.append(
+                    "## Source Context\n\n"
+                    "The full initial context was provided during independent review. "
+                    "Below is the app-provided evidence context for this deliberation phase.\n\n"
+                    + source_context
+                )
 
             # 2. All independent reviews, clearly labeled
             sections.append("## Independent Reviews from the Panel")
@@ -914,16 +918,15 @@ class IndependentSynthesisPattern:
             for o in phase.outputs:
                 all_outputs.append(f"[{o.agent_role}]: {o.content}")
 
-        # Include the FULL original paper context (manuscript + graph summary)
-        # so the meta-reviewer can fact-check reviewer claims against the source.
-        # Without the paper, the meta-reviewer can only parrot reviewer opinions
-        # and cannot detect hallucinated scores or fabricated claims.
+        # Include the original task context so the synthesizer can fact-check
+        # participant outputs against the source material instead of merely
+        # summarizing prior messages.
         original_context = user_message.content if user_message else ""
         context_block = ""
         if original_context:
             context_block = (
                 "\n\n" + "=" * 60
-                + "\nORIGINAL MANUSCRIPT AND GRAPH (for fact-checking reviewer claims)\n"
+                + "\nORIGINAL SOURCE CONTEXT\n"
                 + "=" * 60 + "\n\n"
                 + original_context
             )
@@ -931,30 +934,14 @@ class IndependentSynthesisPattern:
         synthesis_prompt = Message(
             role="user",
             content=(
-                "Below are all reviewer outputs and deliberation messages. "
-                "Synthesize them into the final structured review required by "
-                "your system prompt.\n\n"
-                "IMPORTANT: You have the full manuscript below. Verify reviewer claims "
-                "against the actual text. If a reviewer cites a section/figure/table, "
-                "check whether it says what they claim. Flag any reviewer who scores "
-                "inconsistently with their own stated weaknesses.\n\n"
-                "VISUAL EVIDENCE: If the original context contains a Visual Evidence "
-                "Ledger, use it to verify reviewer numeric claims about figures or "
-                "tables before repeating them. Do not treat graph limitations, parse "
-                "limitations, missing graph edges, undescribed figures, or low graph "
-                "extraction confidence as paper weaknesses.\n\n"
-                "DELIBERATION AUDIT: Treat the deliberation transcript as PC-panel "
-                "delta evidence, not as repeated reviews. Identify stance changes, "
-                "strongest agreements, strongest disagreements, evidence corrections, "
-                "and issues reviewers asked to include or exclude from the final "
-                "review. The final review should reflect that debate in "
-                "`disagreements`, `decision_risk_notes`, `comments_for_pc`, and "
-                "the final recommendation rationale. Do not hide a real split panel "
-                "behind bland consensus language.\n\n"
-                "OFFLINE REVIEW OUTPUT: Populate every `final_review` field needed "
-                "for the SC Linklings offline form. ProtoNeo will deterministically "
-                "render the exact `.txt` template from those fields, so do not leave "
-                "offline-review dimensions blank.\n\n"
+                "Below are all participant outputs and deliberation messages. "
+                "Synthesize them according to your system prompt and output contract.\n\n"
+                "Use the original source context below to verify evidence-sensitive "
+                "claims before repeating them. Preserve material disagreements and "
+                "corrections from the deliberation rather than flattening them into "
+                "unsupported consensus. If a participant's conclusion conflicts with "
+                "the source context or with their own stated evidence, account for "
+                "that inconsistency in the synthesis.\n\n"
                 + "\n\n---\n\n".join(all_outputs)
                 + context_block
             ),

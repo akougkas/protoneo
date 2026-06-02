@@ -28,12 +28,18 @@ from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.llm.errors import sanitize_error_message
 from .conference import ConferenceProfile
 from .prompts import apply_output_guardrails, prompt_pack_no_chain_of_thought
+from .context_audit import build_context_audit_artifact
 from .review import (
     build_deliberation_config,
     build_user_message,
     parse_review_output,
     resolve_paper_review_model,
     strip_json_fences,
+)
+from .review_context import (
+    ReviewContextMode,
+    ReviewContextPayload,
+    build_review_context_payload,
 )
 from .schemas import sanitize_final_review
 from .web_context import build_review_web_context, review_web_search_enabled
@@ -44,63 +50,10 @@ logger = logging.getLogger("protoneo.paper_review.pipeline")
 _session_graphs = get_session_graphs()
 _session_ontologies = get_session_ontologies()
 
-_STRUCTURAL_NODE_TYPES = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
-_STRUCTURAL_EDGE_TYPES = {"HAS_SECTION", "CONTAINS", "HAS_ARTIFACT", "APPEARS_IN"}
-_MIN_REVIEW_SEMANTIC_EDGES = 3
 _GRAPH_ARTIFACT_PATTERNS = (
     re.compile(r"\b\d+\s*/\s*\d+\b[^\n.]*\b(?:claim|claims|method|methods|baseline|baselines|evidence|edges?)\b", re.I),
     re.compile(r"\b(?:Evidence/Result|COMPARED_AGAINST|linked evidence|evidence links?|baseline comparison edges?|unsupported by graph|graph evidence|graph artifacts?|graph counts?|edge counts?)\b", re.I),
 )
-
-
-def _semantic_nodes(graph: KnowledgeGraph) -> list[Any]:
-    return [n for n in graph.nodes if n.node_type not in _STRUCTURAL_NODE_TYPES]
-
-
-def _semantic_edges(graph: KnowledgeGraph) -> list[Any]:
-    return [e for e in graph.edges if e.edge_type not in _STRUCTURAL_EDGE_TYPES]
-
-
-def review_graph_quality(graph: KnowledgeGraph) -> dict[str, Any]:
-    """Classify whether graph relationships are safe reviewer evidence."""
-    semantic_nodes = _semantic_nodes(graph)
-    semantic_edges = _semantic_edges(graph)
-    grounding = graph.grounding_summary()
-    relationship_facts_usable = len(semantic_edges) >= _MIN_REVIEW_SEMANTIC_EDGES
-    if not graph.nodes:
-        mode = "unavailable"
-    elif relationship_facts_usable:
-        mode = "relational"
-    else:
-        mode = "index_only"
-    return {
-        "mode": mode,
-        "relationship_facts_usable": relationship_facts_usable,
-        "semantic_node_count": len(semantic_nodes),
-        "semantic_edge_count": len(semantic_edges),
-        "threshold": _MIN_REVIEW_SEMANTIC_EDGES,
-        **grounding,
-    }
-
-
-def _build_graph_index_context(graph: KnowledgeGraph) -> str:
-    """Return safe graph context when relationships are not review evidence."""
-    semantic_types = sorted({n.node_type for n in _semantic_nodes(graph)})
-    sections = [s for s in graph.section_names if s]
-    lines = [
-        "\n\n## Knowledge Graph Context\n",
-        "Graph relationship extraction did not meet the review-quality threshold. "
-        "Use the graph only as a manuscript section/entity index for navigation.",
-        "Do not cite graph edge counts, missing evidence links, baseline edges, "
-        "connectivity, or graph unsupportedness as evidence about the paper.",
-        "Base praise and criticism on the manuscript text and verified extracted "
-        "figure/table annotations.",
-    ]
-    if sections:
-        lines.append("Indexed sections: " + ", ".join(sections[:12]))
-    if semantic_types:
-        lines.append("Indexed entity types: " + ", ".join(semantic_types[:12]))
-    return "\n".join(lines) + "\n"
 
 
 def _strip_unusable_graph_claims_from_text(text: str) -> str:
@@ -186,162 +139,9 @@ def _review_score_distribution(result: DeliberationResult) -> dict[str, int]:
     return scores
 
 
-def _build_review_graph_analysis(graph: KnowledgeGraph) -> str:
-    """Generate structured graph analysis for reviewer context.
-
-    Surfaces only positive graph facts that passed the relationship-quality gate.
-    Missing edges are never presented as evidence that the manuscript lacks support.
-    """
-    quality = review_graph_quality(graph)
-    if quality["mode"] == "unavailable":
-        return (
-            "\n\n## Structured Graph Analysis\n\n"
-            "No knowledge graph entities are available for this session. "
-            "Treat the manuscript text and inline figure/table annotations as the "
-            "primary evidence source, and explicitly note that graph grounding is unavailable.\n"
-        )
-    if quality["mode"] == "index_only":
-        return (
-            "\n\n## Structured Graph Analysis\n\n"
-            "Graph relationship extraction did not meet the review-quality threshold. "
-            "Use the graph as a section/entity index only. Do not infer absent "
-            "paper evidence from missing graph links, do not cite edge counts, and "
-            "do not make relationship claims from the graph for this review.\n"
-        )
-
-    semantic = _semantic_nodes(graph)
-    if not semantic:
-        return (
-            "\n\n## Structured Graph Analysis\n\n"
-            "The graph contains only structural paper nodes and no semantic claim, "
-            "method, baseline, evidence, result, or dataset entities. Use the graph "
-            "only as a navigation aid, not as evidence about missing paper support.\n"
-        )
-
-    sem_edges = _semantic_edges(graph)
-
-    typed: dict[str, list] = {}
-    for n in semantic:
-        typed.setdefault(n.node_type, []).append(n)
-    node_labels = {n.id: n.label for n in graph.nodes}
-
-    lines = [
-        "\n\n## Structured Graph Analysis\n",
-        "Use only the relationship facts listed here. Figure and table references "
-        "are usable only when the same figure or table appears in the manuscript "
-        "text or extracted figure/table annotations.",
-    ]
-
-    # 1. Positive relationship facts only. Missing edges are not paper evidence.
-    if sem_edges:
-        lines.append("\n### Extracted Relationship Facts")
-        for edge in sem_edges[:10]:
-            src = node_labels.get(edge.source_id, edge.source_id)
-            tgt = node_labels.get(edge.target_id, edge.target_id)
-            lines.append(f"- {src[:80]} --[{edge.edge_type}]--> {tgt[:80]}")
-
-    # 2. Baseline entities
-    baselines = typed.get("Baseline", [])
-    if baselines:
-        lines.append("\n### Baseline Entities")
-        names = [b.label.split(":")[0].strip() for b in baselines[:8]]
-        lines.append(", ".join(names))
-
-    # 3. Section Entity Density
-    section_counts: dict[str, int] = {}
-    for n in semantic:
-        if n.source_section:
-            section_counts[n.source_section] = section_counts.get(n.source_section, 0) + 1
-
-    if section_counts and graph.section_names:
-        lines.append("\n### Section Coverage")
-        covered_lower = {c.lower() for c in section_counts}
-        empty = [s for s in graph.section_names if s.lower() not in covered_lower]
-        if empty:
-            lines.append(f"Sections with no extracted entities: {', '.join(empty[:5])}")
-        for sec, count in sorted(section_counts.items(), key=lambda x: -x[1])[:6]:
-            lines.append(f"- {sec}: {count} entities")
-
-    result = "\n".join(lines) + "\n"
-    if len(result) > 2000:
-        result = result[:1800].rsplit("\n", 1)[0] + "\n"
-    return result
-
-
-def _build_visual_evidence_ledger(graph: KnowledgeGraph) -> str:
-    """Concise, reviewer-safe ledger of figure/table/equation evidence."""
-    visual = [
-        n for n in graph.nodes
-        if n.node_type in ("Figure", "Table") and n.attributes.get("description")
-    ]
-    equations = [
-        n for n in graph.nodes
-        if n.node_type == "Equation"
-        and n.attributes.get("grounding") in {"formula_not_decoded", "formula_decoded"}
-    ]
-    if not visual and not equations:
-        return ""
-
-    lines = [
-        "\n\n## Visual Evidence Ledger\n"
-        if visual else
-        "\n\n## Evidence Artifact Ledger\n"
-    ]
-    if visual:
-        lines.append(
-            "Vision-model descriptions of figures/tables. Treat numeric claims as "
-            "extracted-from-figure and cross-check against the manuscript text."
-        )
-        for node in visual[:12]:
-            page = node.attributes.get("page", "?")
-            claims = node.attributes.get("numeric_claims") or []
-            claim_text = f" Numeric: {'; '.join(claims[:4])}." if claims else ""
-            lines.append(
-                f"- {node.label[:60]} (p.{page}): "
-                f"{node.attributes['description'][:240]}{claim_text}"
-            )
-    if equations:
-        if visual:
-            lines.append("\n### Equation Evidence")
-        lines.append(
-            "Equation extraction notes. A not-decoded equation means the formula was "
-            "present but Docling did not recover its formula text; do not quote it as decoded."
-        )
-        for node in equations[:12]:
-            page = node.attributes.get("page", "?")
-            context = node.attributes.get("surrounding_context") or {}
-            before = context.get("before", "") if isinstance(context, dict) else ""
-            after = context.get("after", "") if isinstance(context, dict) else ""
-            status = "decoded" if node.attributes.get("grounding") == "formula_decoded" else "not decoded"
-            snippet = node.source_text if status == "decoded" else (before or after or node.source_text)
-            lines.append(f"- {node.label[:60]} ({status}, p.{page}): {str(snippet)[:220]}")
-    return "\n".join(lines) + "\n"
-
-
 def _build_enriched_review_message(user_message: str, graph: KnowledgeGraph) -> str:
-    """Append graph summary and structured analysis for all reviewer agents."""
-    parts = [user_message]
-    quality = review_graph_quality(graph)
-    if quality["relationship_facts_usable"]:
-        parts.append(
-            "\n\n## Knowledge Graph Context\n\n"
-            "Graph relationship extraction passed the review-quality threshold. "
-            "Use only the positive relationship facts listed in Structured Graph "
-            "Analysis. Do not infer paper weaknesses from missing graph edges or "
-            "cite internal graph counts in author-facing prose.\n"
-        )
-    elif quality["mode"] != "unavailable":
-        parts.append(_build_graph_index_context(graph))
-    else:
-        parts.append(
-            "\n\n## Knowledge Graph Summary\n\n"
-            "No reviewer-facing graph summary is available for this session.\n"
-        )
-    parts.append(_build_review_graph_analysis(graph))
-    ledger = _build_visual_evidence_ledger(graph)
-    if ledger:
-        parts.append(ledger)
-    return "\n\n".join(p.strip() for p in parts if p)
+    """Backward-compatible renderer for callers that only need prompt text."""
+    return build_review_context_payload(user_message, graph).render_for_independent_review()
 
 
 def _write_review_checkpoint(session, stage_name: str) -> None:
@@ -374,6 +174,8 @@ async def _run_review_stage(
     bus: SessionEventBus,
     ctl: PipelineControl,
     paper_graph: KnowledgeGraph,
+    context_payload: ReviewContextPayload | None = None,
+    context_mode: ReviewContextMode | str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE,
 ) -> DeliberationResult:
     """Review stage: independent reviews -> deliberation -> meta-review.
 
@@ -384,6 +186,21 @@ async def _run_review_stage(
     _session_manager = get_session_manager()
     _agent_buffers: dict[str, str] = {}
     prompt_snapshots: dict[str, str] = {}
+    active_context_mode = ReviewContextMode.coerce(context_mode)
+    context_audit_artifact: dict[str, Any] | None = None
+
+    if context_payload:
+        context_audit_artifact = build_context_audit_artifact(
+            context_payload=context_payload,
+            agent_configs=agent_configs,
+            deliberation_config=delib_config,
+            active_mode=active_context_mode,
+            include_prompt_text=True,
+        )
+        ctx = _session_manager.get_context(sid)
+        phase_contexts = ctx.metadata.setdefault("phase_contexts", {})
+        phase_contexts["deliberation"] = context_payload.render_for_deliberation(active_context_mode)
+        ctx.metadata["review_context_audit"] = context_audit_artifact.get("component_audit", {})
 
     def on_event(evt_type: str, data: dict) -> None:
         if evt_type == "prompt_rendered":
@@ -467,6 +284,8 @@ async def _run_review_stage(
             session.app_data = {}
         rendered = session.app_data.setdefault("rendered_prompts", {})
         rendered["independent_review"] = enriched_message[:20000]
+        if context_audit_artifact:
+            session.app_data["review_context_audit"] = context_audit_artifact
         await _session_manager.update(session)
 
     result = await _engine.run(
@@ -488,6 +307,29 @@ async def _run_review_stage(
         rendered = session.app_data.setdefault("rendered_prompts", {})
         for phase, text in prompt_snapshots.items():
             rendered.setdefault(phase, text)
+        if context_payload:
+            independent_reviews: list[str] = []
+            deliberation_turns: list[str] = []
+            for phase in result.phases:
+                if phase.phase_name == "independent_review":
+                    independent_reviews.extend(
+                        output.content for output in phase.outputs if output.content
+                    )
+                elif phase.phase_name == "deliberation":
+                    deliberation_turns.extend(
+                        output.content for output in phase.outputs if output.content
+                    )
+            final_audit = build_context_audit_artifact(
+                context_payload=context_payload,
+                agent_configs=agent_configs,
+                deliberation_config=delib_config,
+                active_mode=active_context_mode,
+                independent_reviews=independent_reviews,
+                deliberation_turns=deliberation_turns,
+                include_prompt_text=True,
+            )
+            final_audit["rendered_prompt_snapshots"] = prompt_snapshots
+            session.app_data["review_context_audit"] = final_audit
         session.result = result.model_dump(mode="json")
         session.status = SessionStatus.RUNNING
         for phase in result.phases:
@@ -697,7 +539,9 @@ async def _run_graph_pipeline(
             })
 
             user_message = build_user_message(doc, profile)
-            enriched_message = _build_enriched_review_message(user_message, paper_graph)
+            context_payload = build_review_context_payload(user_message, paper_graph)
+            context_mode = ReviewContextMode.MARKDOWN_ONLY
+            enriched_message = context_payload.render_for_independent_review(context_mode)
 
             ctl.enter_step("independent_reviews")
             bus.emit("step_started", {
@@ -711,6 +555,8 @@ async def _run_graph_pipeline(
             result = await _run_review_stage(
                 sid, agent_configs, fallback_delib,
                 enriched_message, bus, ctl, paper_graph,
+                context_payload=context_payload,
+                context_mode=context_mode,
             )
 
             session = await _session_manager.get(sid)
@@ -868,7 +714,9 @@ async def _run_graph_pipeline(
         })
 
         user_message = build_user_message(doc, profile)
-        enriched_message = _build_enriched_review_message(user_message, paper_graph)
+        context_payload = build_review_context_payload(user_message, paper_graph)
+        context_mode = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE
+        enriched_message = context_payload.render_for_independent_review(context_mode)
 
         # ── Step 1: Independent Reviews ────────────────
         ctl.enter_step("independent_reviews")
@@ -883,6 +731,8 @@ async def _run_graph_pipeline(
         result = await _run_review_stage(
             sid, agent_configs, fallback_delib,
             enriched_message, bus, ctl, paper_graph,
+            context_payload=context_payload,
+            context_mode=context_mode,
         )
 
         # Persist annotated graph

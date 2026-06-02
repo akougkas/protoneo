@@ -22,6 +22,7 @@ from protoneo.llm.policies import (
 from protoneo.llm.registry import CapabilityRegistry
 from protoneo.llm.structured import extract_json_object, sanitize_structured_text
 from .conference import ConferenceProfile
+from .graph_usage import compute_review_graph_utilization
 from .prompts import (
     apply_output_guardrails,
     assemble_system_prompt,
@@ -1078,7 +1079,7 @@ def session_to_review_packet(session: Any) -> ReviewPacket:
 
             if packet.reviews:
                 review_dicts = [r.model_dump() for r in packet.reviews]
-                packet.graph_utilization = pg.compute_utilization(review_dicts)
+                packet.graph_utilization = compute_review_graph_utilization(pg, review_dicts)
         except Exception:
             pass
 

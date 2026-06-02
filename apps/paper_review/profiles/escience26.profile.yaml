@@ -1,0 +1,233 @@
+conference:
+  slug: escience26
+  name: "IEEE International eScience Conference"
+  short_name: "eScience '26"
+  location: "Naples, Italy"
+  dates: "2026-09-28 to 2026-10-02"
+  paper_types:
+    - id: full
+      label: "Full Paper"
+    - id: experience
+      label: "eScience Experience and Solution Paper"
+
+scope:
+  summary: >-
+    eScience studies, enacts, and improves innovation in computationally
+    intensive and data-intensive research methods. Submissions may span all
+    research disciplines and all stages of the research lifecycle, from
+    research-question formulation through large-scale simulation, data
+    analytics, scientific discovery, sharing, publication, reuse, and
+    reapplication of results, data, tools, processes, and knowledge. Ideal
+    papers show interplay between scientific applications and infrastructure
+    technologies, with novelty in one or both.
+  must_show_scope_connection: true
+  topics:
+    - "AI, machine learning, data science, generative AI, and large language models in science"
+    - "Research computing cyberinfrastructure including cloud, clusters, HPC, and supercomputers"
+    - "FAIR principles for scientific software, data, workflows, and models"
+    - "Reproducible and replicable eScience"
+    - "Translational research in computer and computational sciences"
+    - "Continuum computing across cloud, edge, and IoT"
+    - "Education and eScience"
+    - "Collaborative, reproducible, and replicable eScience"
+    - "Science gateways, data portals, and digital repositories"
+    - "Resource management and scheduling"
+    - "Programming paradigms and models"
+    - "Real-time and time-sensitive computing for scientific instruments"
+    - "Automation and event-based computing"
+    - "Big data stacks and significant data ecosystems"
+    - "File and storage systems, I/O, and data management"
+    - "Scientific applications, algorithms, tools, and technologies"
+    - "Scientific workflows and distributed computing paradigms including FaaS"
+    - "Blockchain technologies in science"
+    - "Fault tolerance, resilience, and security"
+  areas:
+    - id: ai_for_science
+      label: "AI, ML, Data Science, and Generative AI in Science"
+      description: "AI and data-science methods applied to scientific discovery and research workflows"
+    - id: cyberinfrastructure
+      label: "Research Computing Cyberinfrastructure"
+      description: "Cloud, cluster, HPC, supercomputing, and distributed scientific infrastructure"
+    - id: fair_reproducibility
+      label: "FAIR and Reproducible eScience"
+      description: "FAIR software, data, workflows, models, provenance, reproducibility, and replicability"
+    - id: workflows_gateways_repositories
+      label: "Workflows, Gateways, Portals, and Repositories"
+      description: "Science gateways, workflow systems, data portals, repositories, and reusable research platforms"
+    - id: continuum_realtime
+      label: "Continuum and Time-Sensitive Computing"
+      description: "Cloud-edge-IoT convergence, automation, event-based computing, and scientific instruments"
+    - id: data_systems
+      label: "Data Ecosystems, Storage, and I/O"
+      description: "Big data stacks, storage, I/O, data management, and significant scientific data ecosystems"
+    - id: scientific_applications
+      label: "Scientific Applications, Algorithms, Tools, and Technologies"
+      description: "Scientific applications and enabling algorithms, tools, and technologies across disciplines"
+    - id: resilience_security
+      label: "Resilience, Security, and Trust"
+      description: "Fault tolerance, resilience, security, and trustworthy computing for science"
+
+submission:
+  max_pages_excluding_references: 8
+  format: "IEEE proceedings (two-column, U.S. letter 8.5x11, single-spaced 10-point font)"
+  dual_anonymous: false
+  single_blind: true
+  require_paper_type_in_title: false
+  previously_unpublished_required: true
+  preprints_allowed: true
+  ai_generated_content_disclosure_required: true
+  key_dates:
+    papers_close: "2026-06-09"
+    notifications: "2026-06-29"
+    camera_ready: "2026-08-07"
+    conference: "2026-09-28 to 2026-10-02"
+
+review_form:
+  overall_merit:
+    scale: [1, 5]
+    labels:
+      1: Reject
+      2: Weak reject
+      3: Borderline
+      4: Accept
+      5: Strong accept
+  reviewer_expertise:
+    scale: [1, 4]
+    labels:
+      1: No familiarity
+      2: Some familiarity
+      3: Knowledgeable
+      4: Expert
+  sections:
+    - paper_summary
+    - strengths
+    - weaknesses
+    - questions_for_authors
+    - comments_for_authors
+    - comments_for_pc
+
+review_process:
+  type: single_blind
+  reviewers_per_paper: "multiple"
+  has_rebuttal: false
+  note: >-
+    Full papers are single-blind peer reviewed. Accepted full papers receive
+    oral presentation slots and are published in the IEEE conference
+    proceedings. Rejected full papers may be resubmitted as posters or
+    workshop presentations.
+
+preflight_checks:
+  - scope_fit
+  - page_limit
+  - ieee_format
+  - previously_unpublished
+  - ai_disclosure_statement
+  - reproducibility_signals
+  - fair_artifact_signals
+  - application_infrastructure_interplay
+  - evaluation_specificity
+  - limitations_present
+
+graph:
+  pruning_threshold: 0.3
+
+panel:
+  pattern: independent_synthesis
+  deliberation_rounds: 2
+  phases:
+    - independent_review
+    - deliberation
+    - meta_review
+  agents:
+    technical:
+      role: "Technical Methods Reviewer"
+      focus:
+        - computational, data-intensive, or algorithmic method soundness
+        - evaluation rigor across workloads, datasets, instruments, or scientific cases
+        - whether implementation details support reproducibility and reuse
+        - whether conclusions follow from reported scientific and technical evidence
+    systems:
+      role: "Cyberinfrastructure and Systems Reviewer"
+      focus:
+        - fit and quality of enabling infrastructure such as HPC, cloud, edge, IoT, gateways, repositories, or workflows
+        - distributed computing, scheduling, storage, I/O, resilience, and security implications
+        - scalability, deployment feasibility, operational realism, and integration with scientific practice
+        - whether infrastructure choices serve the scientific lifecycle rather than appearing incidental
+    novelty:
+      role: "Scientific Impact and Positioning Reviewer"
+      focus:
+        - novelty in the scientific application, infrastructure technology, or their interplay
+        - significance for eScience researchers, developers, and users
+        - clarity of contribution boundary against prior scientific cyberinfrastructure and workflow work
+        - transferability of insights across disciplines or research lifecycle stages
+    artifact:
+      role: "FAIR and Reproducibility Reviewer"
+      focus:
+        - FAIR handling of scientific software, data, workflows, and models
+        - reproducibility and replicability claims
+        - provenance, reuse, publication, repository, and long-term sharing practices
+        - whether artifacts and workflows are specified enough for independent use
+    skeptic:
+      role: "Adversarial Skeptic"
+      focus:
+        - overclaiming relative to the demonstrated scientific or infrastructure evidence
+        - missing baselines, ablations, user studies, deployment evidence, or negative cases
+        - weak connection between application needs and infrastructure design
+        - hidden assumptions about scale, data availability, workflows, users, or institutions
+    meta_reviewer:
+      role: "Meta-Reviewer"
+      focus:
+        - synthesis of all reviews into coherent assessment
+        - balance between application contribution and infrastructure contribution
+        - consensus and disagreement analysis
+        - final recommendation with justification
+        - prioritized revision plan for authors
+  optional_agents:
+    security:
+      role: "Security, Trust, and Resilience Reviewer"
+      focus:
+        - security implications for scientific infrastructure
+        - fault tolerance and resilience
+        - trustworthy operation in distributed scientific environments
+
+awards:
+  - id: best_paper
+    label: "Best Paper Award"
+    note: "Announced at the conference"
+  - id: best_student_paper
+    label: "Best Student Paper Award"
+    note: "Announced at the conference"
+
+proceedings:
+  publisher: "IEEE CPS"
+  indexing:
+    - Scopus
+    - Web of Science
+
+output:
+  author_packet_sections:
+    - venue_fit
+    - preflight_warnings
+    - individual_reviews
+    - deliberation_summary
+    - meta_review
+    - decision_risk_notes
+    - revision_plan
+  export_formats:
+    - markdown
+    - pdf
+    - json
+
+responsible_ai:
+  intended_user: "manuscript_author"
+  positioning: "pre-submission author feedback tool"
+  reviewer_outsourcing_positioning: false
+  require_grounded_citations: true
+  encourage_local_or_byok_models: true
+  manuscript_retention_default: "configurable_minimal"
+  disclosure_note: >-
+    This is a simulated review for author self-improvement before submission.
+    Authors remain responsible for correctness, accuracy, and any venue-specific
+    AI disclosure requirements. eScience 2026 requires disclosure of
+    AI-generated content in the acknowledgments section when such content is
+    used.

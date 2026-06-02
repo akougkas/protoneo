@@ -250,7 +250,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { getSession, getReviewPacket, connectStream, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph, launchReview } from '../api/kernel.js'
+import { getSession, getReviewPacket, connectStream, getPipelineStatus, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph, launchReview } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 import AgentCard from './AgentCard.vue'
 import ReviewPacket from './ReviewPacket.vue'
@@ -803,7 +803,8 @@ async function fetchGateData() {
 }
 
 const allStepCards = computed(() => {
-  const preReviewSteps = [
+  const knownSteps = [
+    { key: 'imported_graph', label: 'Imported Graph' },
     { key: 'parse', label: 'Parse' },
     { key: 'nlp_prepass', label: 'NLP Pre-pass' },
     { key: 'ontology', label: 'Ontology' },
@@ -811,12 +812,15 @@ const allStepCards = computed(() => {
     { key: 'coref', label: 'Co-reference' },
     { key: 'verify', label: 'Verify' },
     { key: 'summarize', label: 'Summarize' },
+    { key: 'independent_reviews', label: 'Independent Reviews' },
+    { key: 'deliberation', label: 'Deliberation' },
+    { key: 'meta_review', label: 'Final Synthesis' },
   ]
   // Show cards for steps that have state (either from their own key or mapped key)
-  return preReviewSteps.filter(s => {
+  return knownSteps.filter(s => {
     // metadata step reports as nlp_prepass in the backend
     if (s.key === 'nlp_prepass') return pipelineSteps.nlp_prepass || pipelineSteps.metadata
-    return pipelineSteps[s.key]
+    return pipelineSteps[s.key] || s.key === currentStep.value
   })
 })
 
@@ -883,12 +887,37 @@ async function rerunStep(stepName) {
 
 async function pollSession() {
   try {
-    const res = await getSession(props.sessionId)
-    const s = res.data
+    const [sessionRes, pipelineRes] = await Promise.allSettled([
+      getSession(props.sessionId),
+      getPipelineStatus(props.sessionId),
+    ])
+    if (sessionRes.status !== 'fulfilled') return
+    const s = sessionRes.value.data
+    const live = pipelineRes.status === 'fulfilled' ? pipelineRes.value.data : null
     sessionMeta.value = s.config?.metadata || {}
     knowledgeGraphStats.value = s.knowledge_graph_stats || null
-    if (s.current_stage) currentStage.value = s.current_stage
     Object.assign(pipelineSteps, s.pipeline_steps || {})
+    if (live?.active) {
+      if (live.current_stage) currentStage.value = live.current_stage
+      if (live.current_step) {
+        currentStep.value = live.current_step
+        if (!pipelineSteps[live.current_step]) {
+          pipelineSteps[live.current_step] = {
+            status: 'running',
+            model: '',
+            startedAt: Date.now(),
+            nodesAdded: 0,
+            edgesAdded: 0,
+          }
+        } else if (pipelineSteps[live.current_step].status !== 'complete') {
+          pipelineSteps[live.current_step].status = 'running'
+        }
+      }
+      pipelinePaused.value = !!live.paused
+      showGate.value = false
+    } else if (s.current_stage) {
+      currentStage.value = s.current_stage
+    }
     const previousStatus = status.value
     const nextStatus = s.status || status.value
     if (nextStatus === 'completed' && previousStatus !== 'completed') {

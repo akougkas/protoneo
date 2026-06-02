@@ -245,7 +245,9 @@ export function retryFailedInBatch(batchId) {
 }
 
 export function launchReview(sessionId, options = null) {
-  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/launch-review`, options || {})
+  const payload = { ...(options || {}) }
+  if (payload.execute_live === undefined) payload.execute_live = true
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/launch-review`, payload)
 }
 
 // Post-review: refine field, score lightpass, persist edits
@@ -267,6 +269,22 @@ export function updateFinalReview(sessionId, finalReview) {
   })
 }
 
+export function pcChairChat(sessionId, { message, currentReview = {}, applyEdits = true }) {
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/pc-chair-chat`, {
+    message,
+    current_review: currentReview,
+    apply_edits: applyEdits,
+  })
+}
+
+export function getPcChairChat(sessionId) {
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/pc-chair-chat`)
+}
+
+export function writeReviewArtifacts(sessionId) {
+  return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/write-review-artifacts`)
+}
+
 // Graph export/import
 export function exportGraph(sessionId) {
   return kernel.get(`/api/sessions/${sessionId}/graph/export`, {
@@ -283,6 +301,7 @@ export function importGraphForReview(graphFile, conference, modelMap = {}, maxRo
   if (userInstructions) form.append('user_instructions', userInstructions)
   if (options.artifactDescriptionStatus) form.append('artifact_description_status', options.artifactDescriptionStatus)
   if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
+  if (options.contextMode) form.append('context_mode', options.contextMode)
   return kernel.post('/api/apps/paper_review/review-with-graph', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
@@ -290,7 +309,13 @@ export function importGraphForReview(graphFile, conference, modelMap = {}, maxRo
 
 // Graph utilization
 export function getGraphUtilization(sessionId) {
-  return kernel.get(`/api/sessions/${sessionId}/graph-utilization`)
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/graph-utilization`)
+}
+
+export function getContextAudit(sessionId, includePromptText = false) {
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/context-audit`, {
+    params: { include_prompt_text: includePromptText },
+  })
 }
 
 // Export

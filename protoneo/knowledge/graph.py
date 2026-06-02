@@ -674,17 +674,22 @@ class KnowledgeGraph(BaseModel):
     def to_agent_briefing(self, domain_config: Any = None) -> str:
         """Concise briefing derived from the knowledge graph for agent context.
 
-        Structured as three sections that directly support review writing:
-        key claims, methodology concerns, and evaluation summary. Capped
-        at ~5000 chars to avoid overwhelming agents.
+        The kernel renders graph facts only. Applications add domain-specific
+        instructions for how agents should use those facts.
         """
         if not self.nodes:
             return ""
 
         self.update_stats()
 
-        _STRUCTURAL = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
-        _NON_SEMANTIC_RELS = {"HAS_SECTION", "CONTAINS", "HAS_ARTIFACT", "APPEARS_IN"}
+        _STRUCTURAL = set(getattr(domain_config, "structural_node_types", None) or {
+            "Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation",
+        })
+        _NON_SEMANTIC_RELS = set(
+            getattr(domain_config, "structural_edge_types_for_summary", None)
+            or {"HAS_SECTION", "CONTAINS", "HAS_ARTIFACT", "APPEARS_IN"}
+        )
+        max_chars = int(getattr(domain_config, "summary_max_chars", 5200) or 5200)
 
         semantic = [n for n in self.nodes if n.node_type not in _STRUCTURAL]
         if not semantic:
@@ -787,8 +792,8 @@ class KnowledgeGraph(BaseModel):
         if low_confidence:
             lines.append("\n### Graph Extraction Notes")
             lines.append(
-                "*These are graph-extraction confidence flags, NOT paper weaknesses. "
-                "Do not treat them as reviewer findings.*"
+                "*These are low-confidence graph entities. Validate them against "
+                "source content before relying on them.*"
             )
             for n in sorted(low_confidence, key=lambda x: x.confidence)[:8]:
                 lines.append(f"- {n.label} ({n.node_type})")
@@ -830,9 +835,8 @@ class KnowledgeGraph(BaseModel):
         )
 
         summary = "\n".join(lines) + "\n"
-        # Cap at ~5000 chars to accommodate the additional sections
-        if len(summary) > 5200:
-            summary = summary[:5000].rsplit("\n", 1)[0] + "\n"
+        if len(summary) > max_chars:
+            summary = summary[: max(max_chars - 200, 1000)].rsplit("\n", 1)[0] + "\n"
         return summary
 
     # ── Review annotation ────────────────────────────────────
@@ -902,6 +906,7 @@ class KnowledgeGraph(BaseModel):
                 "per_reviewer": {},
                 "unreferenced_entities": [],
                 "utilization_ratio": 0.0,
+                "overall_ratio": 0.0,
                 "by_type": {},
             }
 
@@ -994,6 +999,7 @@ class KnowledgeGraph(BaseModel):
             "per_reviewer": per_reviewer,
             "unreferenced_entities": unreferenced,
             "utilization_ratio": round(len(referenced_ids) / max(len(semantic), 1), 3),
+            "overall_ratio": round(len(referenced_ids) / max(len(semantic), 1), 3),
             "by_type": by_type,
         }
 

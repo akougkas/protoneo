@@ -103,11 +103,12 @@ def load_role_prompt(conference_slug: str, role: str) -> str:
 
 
 def load_pc_chair_prompt(conference_slug: str) -> str:
-    """Load a venue final-synthesis prompt.
+    """Load a legacy venue final-synthesis prompt.
 
-    The current pipeline uses meta.md as the single Meta-Reviewer/PC Chair
-    synthesis prompt. Older callers may still ask for pc_chair.md, so prefer
-    meta.md and fall back to a venue pc_chair.md only for legacy prompt packs.
+    The current pipeline uses meta.md for synthesis. The interactive post-review
+    PC Chair is an API/UI workflow, not an automatic synthesis pass. Older
+    callers may still ask for pc_chair.md, so prefer meta.md and fall back to a
+    venue pc_chair.md only for legacy prompt packs.
     """
     meta = load_role_prompt(conference_slug, "meta")
     if meta:

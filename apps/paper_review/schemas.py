@@ -101,7 +101,7 @@ class ReviewPacket(BaseModel):
 
 
 _DEFAULT_FINAL_REVIEW: dict[str, Any] = {
-    "reviewer_role": "Meta-Reviewer / PC Chair",
+    "reviewer_role": "Meta-Reviewer",
     "panel_summary": "",
     "score_distribution": {},
     "consensus": {},

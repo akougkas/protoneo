@@ -35,17 +35,23 @@ from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.knowledge.parser import parse_file
 from protoneo.llm.errors import sanitize_error_message
 from protoneo.llm.settings import build_vlm_config, vlm_status
+from protoneo.llm.structured import extract_json_object
 
 from .conference import ConferenceProfile, list_profiles, load_profile
 _APP_NAME = "paper_review"
 _APP_VERSION = "0.1.0"
+from .context_audit import build_context_audit_artifact, summarize_context_audit
 from .export import packet_to_markdown, packet_to_pdf, write_review_artifacts
+from .graph_usage import compute_review_graph_utilization, compute_review_graph_value_metrics
 from .pipeline import (
-    _build_enriched_review_message,
     _run_graph_pipeline,
     _run_review_stage,
 )
 from .preflight import run_preflight
+from .review_context import (
+    ReviewContextMode,
+    build_review_context_payload,
+)
 from .review import (
     artifact_description_assumed_from_status,
     build_agent_configs,
@@ -350,6 +356,7 @@ async def _run_review_only_pipeline(
     delib_config: DeliberationConfig,
     bus: SessionEventBus,
     ctl: PipelineControl,
+    context_mode: str | ReviewContextMode = "",
 ) -> None:
     """Run only review stages for sessions with an existing graph."""
     _session_manager = get_session_manager()
@@ -366,7 +373,10 @@ async def _run_review_only_pipeline(
         session.config.get("metadata", {}).get("filename", "paper.pdf"),
     )
     user_message = build_user_message(doc_proxy, profile)
-    enriched_message = _build_enriched_review_message(user_message, pg)
+    context_payload = build_review_context_payload(user_message, pg)
+    metadata = session.config.get("metadata", {}) if session.config else {}
+    context_mode = ReviewContextMode.coerce(context_mode or metadata.get("context_mode", ""))
+    enriched_message = context_payload.render_for_independent_review(context_mode)
 
     ctl.enter_stage("review")
     bus.emit("stage_started", {
@@ -389,12 +399,14 @@ async def _run_review_only_pipeline(
         bus,
         ctl,
         pg,
+        context_payload=context_payload,
+        context_mode=context_mode,
     )
 
     session = await _session_manager.get(sid)
     if session:
         session.knowledge_graph = pg.model_dump(mode="json")
-        session.current_stage = "review"
+        session.current_stage = "post_review"
         session.status = SessionStatus.COMPLETED
         await _session_manager.update(session)
 
@@ -1426,6 +1438,8 @@ class LaunchReviewBody(BaseModel):
     user_instructions: str = ""
     artifact_description_assumed_present: bool = False
     artifact_description_status: str = ""
+    context_mode: str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value
+    execute_live: bool = False
 
 @router.post("/sessions/{session_id}/launch-review")
 async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
@@ -1481,10 +1495,14 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
             metadata["user_instructions"] = body.user_instructions
         metadata["artifact_description_status"] = ad_status
         metadata["artifact_description_assumed_present"] = ad_assumed_present
+        metadata["context_mode"] = ReviewContextMode.coerce(body.context_mode).value
         await _session_manager.update(session)
     else:
         agent_configs_raw = session.config.get("agents", {})
         agent_configs = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
+        if body:
+            metadata["context_mode"] = ReviewContextMode.coerce(body.context_mode).value
+            await _session_manager.update(session)
     delib_raw = session.config.get("deliberation", {})
     if delib_raw and delib_raw.get("phases"):
         delib_config = DeliberationConfig(**delib_raw)
@@ -1503,15 +1521,50 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
     doc_markdown = session.document_markdown or ""
     doc_proxy = _MinimalDoc(doc_text, doc_markdown, session.config.get("metadata", {}).get("filename", "paper.pdf"))
     user_message = build_user_message(doc_proxy, profile)
-    from .pipeline import _build_enriched_review_message
-    enriched_message = _build_enriched_review_message(user_message, pg)
+    context_payload = build_review_context_payload(user_message, pg)
+    context_mode = ReviewContextMode.coerce(
+        body.context_mode if body else metadata.get("context_mode", "")
+    )
+    enriched_message = context_payload.render_for_independent_review(context_mode)
+    context_audit = build_context_audit_artifact(
+        context_payload=context_payload,
+        agent_configs=agent_configs,
+        deliberation_config=delib_config,
+        active_mode=context_mode,
+        include_prompt_text=True,
+    )
+    if not hasattr(session, "app_data") or session.app_data is None:
+        session.app_data = {}
+    session.app_data["review_context_audit"] = context_audit
+    await _session_manager.update(session)
 
-    bus = SessionEventBus()
-    _event_buses[session_id] = bus
+    if not (body and body.execute_live):
+        return {
+            "session_id": session_id,
+            "status": "ready_for_live_review",
+            "stage": "offline_context_audit",
+            "live_execution_required": True,
+            "message": "Context audit rendered. Resubmit with execute_live=true to launch model reviewers.",
+            "context_audit": summarize_context_audit(context_audit),
+        }
+
+    # Reuse an existing bus so a page that opened the WebSocket before
+    # launching an imported-graph review keeps receiving reviewer events.
+    bus = _event_buses.get(session_id)
+    if not bus:
+        bus = SessionEventBus()
+        _event_buses[session_id] = bus
     ctl = PipelineControl()
     _pipeline_controls[session_id] = ctl
 
     session.status = SessionStatus.RUNNING
+    session.current_stage = "review"
+    session.pipeline_steps["independent_reviews"] = StepState(
+        status="running",
+        model_used=", ".join(
+            sorted({cfg.model for key, cfg in agent_configs.items() if key != "meta" and cfg.model})
+        ),
+    )
     await _session_manager.update(session)
 
     async def _run_review_only(sid: str) -> None:
@@ -1531,12 +1584,14 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
             result = await _run_review_stage(
                 sid, agent_configs, delib_config,
                 enriched_message, bus, ctl, pg,
+                context_payload=context_payload,
+                context_mode=context_mode,
             )
 
             sess = await _session_manager.get(sid)
             if sess:
                 sess.knowledge_graph = pg.model_dump(mode="json")
-                sess.current_stage = "review"
+                sess.current_stage = "post_review"
                 sess.status = SessionStatus.COMPLETED
                 await _session_manager.update(sess)
 
@@ -1583,6 +1638,9 @@ def _build_review_context(session) -> str:
         gs = session.knowledge_graph.get("summary", "")
         if gs:
             parts.append(f"## Knowledge Graph Summary\n\n{gs}")
+        nodes = session.knowledge_graph.get("nodes") or []
+        edges = session.knowledge_graph.get("edges") or []
+        parts.append(f"## Knowledge Graph Size\n\nNodes: {len(nodes)}\nEdges: {len(edges)}")
     phases = session.result.get("phases", [])
     rp = []
     for phase in phases:
@@ -1593,6 +1651,13 @@ def _build_review_context(session) -> str:
                 rp.append(f"### {role}\n{content}")
     if rp:
         parts.append("## Review Committee Outputs\n\n" + "\n\n---\n\n".join(rp))
+    if session.result:
+        final_review = session.result.get("final_review") or session.result.get("pc_chair_review")
+        if final_review:
+            parts.append(
+                "## Current Final Review\n\n"
+                + json.dumps(sanitize_final_review(final_review), indent=2, ensure_ascii=False)
+            )
     return "\n\n".join(parts)
 
 def _resolve_chat_model(session) -> str:
@@ -1766,6 +1831,239 @@ async def update_final_review(session_id: str, body: UpdateFinalReviewRequest):
     await _session_manager.update(session)
     return {"status": "saved"}
 
+
+class PCChairChatRequest(BaseModel):
+    message: str
+    current_review: dict[str, Any] = Field(default_factory=dict)
+    apply_edits: bool = True
+
+
+def _merge_review_patch(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (patch or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return merged
+
+
+def _pc_chair_system_prompt(context: str) -> str:
+    return (
+        "You are the ProtoNeo post-review PC Chair. You are not the meta-reviewer: "
+        "the meta-reviewer has already synthesized the official structured review. "
+        "Your job is to discuss that review with the human chair and make small, "
+        "auditable edits that prepare it for final storage or submission.\n\n"
+        "You have access to the processed manuscript text, imported/extracted "
+        "knowledge graph summary and size, independent reviews, deliberation turns, "
+        "and the current final review. Use those materials as constraints. Do not "
+        "invent new paper facts. Do not expose graph internals, graph IDs, or tool "
+        "mechanics in author-facing prose. Preserve real committee disagreements "
+        "unless the human explicitly resolves them. Do not change scores, confidence, "
+        "or recommendation labels unless the human explicitly asks you to.\n\n"
+        "When editing, return only a small patch for fields that should change. "
+        "Keep author-facing text professional, specific to the manuscript, and "
+        "consistent with the evidence already available.\n\n"
+        "Return ONLY strict JSON with this shape:\n"
+        "{\n"
+        '  "reply": "short conversational response to the human",\n'
+        '  "edit_summary": ["short descriptions of edits made"],\n'
+        '  "final_review_patch": {},\n'
+        '  "needs_user_decision": false\n'
+        "}\n\n"
+        "Available review context follows.\n\n"
+        f"{context}"
+    )
+
+
+@router.post("/sessions/{session_id}/pc-chair-chat")
+async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
+    """Chat with the post-review PC Chair and optionally apply bounded edits."""
+    _session_manager = get_session_manager()
+    _llm_client = get_llm_client()
+
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.result:
+        raise HTTPException(status_code=409, detail="No review results")
+    if not hasattr(session, "app_data") or session.app_data is None:
+        session.app_data = {}
+
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    base_review = sanitize_final_review(
+        body.current_review
+        or session.result.get("pc_chair_review")
+        or session.result.get("final_review")
+        or {}
+    )
+    chat_model = _resolve_chat_model(session)
+    if not chat_model:
+        raise HTTPException(status_code=409, detail="No model configured for PC Chair")
+
+    history = list(session.app_data.get("pc_chair_chat", [])) if session.app_data else []
+    compact_history = history[-8:]
+    context = _build_review_context(session)
+    user_msg = (
+        "Current editable final review JSON:\n"
+        + json.dumps(base_review, indent=2, ensure_ascii=False)
+        + "\n\nRecent PC Chair conversation:\n"
+        + json.dumps(compact_history, indent=2, ensure_ascii=False)
+        + "\n\nHuman request:\n"
+        + message
+    )
+
+    try:
+        response = await _llm_client.complete(
+            model=chat_model,
+            messages=[
+                {"role": "system", "content": _pc_chair_system_prompt(context)},
+                {"role": "user", "content": user_msg},
+            ],
+            session_id=session_id,
+            max_tokens=4096,
+            temperature=0.2,
+            phase_policy="meta_synthesis",
+        )
+    except Exception as e:
+        logger.error("PC Chair chat failed for %s: %s", session_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PC Chair chat failed: {sanitize_error_message(e)}")
+
+    parsed = extract_json_object(
+        response.content,
+        required_keys={"reply", "final_review_patch", "edit_summary"},
+    )
+    if not parsed:
+        parsed = {
+            "reply": response.content.strip(),
+            "edit_summary": [],
+            "final_review_patch": {},
+            "needs_user_decision": True,
+        }
+
+    patch = parsed.get("final_review_patch") if isinstance(parsed.get("final_review_patch"), dict) else {}
+    updated_review = base_review
+    applied = False
+    if body.apply_edits and patch:
+        updated_review = sanitize_final_review(_merge_review_patch(base_review, patch))
+        session.result["final_review"] = updated_review
+        session.result["pc_chair_review"] = updated_review
+        session.app_data["final_review"] = updated_review
+        session.app_data.pop("review_packet", None)
+        applied = True
+
+    turn = {
+        "user": message,
+        "reply": str(parsed.get("reply") or "").strip(),
+        "edit_summary": parsed.get("edit_summary") if isinstance(parsed.get("edit_summary"), list) else [],
+        "final_review_patch": patch,
+        "applied": applied,
+        "model": chat_model,
+    }
+    session.app_data.setdefault("pc_chair_chat", []).append(turn)
+    session.current_stage = "post_review"
+    await _session_manager.update(session)
+
+    return {
+        "reply": turn["reply"],
+        "edit_summary": turn["edit_summary"],
+        "final_review_patch": patch,
+        "final_review": updated_review,
+        "applied_edits": applied,
+        "needs_user_decision": bool(parsed.get("needs_user_decision", False)),
+        "history": session.app_data.get("pc_chair_chat", []),
+        "model": chat_model,
+    }
+
+
+@router.get("/sessions/{session_id}/pc-chair-chat")
+async def get_pc_chair_chat(session_id: str):
+    """Return saved PC Chair chat turns for a completed review session."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    app_data = session.app_data or {}
+    return {
+        "history": app_data.get("pc_chair_chat", []),
+        "final_review": sanitize_final_review(
+            (session.result or {}).get("pc_chair_review")
+            or (session.result or {}).get("final_review")
+            or {}
+        ),
+    }
+
+
+@router.post("/sessions/{session_id}/write-review-artifacts")
+async def write_session_review_artifacts(session_id: str):
+    """Persist the current final review through the app-layer packet exporter."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.result:
+        raise HTTPException(status_code=409, detail="No review results")
+    if not hasattr(session, "app_data") or session.app_data is None:
+        session.app_data = {}
+
+    metadata = session.config.get("metadata", {}) if session.config else {}
+    packet_dir_raw = metadata.get("packet_dir")
+    if packet_dir_raw:
+        packet_dir = Path(packet_dir_raw)
+        output_dir = packet_dir / "protoneo_outputs"
+        template_path = None
+        try:
+            template_path = _packet_review_template_path(packet_dir)
+        except FileNotFoundError:
+            template_path = None
+        paper_path = _packet_pdf_path(packet_dir)
+        paper_id = metadata.get("packet_paper_id") or packet_dir.name
+    else:
+        output_dir = Path("data") / "sessions" / "review_artifacts" / session_id
+        template_path = None
+        paper_path = Path()
+        paper_id = metadata.get("paper_title") or session_id
+
+    source_graph = None
+    if session.knowledge_graph:
+        try:
+            source_graph = KnowledgeGraph.model_validate(session.knowledge_graph)
+        except Exception:
+            source_graph = session.knowledge_graph
+
+    packet = session_to_review_packet(session)
+    manifest = write_review_artifacts(
+        packet,
+        output_dir,
+        source_graph=source_graph,
+        template_path=template_path,
+        paper_id=str(paper_id),
+        paper_path=paper_path,
+        source_graph_path=metadata.get("source_graph_path"),
+        source_session_id=metadata.get("source_session_id", ""),
+        model_map=None,
+        preset=metadata.get("preset", ""),
+        prompt_pack_version=packet.provenance_metadata.get("prompt_pack_version", ""),
+        artifact_description_assumed_present=bool(
+            metadata.get("artifact_description_assumed_present", False)
+        ),
+        artifact_description_status=str(metadata.get("artifact_description_status") or ""),
+    )
+    session.app_data["last_review_artifact_manifest"] = manifest
+    await _session_manager.update(session)
+    return {
+        "status": "written",
+        "output_dir": str(output_dir),
+        "manifest": manifest,
+    }
+
 # ── Graph Import ──────────────────────────────────
 
 @router.post("/review-with-graph")
@@ -1777,6 +2075,7 @@ async def review_with_graph(
     user_instructions: str = Form(""),
     artifact_description_assumed_present: bool = Form(False),
     artifact_description_status: str = Form(""),
+    context_mode: str = Form(ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value),
 ):
     """Create a review-ready session with an imported graph.
 
@@ -1845,6 +2144,7 @@ async def review_with_graph(
                 "graph_import_warnings": imported.warnings,
                 "artifact_description_status": ad_status,
                 "artifact_description_assumed_present": ad_assumed_present,
+                "context_mode": ReviewContextMode.coerce(context_mode).value,
             },
         },
         app_name=_APP_NAME,
@@ -1855,6 +2155,22 @@ async def review_with_graph(
     session.document_text = imported.document_text or imported_markdown
     session.graph_source = "imported"
     session.current_stage = "pre_review"
+    doc_proxy = _MinimalDoc(
+        session.document_text or session.document_markdown or pg.summary,
+        session.document_markdown or session.document_text or "",
+        session.config.get("metadata", {}).get("filename", "imported-graph"),
+    )
+    user_message = build_user_message(doc_proxy, profile)
+    context_payload = build_review_context_payload(user_message, pg)
+    if not hasattr(session, "app_data") or session.app_data is None:
+        session.app_data = {}
+    session.app_data["review_context_audit"] = build_context_audit_artifact(
+        context_payload=context_payload,
+        agent_configs=agent_configs,
+        deliberation_config=delib_config,
+        active_mode=ReviewContextMode.coerce(context_mode),
+        include_prompt_text=True,
+    )
     session.graph_after_step["imported_graph"] = pg.snapshot()
     session.pipeline_steps["imported_graph"] = StepState(
         status="complete",
@@ -1871,6 +2187,7 @@ async def review_with_graph(
         "graph_source": "imported",
         "graph_import_format": imported.source_format,
         "source_session_id": imported.source_session_id,
+        "context_mode": ReviewContextMode.coerce(context_mode).value,
         "document_markdown_length": len(session.document_markdown),
         "node_count": len(pg.nodes),
         "edge_count": len(pg.edges),
@@ -1902,6 +2219,8 @@ class SC26PacketReviewBody(BaseModel):
     artifact_description_assumed_present: bool = True
     artifact_description_status: str = "submitted"
     user_instructions: str = ""
+    context_mode: str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value
+    execute_live: bool = False
 
 
 def _normalize_title_for_match(value: str) -> str:
@@ -2038,6 +2357,7 @@ async def _run_one_sc26_packet_review(
     user_instructions: str,
     artifact_description_assumed_present: bool,
     artifact_description_status: str = "",
+    context_mode: str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value,
 ) -> dict[str, Any]:
     _session_manager = get_session_manager()
     template_path = _packet_review_template_path(packet_dir)
@@ -2100,6 +2420,7 @@ async def _run_one_sc26_packet_review(
                 "artifact_description_status": ad_status,
                 "artifact_description_assumed_present": ad_assumed_present,
                 "preset": preset,
+                "context_mode": ReviewContextMode.coerce(context_mode).value,
             },
         },
         app_name=_APP_NAME,
@@ -2120,7 +2441,9 @@ async def _run_one_sc26_packet_review(
         user_message = build_user_message(doc_proxy, profile)
     else:
         user_message = pg.summary
-    enriched_message = _build_enriched_review_message(user_message, pg)
+    context_payload = build_review_context_payload(user_message, pg)
+    context_mode = ReviewContextMode.coerce(context_mode)
+    enriched_message = context_payload.render_for_independent_review(context_mode)
 
     bus = SessionEventBus()
     ctl = PipelineControl()
@@ -2132,6 +2455,8 @@ async def _run_one_sc26_packet_review(
         bus,
         ctl,
         pg,
+        context_payload=context_payload,
+        context_mode=context_mode,
     )
 
     completed = await _session_manager.get(session.session_id)
@@ -2189,6 +2514,7 @@ async def run_sc26_packet_reviews(
     artifact_description_assumed_present: bool = True,
     artifact_description_status: str = "submitted",
     user_instructions: str = "",
+    context_mode: str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value,
 ) -> dict[str, Any]:
     results = []
     for packet_dir in _packet_dirs(packet_root, paper_ids):
@@ -2209,6 +2535,7 @@ async def run_sc26_packet_reviews(
                 user_instructions=user_instructions,
                 artifact_description_assumed_present=artifact_description_assumed_present,
                 artifact_description_status=artifact_description_status,
+                context_mode=context_mode,
             ))
         except Exception as e:
             logger.error("SC26 packet review failed for %s: %s", packet_dir, e, exc_info=True)
@@ -2232,6 +2559,16 @@ async def start_sc26_packet_review(body: SC26PacketReviewBody):
     the returned batch id to correlate logs; artifacts are written under each
     packet folder.
     """
+    if not body.execute_live:
+        return {
+            "status": "ready_for_live_review",
+            "live_execution_required": True,
+            "message": "No model reviews launched. Resubmit with execute_live=true after inspecting offline context audits.",
+            "packet_root": body.packet_root,
+            "paper_ids": body.paper_ids or list(SC26_PACKET_IDS),
+            "context_mode": ReviewContextMode.coerce(body.context_mode).value,
+        }
+
     batch_id = uuid.uuid4().hex
     batch_bus = SessionEventBus()
     get_event_buses()[f"sc26_packet_{batch_id}"] = batch_bus
@@ -2253,6 +2590,7 @@ async def start_sc26_packet_review(body: SC26PacketReviewBody):
             artifact_description_assumed_present=body.artifact_description_assumed_present,
             artifact_description_status=body.artifact_description_status,
             user_instructions=body.user_instructions,
+            context_mode=body.context_mode,
         )
         batch_bus.emit("batch_complete", {
             "batch_id": batch_id,
@@ -2304,6 +2642,118 @@ async def get_review_packet(session_id: str):
     await _session_manager.update(session)
 
     return data
+
+
+@router.get("/sessions/{session_id}/graph-utilization")
+async def get_review_graph_utilization(session_id: str):
+    """Compute paper-review graph utilization for independent reviews."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.knowledge_graph:
+        raise HTTPException(status_code=404, detail="No graph for this session")
+    if not session.result:
+        raise HTTPException(status_code=409, detail="Session has no results yet")
+
+    pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+    packet = session_to_review_packet(session)
+    review_dicts = [review.model_dump() for review in packet.reviews]
+    return compute_review_graph_utilization(pg, review_dicts)
+
+
+@router.get("/sessions/{session_id}/graph-value-metrics")
+async def get_review_graph_value_metrics(session_id: str):
+    """Compute deterministic graph-value audit metrics for review outputs."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.knowledge_graph:
+        raise HTTPException(status_code=404, detail="No graph for this session")
+    if not session.result:
+        raise HTTPException(status_code=409, detail="Session has no results yet")
+
+    pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+    packet = session_to_review_packet(session)
+    review_dicts = [review.model_dump() for review in packet.reviews]
+    audit = session.app_data.get("review_context_audit", {}) if session.app_data else {}
+    rendered = audit.get("component_audit", {}).get("rendered", {}) if isinstance(audit, dict) else {}
+    token_estimates = {
+        key: int(value.get("approx_tokens", 0))
+        for key, value in rendered.items()
+        if isinstance(value, dict)
+    }
+    return compute_review_graph_value_metrics(
+        pg,
+        review_dicts,
+        prompt_token_estimates=token_estimates,
+    )
+
+
+@router.get("/sessions/{session_id}/context-audit")
+async def get_review_context_audit(
+    session_id: str,
+    include_prompt_text: bool = False,
+):
+    """Render or retrieve paper-review context packets without model calls."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.knowledge_graph:
+        raise HTTPException(status_code=404, detail="No graph for this session")
+
+    existing = session.app_data.get("review_context_audit") if session.app_data else None
+    if existing and not include_prompt_text:
+        return summarize_context_audit(existing)
+
+    metadata = session.config.get("metadata", {}) if session.config else {}
+    conference_slug = metadata.get("conference", "hpdc26")
+    try:
+        profile = load_profile(conference_slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Conference '{conference_slug}' not found")
+
+    agent_configs_raw = session.config.get("agents", {}) if session.config else {}
+    agent_configs = {
+        key: AgentConfig(**value)
+        for key, value in agent_configs_raw.items()
+        if isinstance(value, dict)
+    }
+    if not agent_configs:
+        agent_configs = build_agent_configs(profile, conference_slug)
+
+    delib_raw = session.config.get("deliberation", {}) if session.config else {}
+    if delib_raw and delib_raw.get("phases"):
+        delib_config = DeliberationConfig(**delib_raw)
+    else:
+        delib_config = build_deliberation_config(
+            reviewer_ids=[key for key in agent_configs if key != "meta"],
+            max_rounds=2,
+        )
+
+    pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+    doc_proxy = _MinimalDoc(
+        session.document_text or session.document_markdown or pg.summary,
+        session.document_markdown or session.document_text or "",
+        metadata.get("filename", "paper.pdf"),
+    )
+    user_message = build_user_message(doc_proxy, profile)
+    context_payload = build_review_context_payload(user_message, pg)
+    audit = build_context_audit_artifact(
+        context_payload=context_payload,
+        agent_configs=agent_configs,
+        deliberation_config=delib_config,
+        active_mode=ReviewContextMode.coerce(metadata.get("context_mode", "")),
+        include_prompt_text=include_prompt_text,
+    )
+    if not hasattr(session, "app_data") or session.app_data is None:
+        session.app_data = {}
+    session.app_data["review_context_audit"] = audit
+    await _session_manager.update(session)
+    return audit if include_prompt_text else summarize_context_audit(audit)
+
 
 @router.get("/sessions/{session_id}/review-packet.md")
 async def get_review_packet_md(session_id: str):
