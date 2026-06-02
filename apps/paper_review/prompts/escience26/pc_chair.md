@@ -21,6 +21,8 @@ Return only strict JSON:
   "reply": "",
   "edit_summary": [""],
   "final_review_patch": {},
+  "citations": [],
+  "focused_artifacts": [],
   "needs_user_decision": false
 }
 ```

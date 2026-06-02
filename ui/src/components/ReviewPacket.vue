@@ -11,6 +11,7 @@
         <span v-if="packet.total_cost > 0" class="cost-badge">
           ${{ packet.total_cost.toFixed(4) }}
         </span>
+        <button class="ask-inline" @click="askPacket">Ask PC Chair</button>
       </div>
     </div>
 
@@ -115,6 +116,7 @@
         <div class="review-header" @click="toggleReview(idx)">
           <div class="review-role">{{ review.reviewer_role }}</div>
           <div class="review-header-right">
+            <button class="ask-inline compact" @click.stop="askReview(review, idx)">Ask</button>
             <span v-if="review.overall_merit && review.overall_merit.score"
               :class="['score-badge small', scoreTier(review.overall_merit.score)]">
               {{ review.overall_merit.score }}
@@ -230,7 +232,10 @@
     <div v-if="packet.deliberation && packet.deliberation.length" class="delib-section">
       <h3 @click="showDelib = !showDelib" class="collapsible">
         Deliberation Log ({{ totalDelibEntries }} exchanges)
-        <span class="toggle">{{ showDelib ? '−' : '+' }}</span>
+        <span class="collapsible-actions">
+          <button class="ask-inline compact" @click.stop="askDeliberation">Ask</button>
+          <span class="toggle">{{ showDelib ? '−' : '+' }}</span>
+        </span>
       </h3>
       <div v-if="showDelib">
         <div v-for="round in packet.deliberation" :key="round.round_number" class="delib-round">
@@ -245,7 +250,10 @@
 
     <!-- Full Meta-Review -->
     <div v-if="hasMetaDetail" class="meta-section">
-      <h3>Meta-Review Details</h3>
+      <div class="meta-section-head">
+        <h3>Meta-Review Details</h3>
+        <button class="ask-inline compact" @click="askMetaReview">Ask</button>
+      </div>
 
       <div v-if="meta.agreements && meta.agreements.length" class="meta-field">
         <h4>Points of Agreement</h4>
@@ -330,6 +338,8 @@ const scoreFields = computed(() => activeApp.value?.score_fields || [])
 const props = defineProps({
   packet: { type: Object, required: true },
 })
+
+const emit = defineEmits(['ask-chair'])
 
 const expandedReviews = ref({})
 const showGraphCtx = ref(false)
@@ -448,6 +458,62 @@ function toggleReview(idx) {
   expandedReviews.value[idx] = !expandedReviews.value[idx]
 }
 
+function askPacket() {
+  emit('ask-chair', {
+    id: 'review-packet',
+    type: 'review_packet',
+    label: props.packet.paper_title || 'Review Packet',
+    summary: 'Completed review packet',
+    excerpt: truncate(JSON.stringify({
+      paper_title: props.packet.paper_title,
+      scores: scores.value,
+      meta_review: meta.value,
+    }, null, 2), 3600),
+    metadata: { source: 'review_packet' },
+  })
+}
+
+function askReview(review, idx) {
+  emit('ask-chair', {
+    id: `reviewer:${review.agent_id || idx}`,
+    type: 'independent_review',
+    label: review.reviewer_role || review.agent_id || `Reviewer ${idx + 1}`,
+    summary: review.summary || '',
+    excerpt: truncate(JSON.stringify({
+      reviewer_role: review.reviewer_role,
+      overall_merit: review.overall_merit,
+      summary: review.summary,
+      strengths: review.strengths,
+      weaknesses: review.weaknesses,
+      comments_for_authors: review.comments_for_authors,
+      internal_committee_concerns: review.internal_committee_concerns,
+    }, null, 2), 3600),
+    metadata: { source: 'review_packet', section: 'independent_review', reviewer: review.reviewer_role || review.agent_id || '' },
+  })
+}
+
+function askDeliberation() {
+  emit('ask-chair', {
+    id: 'deliberation',
+    type: 'deliberation',
+    label: 'Deliberation',
+    summary: `${totalDelibEntries.value} deliberation exchanges`,
+    excerpt: truncate(JSON.stringify(props.packet.deliberation || [], null, 2), 3600),
+    metadata: { source: 'review_packet', section: 'deliberation' },
+  })
+}
+
+function askMetaReview() {
+  emit('ask-chair', {
+    id: 'meta-review',
+    type: 'meta_review',
+    label: 'Meta-Review Details',
+    summary: meta.value.panel_summary || meta.value.author_facing_summary || '',
+    excerpt: truncate(JSON.stringify(meta.value, null, 2), 3600),
+    metadata: { source: 'review_packet', section: 'meta_review' },
+  })
+}
+
 function truncate(text, max) {
   if (!text) return ''
   return text.length > max ? text.substring(0, max) + '...' : text
@@ -542,6 +608,7 @@ async function exportGraphJSON() {
 
 .packet-meta {
   display: flex;
+  align-items: center;
   gap: 16px;
   font-size: 13px;
   color: #666;
@@ -552,6 +619,26 @@ async function exportGraphJSON() {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   color: #888;
+}
+
+.ask-inline {
+  padding: 4px 9px;
+  border: 1px solid var(--pn-border);
+  background: var(--pn-surface);
+  color: var(--pn-text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ask-inline:hover {
+  border-color: var(--pn-text);
+  color: var(--pn-text);
+}
+
+.ask-inline.compact {
+  padding: 3px 7px;
 }
 
 /* Score overview */
@@ -893,6 +980,22 @@ async function exportGraphJSON() {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.collapsible-actions,
+.meta-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.meta-section-head {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.meta-section-head h3 {
+  margin-bottom: 0;
 }
 
 .toggle {

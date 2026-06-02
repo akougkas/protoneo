@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Home from '../views/Home.vue'
 import SessionView from '../views/SessionView.vue'
-import PostReviewView from '../views/PostReviewView.vue'
 import BatchView from '../views/BatchView.vue'
 import SettingsView from '../views/SettingsView.vue'
 
@@ -20,8 +19,7 @@ const routes = [
   {
     path: '/session/:sessionId/post-review',
     name: 'PostReview',
-    component: PostReviewView,
-    props: true
+    redirect: to => ({ name: 'Session', params: { sessionId: to.params.sessionId }, query: to.query })
   },
   {
     path: '/batch/:batchId',

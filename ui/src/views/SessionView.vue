@@ -23,13 +23,6 @@
       </div>
 
       <div class="header-right">
-        <button
-          v-if="canOpenPostReview"
-          class="post-review-btn"
-          @click="goPostReview"
-        >
-          Post Review
-        </button>
         <div class="session-phase">
           <span class="phase-label">{{ phaseLabel }}</span>
         </div>
@@ -134,8 +127,6 @@ const statusText = computed(() => {
   return 'Reviewing'
 })
 
-const canOpenPostReview = computed(() => sessionStatus.value === 'completed')
-
 // Layout computed styles (same pattern as MiroFish MainView)
 const leftPanelStyle = computed(() => {
   if (viewMode.value === 'graph') return { width: '100%', opacity: 1, transform: 'translateX(0)' }
@@ -159,10 +150,6 @@ const toggleMaximize = (target) => {
 
 function goHome() {
   router.push({ name: 'Home' })
-}
-
-function goPostReview() {
-  router.push({ name: 'PostReview', params: { sessionId: sessionId.value } })
 }
 
 function onStageChanged({ stage, step }) {
@@ -376,23 +363,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--pn-space-3);
-}
-
-.post-review-btn {
-  height: 28px;
-  padding: 0 var(--pn-space-3);
-  border-color: var(--pn-text);
-  background: var(--pn-text);
-  color: var(--pn-bg);
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.post-review-btn:hover {
-  background: var(--pn-accent);
-  border-color: var(--pn-accent);
 }
 
 .session-phase {

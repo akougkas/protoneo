@@ -269,11 +269,23 @@ export function updateFinalReview(sessionId, finalReview) {
   })
 }
 
-export function pcChairChat(sessionId, { message, currentReview = {}, applyEdits = true }) {
+export function pcChairChat(sessionId, {
+  message,
+  currentReview = {},
+  applyEdits = false,
+  userRole = 'chair_editor',
+  focusedArtifact = null,
+  selectedReviewField = '',
+  selectedReviewExcerpt = '',
+}) {
   return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/pc-chair-chat`, {
     message,
     current_review: currentReview,
     apply_edits: applyEdits,
+    user_role: userRole,
+    focused_artifact: focusedArtifact,
+    selected_review_field: selectedReviewField,
+    selected_review_excerpt: selectedReviewExcerpt,
   })
 }
 

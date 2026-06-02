@@ -48,6 +48,7 @@ from .pipeline import (
     _run_review_stage,
 )
 from .preflight import run_preflight
+from .prompts import load_role_prompt
 from .review_context import (
     ReviewContextMode,
     build_review_context_payload,
@@ -1835,7 +1836,11 @@ async def update_final_review(session_id: str, body: UpdateFinalReviewRequest):
 class PCChairChatRequest(BaseModel):
     message: str
     current_review: dict[str, Any] = Field(default_factory=dict)
-    apply_edits: bool = True
+    apply_edits: bool = False
+    user_role: str = "chair_editor"
+    focused_artifact: dict[str, Any] | None = None
+    selected_review_field: str = ""
+    selected_review_excerpt: str = ""
 
 
 def _merge_review_patch(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -1852,29 +1857,169 @@ def _merge_review_patch(base: dict[str, Any], patch: dict[str, Any]) -> dict[str
     return merged
 
 
-def _pc_chair_system_prompt(context: str) -> str:
+_PROTECTED_REVIEW_DECISION_FIELDS = {
+    "overall_merit",
+    "final_recommendation",
+    "recommended_action",
+    "confidence",
+    "level_of_confidence",
+    "reviewer_expertise",
+    "level_of_expertise",
+    "best_paper_consideration",
+}
+
+_PROTECTED_REVIEW_DECISION_SUBFIELDS = {
+    "score",
+    "label",
+    "nominate",
+    "recommendation",
+    "status",
+}
+
+
+def _pc_chair_role_guidance(user_role: str) -> str:
+    role = (user_role or "chair_editor").strip().lower()
+    if role == "author":
+        return (
+            "Current user stance: paper author. Be transparent about author-facing "
+            "review rationale and revision guidance, but do not expose confidential "
+            "PC comments, deliberation mechanics, reviewer identities beyond roles, "
+            "graph internals, tool traces, or private committee process."
+        )
+    if role == "human_reviewer":
+        return (
+            "Current user stance: fellow human reviewer. Help them inspect evidence, "
+            "consistency, disagreement handling, and wording. Preserve the official "
+            "draft unless they explicitly ask for an edit."
+        )
+    if role == "conference_organizer":
+        return (
+            "Current user stance: conference organizer. Emphasize auditability, "
+            "policy consistency, artifact readiness, and process risk without "
+            "turning private graph/tool details into author-facing prose."
+        )
     return (
-        "You are the ProtoNeo post-review PC Chair. You are not the meta-reviewer: "
-        "the meta-reviewer has already synthesized the official structured review. "
-        "Your job is to discuss that review with the human chair and make small, "
-        "auditable edits that prepare it for final storage or submission.\n\n"
-        "You have access to the processed manuscript text, imported/extracted "
-        "knowledge graph summary and size, independent reviews, deliberation turns, "
-        "and the current final review. Use those materials as constraints. Do not "
-        "invent new paper facts. Do not expose graph internals, graph IDs, or tool "
-        "mechanics in author-facing prose. Preserve real committee disagreements "
-        "unless the human explicitly resolves them. Do not change scores, confidence, "
-        "or recommendation labels unless the human explicitly asks you to.\n\n"
-        "When editing, return only a small patch for fields that should change. "
-        "Keep author-facing text professional, specific to the manuscript, and "
-        "consistent with the evidence already available.\n\n"
+        "Current user stance: chair/editor. Act as an exacting post-review editor "
+        "and advisor for finalizing the structured review."
+    )
+
+
+def _decision_change_explicitly_requested(message: str) -> bool:
+    text = (message or "").lower()
+    verbs = (
+        "change",
+        "set",
+        "update",
+        "raise",
+        "lower",
+        "increase",
+        "decrease",
+        "adjust",
+        "revise",
+        "switch",
+    )
+    targets = (
+        "score",
+        "merit",
+        "recommendation",
+        "recommended action",
+        "confidence",
+        "expertise",
+        "best paper",
+        "award",
+        "nomination",
+        "accept",
+        "reject",
+        "borderline",
+    )
+    return any(v in text for v in verbs) and any(t in text for t in targets)
+
+
+def _filter_protected_review_patch(
+    patch: dict[str, Any],
+    *,
+    message: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Prevent accidental decision-field changes unless explicitly requested."""
+    if _decision_change_explicitly_requested(message):
+        return patch, []
+
+    filtered: dict[str, Any] = {}
+    blocked: list[str] = []
+    for key, value in (patch or {}).items():
+        if key in _PROTECTED_REVIEW_DECISION_FIELDS:
+            if not isinstance(value, dict):
+                blocked.append(key)
+                continue
+            allowed_nested = {
+                subkey: subvalue
+                for subkey, subvalue in value.items()
+                if subkey not in _PROTECTED_REVIEW_DECISION_SUBFIELDS
+            }
+            blocked_nested = [
+                subkey
+                for subkey in value
+                if subkey in _PROTECTED_REVIEW_DECISION_SUBFIELDS
+            ]
+            if blocked_nested:
+                blocked.extend(f"{key}.{subkey}" for subkey in blocked_nested)
+            if allowed_nested:
+                filtered[key] = allowed_nested
+            continue
+        filtered[key] = value
+    return filtered, blocked
+
+
+def _focused_artifact_text(artifact: dict[str, Any] | None) -> str:
+    if not isinstance(artifact, dict) or not artifact:
+        return "No focused artifact selected."
+    safe = {
+        "id": artifact.get("id", ""),
+        "type": artifact.get("type", ""),
+        "label": artifact.get("label", ""),
+        "summary": artifact.get("summary", ""),
+        "excerpt": artifact.get("excerpt", ""),
+        "metadata": artifact.get("metadata", {}),
+    }
+    return json.dumps(safe, indent=2, ensure_ascii=False)
+
+
+def _pc_chair_system_prompt(session, context: str, user_role: str) -> str:
+    metadata = session.config.get("metadata", {}) if session.config else {}
+    conference_slug = metadata.get("conference", "hpdc26")
+    venue_prompt = ""
+    try:
+        venue_prompt = load_role_prompt(conference_slug, "pc_chair")
+    except FileNotFoundError:
+        venue_prompt = ""
+
+    base_prompt = venue_prompt or (
+        "You are the ProtoNeo post-review PC Chair after the Meta-Reviewer has "
+        "produced the official structured review draft. You are an interactive "
+        "editor and advisor, not a second meta-reviewer."
+    )
+    return (
+        f"{base_prompt}\n\n"
+        "## Interactive Workspace Policy\n\n"
+        f"{_pc_chair_role_guidance(user_role)}\n\n"
+        "- Preserve the committee judgment produced by the Meta-Reviewer unless "
+        "the human explicitly asks you to change it.\n"
+        "- Do not invent evidence, new experiments, or new reviewer positions.\n"
+        "- Do not change scores, recommendation labels, confidence, expertise, "
+        "or award nominations unless explicitly requested.\n"
+        "- Keep graph internals, graph IDs, and tool mechanics out of author-facing prose.\n"
+        "- Return only small, auditable patches for fields that should change.\n\n"
         "Return ONLY strict JSON with this shape:\n"
         "{\n"
         '  "reply": "short conversational response to the human",\n'
-        '  "edit_summary": ["short descriptions of edits made"],\n'
+        '  "edit_summary": ["short descriptions of edits proposed"],\n'
         '  "final_review_patch": {},\n'
+        '  "citations": [],\n'
+        '  "focused_artifacts": [],\n'
         '  "needs_user_decision": false\n'
         "}\n\n"
+        "`final_review_patch` must include only fields that should change. "
+        "Leave it empty when answering a question.\n\n"
         "Available review context follows.\n\n"
         f"{context}"
     )
@@ -1911,11 +2056,20 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
     history = list(session.app_data.get("pc_chair_chat", [])) if session.app_data else []
     compact_history = history[-8:]
     context = _build_review_context(session)
+    focused_artifact = body.focused_artifact if isinstance(body.focused_artifact, dict) else None
     user_msg = (
         "Current editable final review JSON:\n"
         + json.dumps(base_review, indent=2, ensure_ascii=False)
         + "\n\nRecent PC Chair conversation:\n"
         + json.dumps(compact_history, indent=2, ensure_ascii=False)
+        + "\n\nUser role/persona:\n"
+        + (body.user_role or "chair_editor")
+        + "\n\nFocused artifact JSON:\n"
+        + _focused_artifact_text(focused_artifact)
+        + "\n\nSelected review field:\n"
+        + (body.selected_review_field or "")
+        + "\n\nSelected review excerpt:\n"
+        + (body.selected_review_excerpt or "")
         + "\n\nHuman request:\n"
         + message
     )
@@ -1924,7 +2078,7 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         response = await _llm_client.complete(
             model=chat_model,
             messages=[
-                {"role": "system", "content": _pc_chair_system_prompt(context)},
+                {"role": "system", "content": _pc_chair_system_prompt(session, context, body.user_role)},
                 {"role": "user", "content": user_msg},
             ],
             session_id=session_id,
@@ -1949,6 +2103,14 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         }
 
     patch = parsed.get("final_review_patch") if isinstance(parsed.get("final_review_patch"), dict) else {}
+    patch, blocked_decision_fields = _filter_protected_review_patch(patch, message=message)
+    edit_summary = parsed.get("edit_summary") if isinstance(parsed.get("edit_summary"), list) else []
+    if blocked_decision_fields:
+        edit_summary = [
+            *edit_summary,
+            "Held back protected score/recommendation changes pending an explicit user request: "
+            + ", ".join(blocked_decision_fields),
+        ]
     updated_review = base_review
     applied = False
     if body.apply_edits and patch:
@@ -1962,10 +2124,20 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
     turn = {
         "user": message,
         "reply": str(parsed.get("reply") or "").strip(),
-        "edit_summary": parsed.get("edit_summary") if isinstance(parsed.get("edit_summary"), list) else [],
+        "edit_summary": edit_summary,
         "final_review_patch": patch,
         "applied": applied,
         "model": chat_model,
+        "user_role": body.user_role or "chair_editor",
+        "focused_artifact": focused_artifact,
+        "selected_review_field": body.selected_review_field or "",
+        "citations": parsed.get("citations") if isinstance(parsed.get("citations"), list) else [],
+        "focused_artifacts": (
+            parsed.get("focused_artifacts")
+            if isinstance(parsed.get("focused_artifacts"), list)
+            else ([focused_artifact] if focused_artifact else [])
+        ),
+        "needs_user_decision": bool(parsed.get("needs_user_decision", False) or blocked_decision_fields),
     }
     session.app_data.setdefault("pc_chair_chat", []).append(turn)
     session.current_stage = "post_review"
@@ -1977,7 +2149,9 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         "final_review_patch": patch,
         "final_review": updated_review,
         "applied_edits": applied,
-        "needs_user_decision": bool(parsed.get("needs_user_decision", False)),
+        "citations": turn["citations"],
+        "focused_artifacts": turn["focused_artifacts"],
+        "needs_user_decision": turn["needs_user_decision"],
         "history": session.app_data.get("pc_chair_chat", []),
         "model": chat_model,
     }

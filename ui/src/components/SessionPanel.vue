@@ -209,12 +209,6 @@
       </div>
     </div>
 
-    <!-- Final Review -->
-    <div v-if="pcChairReview" class="card-chair-section">
-      <h3 class="section-header">Final Review</h3>
-      <div class="card-chair-content" v-html="md(pcChairReview)"></div>
-    </div>
-
     <!-- Events Log (collapsible) -->
     <div v-if="events.length > 0" class="events-section">
       <h3 @click="showEvents = !showEvents" class="collapsible">
@@ -236,10 +230,33 @@
       :session-id="sessionId"
       :initial-review="finalReview"
       :chair-model="chairModel"
+      @ask-chair="openPcChair"
+      @review-updated="onFinalReviewUpdated"
+      @dirty-changed="finalReviewDirty = $event"
     />
 
     <!-- Review Packet (when complete) -->
-    <ReviewPacket v-if="packet" :packet="packet" />
+    <ReviewPacket v-if="packet" :packet="packet" @ask-chair="openPcChair" />
+
+    <button
+      v-if="status === 'completed' && finalReview && Object.keys(finalReview).length > 0"
+      class="pc-chair-fab"
+      @click="openPcChair()"
+    >
+      Ask PC Chair
+    </button>
+
+    <PcChairChat
+      v-if="status === 'completed' && finalReview && Object.keys(finalReview).length > 0"
+      :open="pcChairOpen"
+      :session-id="sessionId"
+      :current-review="currentReviewPayload()"
+      :focused-artifact="pcChairFocus"
+      @close="pcChairOpen = false"
+      @clear-focus="pcChairFocus = null"
+      @apply-patch="applyPcChairPatch"
+      @save-review="saveReviewFromChair"
+    />
 
     <!-- Error -->
     <div v-if="error" class="error-box">
@@ -251,12 +268,10 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { getSession, getReviewPacket, connectStream, getPipelineStatus, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph, launchReview } from '../api/kernel.js'
-import { renderMarkdown } from '../utils/markdown.js'
 import AgentCard from './AgentCard.vue'
 import ReviewPacket from './ReviewPacket.vue'
 import FinalReview from './ResultEditor.vue'
-
-const md = renderMarkdown
+import PcChairChat from './PcChairChat.vue'
 
 const props = defineProps({
   sessionId: { type: String, required: true },
@@ -325,10 +340,12 @@ const expandedStep = ref('')
 const deliberationChat = ref([])
 const deliberationRound = ref({ current: 0, total: 0 })
 const tokenSummary = reactive({ total: 0, completion: 0, agents: 0 })
-const pcChairReview = ref('')
 const finalReview = ref(null)
 const finalReviewRef = ref(null)
 const chairModel = ref('')
+const pcChairOpen = ref(false)
+const pcChairFocus = ref(null)
+const finalReviewDirty = ref(false)
 const sessionMeta = ref({})
 const knowledgeGraphStats = ref(null)
 const launchingReview = ref(false)
@@ -469,6 +486,56 @@ async function doExportGraph() {
   } catch (e) {
     error.value = 'Failed to export graph: ' + (e.message || 'unknown')
   }
+}
+
+function defaultPcChairFocus() {
+  return {
+    id: 'final-review',
+    type: 'final_review',
+    label: 'Final Review',
+    summary: 'Official structured final review draft',
+    excerpt: JSON.stringify(currentReviewPayload(), null, 2).slice(0, 3600),
+    metadata: { source: 'final_review' },
+  }
+}
+
+function currentReviewPayload() {
+  if (finalReviewRef.value?.getAllFields) {
+    return finalReviewRef.value.getAllFields()
+  }
+  return finalReview.value || {}
+}
+
+function openPcChair(artifact = null) {
+  pcChairFocus.value = artifact || defaultPcChairFocus()
+  pcChairOpen.value = true
+}
+
+function applyPcChairPatch(patch) {
+  if (!patch || typeof patch !== 'object') return
+  if (finalReviewRef.value?.applyReviewPatch) {
+    finalReviewRef.value.applyReviewPatch(patch)
+    finalReviewDirty.value = true
+  }
+}
+
+async function saveReviewFromChair(done) {
+  let saved = false
+  if (finalReviewRef.value?.saveReview) {
+    saved = await finalReviewRef.value.saveReview()
+    if (saved) {
+      finalReview.value = finalReviewRef.value.getAllFields()
+      finalReviewDirty.value = false
+      fetchPacket()
+    }
+  }
+  if (typeof done === 'function') done(saved)
+}
+
+function onFinalReviewUpdated(review) {
+  finalReview.value = review
+  finalReviewDirty.value = false
+  fetchPacket()
 }
 
 async function advancePipeline() {
@@ -713,9 +780,6 @@ function handleStreamEvent(evt) {
     // evt.review is now a structured dict (or a string for old sessions)
     if (typeof evt.review === 'object' && evt.review !== null) {
       finalReview.value = evt.review
-      pcChairReview.value = evt.review.comments_for_authors || ''
-    } else {
-      pcChairReview.value = evt.review || ''
     }
     if (evt.model) chairModel.value = evt.model
     addEvent(`Final synthesis complete (${evt.duration_seconds || 0}s)`)
@@ -780,11 +844,6 @@ async function fetchPacket() {
     // Populate final review from packet data on reconnect
     if (res.data.final_review && Object.keys(res.data.final_review).length > 0 && !finalReview.value) {
       finalReview.value = res.data.final_review
-    }
-    if (res.data.pc_chair_review && !pcChairReview.value) {
-      pcChairReview.value = typeof res.data.pc_chair_review === 'object'
-        ? (res.data.pc_chair_review.comments_for_authors || '')
-        : res.data.pc_chair_review
     }
   } catch (e) {
     console.error('Failed to fetch review packet:', e)
@@ -1519,6 +1578,28 @@ onUnmounted(() => {
   padding: 16px;
   font-size: 13px;
   color: #900;
+}
+
+.pc-chair-fab {
+  position: sticky;
+  bottom: 18px;
+  float: right;
+  z-index: 20;
+  margin: 0 0 16px auto;
+  display: block;
+  border-color: var(--pn-text);
+  background: var(--pn-text);
+  color: var(--pn-bg);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  box-shadow: 0 10px 28px rgba(10, 10, 10, 0.12);
+}
+
+.pc-chair-fab:hover {
+  border-color: var(--pn-accent);
+  background: var(--pn-accent);
 }
 
 /* Step cards */
