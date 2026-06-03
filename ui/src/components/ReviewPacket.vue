@@ -315,6 +315,11 @@
           <div class="export-label">{{ fmt.label }}</div>
           <div class="export-format">{{ fmt.ext }}</div>
         </div>
+        <div v-if="hasLinklingsExport" class="export-card" @click="exportLinklingsReview">
+          <div class="export-icon">SC</div>
+          <div class="export-label">Linklings Review</div>
+          <div class="export-format">TXT</div>
+        </div>
         <div class="export-card" @click="exportGraphJSON">
           <div class="export-icon">KG</div>
           <div class="export-label">Knowledge Graph</div>
@@ -327,7 +332,7 @@
 
 <script setup>
 import { ref, computed, inject, onMounted } from 'vue'
-import { getReviewPacketMd, getReviewPacketPdf, exportGraph, getExportFormats, exportSession } from '../api/kernel.js'
+import { exportGraph, getExportFormats, exportSession, getLinklingsReview } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 
 const md = renderMarkdown
@@ -363,6 +368,10 @@ if (props.packet.reviews?.length > 0) {
 
 const meta = computed(() => props.packet.meta_review || {})
 const utilization = computed(() => props.packet.graph_utilization || null)
+const sessionMetadata = computed(() => props.packet.provenance_metadata?.session_metadata || {})
+const hasLinklingsExport = computed(() =>
+  props.packet.conference === 'sc26' && Boolean(sessionMetadata.value.packet_paper_id)
+)
 
 const scores = computed(() => {
   return (props.packet.reviews || [])
@@ -582,6 +591,21 @@ async function exportGraphJSON() {
     URL.revokeObjectURL(url)
   } catch (e) {
     console.error('Failed to export graph:', e)
+  }
+}
+
+async function exportLinklingsReview() {
+  try {
+    const res = await getLinklingsReview(props.packet.session_id)
+    const url = URL.createObjectURL(res.data)
+    const paperId = sessionMetadata.value.packet_paper_id || props.packet.session_id || 'review'
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${paperId}_protoneo_offline_review.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('Failed to export Linklings review:', e)
   }
 }
 

@@ -176,6 +176,7 @@ async def _run_review_stage(
     paper_graph: KnowledgeGraph,
     context_payload: ReviewContextPayload | None = None,
     context_mode: ReviewContextMode | str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE,
+    stream_tokens: bool | None = None,
 ) -> DeliberationResult:
     """Review stage: independent reviews -> deliberation -> meta-review.
 
@@ -294,6 +295,7 @@ async def _run_review_stage(
         deliberation_config=delib_config,
         user_message=enriched_message,
         on_event=on_event,
+        stream=stream_tokens,
     )
 
     # Emit step_completed for the final review step (meta_review)

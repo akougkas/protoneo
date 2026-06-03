@@ -335,7 +335,7 @@
       </div>
 
       <!-- Artifact status -->
-      <div class="artifact-status-section">
+      <div v-if="selectedConference === 'sc26'" class="artifact-status-section">
         <h2 class="section-heading">Artifact / AD Status</h2>
         <div class="artifact-status-row">
           <label
@@ -893,10 +893,16 @@ function buildPanelFromProfile(profile) {
 
 function applyPresetAssignments(assignments) {
   if (!assignments || typeof assignments !== 'object') return
-  for (const [key, modelId] of Object.entries(assignments)) {
+  for (const [key, assignment] of Object.entries(assignments)) {
+    const modelId = assignment && typeof assignment === 'object'
+      ? assignment.model_id || assignment.model || ''
+      : assignment
     const resolved = normalizeModelId(modelId)
     if (resolved) {
       modelMap[key] = resolved
+      if (assignment && typeof assignment === 'object' && assignment.reasoning_effort) {
+        reasoningMap[key] = assignment.reasoning_effort
+      }
       syncRoleReasoning(key)
     }
   }
@@ -1111,6 +1117,7 @@ function truncateAbstract(text) {
 }
 
 function reviewLaunchOptions() {
+  if (selectedConference.value !== 'sc26') return {}
   return {
     artifactDescriptionStatus: artifactDescriptionStatus.value,
     artifactDescriptionAssumedPresent: artifactDescriptionStatus.value === 'submitted',

@@ -137,13 +137,15 @@ class ModelPreset(BaseModel):
     """Named model assignment preset.
 
     Maps role IDs and graph step IDs to provider-prefixed model IDs.
+    Values may also be richer assignment objects such as
+    {"model_id": "openai/gpt-5.5", "reasoning_effort": "high"}.
     Graph steps: ontology, extraction, coref, verification.
     Review roles: defined by conference profile (technical, novelty, etc.).
     """
 
     name: str
     description: str = ""
-    assignments: dict[str, str] = Field(default_factory=dict)
+    assignments: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProtoNeoSettings(BaseModel):
@@ -613,6 +615,23 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
             "skeptic": "openai/gpt-5.5-mini",
             "meta_reviewer": "openai/gpt-5.5",
             "meta": "openai/gpt-5.5",
+        },
+    ),
+    ModelPreset(
+        name="sc26-openai-gpt55",
+        description="SC26 packet reviews one-by-one: imported graphs, GPT-5.5 reviewers with role-specific reasoning effort",
+        assignments={
+            "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "coref": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "verification": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
+            "technical": {"model_id": "openai/gpt-5.5", "reasoning_effort": "high"},
+            "systems": {"model_id": "openai/gpt-5.5", "reasoning_effort": "high"},
+            "novelty": {"model_id": "openai/gpt-5.5", "reasoning_effort": "medium"},
+            "skeptic": {"model_id": "openai/gpt-5.5", "reasoning_effort": "xhigh"},
+            "artifact": {"model_id": "openai/gpt-5.5", "reasoning_effort": "high"},
+            "meta_reviewer": {"model_id": "openai/gpt-5.5", "reasoning_effort": "xhigh"},
+            "meta": {"model_id": "openai/gpt-5.5", "reasoning_effort": "xhigh"},
         },
     ),
     ModelPreset(

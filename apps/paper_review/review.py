@@ -283,7 +283,7 @@ def is_local_model_id(model_id: str, settings: Any | None = None) -> bool:
     )
 
 
-def _load_settings_context() -> tuple[Any | None, dict[str, str]]:
+def _load_settings_context() -> tuple[Any | None, dict[str, Any]]:
     try:
         from protoneo.llm.settings import load_settings, resolve_preset
 
@@ -431,7 +431,7 @@ def resolve_paper_review_model(
         return selected
 
     preset_candidates = [
-        preset_assignments.get(lookup_key, "")
+        _assignment_model_id(preset_assignments.get(lookup_key, ""))
         for lookup_key in lookup_keys
         if preset_assignments.get(lookup_key)
     ]

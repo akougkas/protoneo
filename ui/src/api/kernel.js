@@ -297,6 +297,12 @@ export function writeReviewArtifacts(sessionId) {
   return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/write-review-artifacts`)
 }
 
+export function getLinklingsReview(sessionId) {
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/linklings-review.txt`, {
+    responseType: 'blob',
+  })
+}
+
 // Graph export/import
 export function exportGraph(sessionId) {
   return kernel.get(`/api/sessions/${sessionId}/graph/export`, {

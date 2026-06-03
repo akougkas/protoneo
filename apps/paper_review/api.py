@@ -2175,13 +2175,7 @@ async def get_pc_chair_chat(session_id: str):
     }
 
 
-@router.post("/sessions/{session_id}/write-review-artifacts")
-async def write_session_review_artifacts(session_id: str):
-    """Persist the current final review through the app-layer packet exporter."""
-    _session_manager = get_session_manager()
-    session = await _session_manager.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def _write_review_artifacts_for_session(session) -> tuple[dict[str, Any], Path]:
     if not session.result:
         raise HTTPException(status_code=409, detail="No review results")
     if not hasattr(session, "app_data") or session.app_data is None:
@@ -2231,12 +2225,64 @@ async def write_session_review_artifacts(session_id: str):
         artifact_description_status=str(metadata.get("artifact_description_status") or ""),
     )
     session.app_data["last_review_artifact_manifest"] = manifest
+    return manifest, output_dir
+
+
+@router.post("/sessions/{session_id}/write-review-artifacts")
+async def write_session_review_artifacts(session_id: str):
+    """Persist the current final review through the app-layer packet exporter."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    manifest, output_dir = await _write_review_artifacts_for_session(session)
     await _session_manager.update(session)
     return {
         "status": "written",
         "output_dir": str(output_dir),
         "manifest": manifest,
     }
+
+
+@router.get("/sessions/{session_id}/linklings-review.txt")
+async def download_linklings_review(session_id: str):
+    """Regenerate and download the venue-templated SC Linklings review file."""
+    _session_manager = get_session_manager()
+    session = await _session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    metadata = session.config.get("metadata", {}) if session.config else {}
+    if str(metadata.get("conference") or "").lower() != "sc26":
+        raise HTTPException(status_code=404, detail="Linklings export is only available for SC26 sessions")
+    packet_dir_raw = metadata.get("packet_dir")
+    if not packet_dir_raw:
+        raise HTTPException(status_code=404, detail="No Linklings packet template is attached to this session")
+
+    packet_dir = Path(packet_dir_raw)
+    try:
+        _packet_review_template_path(packet_dir)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    manifest, output_dir = await _write_review_artifacts_for_session(session)
+    await _session_manager.update(session)
+
+    paper_id = str(metadata.get("packet_paper_id") or packet_dir.name)
+    offline_name = f"{paper_id}_protoneo_offline_review.txt"
+    offline_path_raw = manifest.get("artifact_paths", {}).get(offline_name)
+    offline_path = Path(offline_path_raw) if offline_path_raw else output_dir / offline_name
+    if not offline_path.exists():
+        raise HTTPException(status_code=500, detail="Linklings review artifact was not written")
+
+    return Response(
+        content=offline_path.read_text(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{offline_name}"'
+        },
+    )
 
 # ── Graph Import ──────────────────────────────────
 
@@ -2604,6 +2650,20 @@ async def _run_one_sc26_packet_review(
     session.document_markdown = imported_markdown
     session.document_text = imported.document_text or imported_markdown
     session.graph_source = "imported"
+    session.status = SessionStatus.RUNNING
+    session.current_stage = "review"
+    session.pipeline_steps["imported_graph"] = StepState(
+        status="complete",
+        nodes_added=len(pg.nodes),
+        edges_added=len(pg.edges),
+        model_used="imported",
+    )
+    session.pipeline_steps["independent_reviews"] = StepState(
+        status="running",
+        model_used=", ".join(
+            sorted({cfg.model for key, cfg in agent_configs.items() if key != "meta" and cfg.model})
+        ),
+    )
     await _session_manager.update(session)
 
     if imported_markdown:
@@ -2620,7 +2680,21 @@ async def _run_one_sc26_packet_review(
     enriched_message = context_payload.render_for_independent_review(context_mode)
 
     bus = SessionEventBus()
+    get_event_buses()[session.session_id] = bus
     ctl = PipelineControl()
+    get_pipeline_controls()[session.session_id] = ctl
+    ctl.enter_stage("review")
+    ctl.enter_step("independent_reviews")
+    bus.emit("stage_started", {
+        "stage": "review",
+        "step": "independent_reviews",
+        "message": "Starting SC26 packet review...",
+    })
+    bus.emit("step_started", {
+        "stage": "review",
+        "step": "independent_reviews",
+        "message": "Starting independent peer reviews...",
+    })
     await _run_review_stage(
         session.session_id,
         agent_configs,
@@ -2631,6 +2705,7 @@ async def _run_one_sc26_packet_review(
         pg,
         context_payload=context_payload,
         context_mode=context_mode,
+        stream_tokens=False,
     )
 
     completed = await _session_manager.get(session.session_id)

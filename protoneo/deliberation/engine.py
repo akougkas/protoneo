@@ -68,6 +68,7 @@ class DeliberationEngine:
         deliberation_config: DeliberationConfig,
         user_message: str,
         on_event: EventCallback = None,
+        stream: bool | None = None,
     ) -> DeliberationResult:
         """
         Execute a full deliberation session.
@@ -95,7 +96,7 @@ class DeliberationEngine:
 
         try:
             result = await self._execute_pattern(
-                deliberation_config, agents, context, msg, on_event
+                deliberation_config, agents, context, msg, on_event, stream
             )
             result.total_cost = self.llm_client.session_cost(session_id)
 
@@ -126,23 +127,24 @@ class DeliberationEngine:
         context: SessionContext,
         user_message: Message,
         on_event: EventCallback,
+        stream: bool | None,
     ) -> DeliberationResult:
         """Dispatch to the correct pattern based on config."""
         pattern_name = config.pattern
 
         if pattern_name == "independent_synthesis":
             return await self._run_independent_synthesis(
-                config, agents, context, user_message, on_event
+                config, agents, context, user_message, on_event, stream
             )
 
         if pattern_name == "sequential":
             return await self._run_sequential(
-                config, agents, context, user_message, on_event
+                config, agents, context, user_message, on_event, stream
             )
 
         if pattern_name == "round_robin":
             return await self._run_round_robin(
-                config, agents, context, user_message, on_event
+                config, agents, context, user_message, on_event, stream
             )
 
         raise ValueError(f"Unknown deliberation pattern: {pattern_name}")
@@ -154,6 +156,7 @@ class DeliberationEngine:
         context: SessionContext,
         user_message: Message,
         on_event: EventCallback,
+        stream: bool | None,
     ) -> DeliberationResult:
         """Run the Independent+Synthesis pattern from phase config."""
         reviewer_ids: list[str] = []
@@ -182,7 +185,7 @@ class DeliberationEngine:
 
         rules = DeliberationRules(max_rounds=max_rounds)
         pattern = IndependentSynthesisPattern()
-        stream = on_event is not None
+        stream = on_event is not None if stream is None else stream
         return await pattern.execute(reviewers, synthesizer, context, user_message, rules, on_event, stream=stream)
 
     async def _run_sequential(
@@ -192,6 +195,7 @@ class DeliberationEngine:
         context: SessionContext,
         user_message: Message,
         on_event: EventCallback,
+        stream: bool | None,
     ) -> DeliberationResult:
         start = time.monotonic()
         all_agent_ids = []
@@ -201,7 +205,7 @@ class DeliberationEngine:
         ordered = [agents[aid] for aid in all_agent_ids if aid in agents]
         rules = DeliberationRules()
         pattern = SequentialPattern()
-        stream = on_event is not None
+        stream = on_event is not None if stream is None else stream
         phase_result = await pattern.execute(ordered, context, user_message, rules, on_event, stream=stream)
 
         return DeliberationResult(
@@ -218,6 +222,7 @@ class DeliberationEngine:
         context: SessionContext,
         user_message: Message,
         on_event: EventCallback,
+        stream: bool | None,
     ) -> DeliberationResult:
         start = time.monotonic()
         max_rounds = 3
@@ -235,7 +240,7 @@ class DeliberationEngine:
         context.add_message(user_message)
 
         pattern = RoundRobinPattern()
-        stream = on_event is not None
+        stream = on_event is not None if stream is None else stream
         phase_result = await pattern.execute(
             ordered, context, rules, on_event, stream=stream,
             paper_context=user_message.content if user_message else "",
