@@ -36,6 +36,7 @@ from protoneo.knowledge.parser import parse_file
 from protoneo.llm.errors import sanitize_error_message
 from protoneo.llm.settings import build_vlm_config, vlm_status
 from protoneo.llm.structured import extract_json_object
+from protoneo.tools import create_tool_registry
 
 from .conference import ConferenceProfile, list_profiles, load_profile
 _APP_NAME = "paper_review"
@@ -1629,36 +1630,87 @@ _FIELD_LABELS = {
     "comments_for_pc": "Comments for PC",
 }
 
-def _build_review_context(session) -> str:
-    """Assemble full context from paper, graph, and reviewer outputs."""
-    parts = []
+def _session_graph(session) -> KnowledgeGraph | None:
+    """Best-effort KnowledgeGraph from a session, or None if not reconstructable."""
+    if not getattr(session, "knowledge_graph", None):
+        return None
+    try:
+        pg = KnowledgeGraph.model_validate(session.knowledge_graph)
+        return pg if pg.nodes else None
+    except Exception:
+        return None
+
+
+def _build_review_context(session, graph: KnowledgeGraph | None = None) -> str:
+    """Assemble the grounded PC Chair / refinement context.
+
+    Includes the current final review, independent reviews and the
+    deliberation transcript (kept separate so the chair can reason about the
+    committee process), structured graph evidence and the visual evidence
+    ledger, and the paper markdown. This is what lets the chair argue either
+    side of a conclusion from the paper itself.
+    """
+    parts: list[str] = []
+    result = session.result or {}
     paper_md = session.document_markdown or session.document_text
-    if paper_md:
-        parts.append(f"## Paper Content\n\n{paper_md}")
-    if session.knowledge_graph:
-        gs = session.knowledge_graph.get("summary", "")
-        if gs:
-            parts.append(f"## Knowledge Graph Summary\n\n{gs}")
-        nodes = session.knowledge_graph.get("nodes") or []
-        edges = session.knowledge_graph.get("edges") or []
-        parts.append(f"## Knowledge Graph Size\n\nNodes: {len(nodes)}\nEdges: {len(edges)}")
-    phases = session.result.get("phases", [])
-    rp = []
-    for phase in phases:
+
+    final_review = result.get("final_review") or result.get("pc_chair_review")
+    if final_review:
+        parts.append(
+            "## Current Final Review (official draft to edit)\n\n"
+            + json.dumps(sanitize_final_review(final_review), indent=2, ensure_ascii=False)
+        )
+
+    independent: list[str] = []
+    deliberation: list[str] = []
+    meta_outputs: list[str] = []
+    for phase in result.get("phases", []):
+        name = phase.get("phase_name", "")
         for output in phase.get("outputs", []):
             role = output.get("agent_role", "reviewer")
             content = output.get("content", "")
-            if content:
-                rp.append(f"### {role}\n{content}")
-    if rp:
-        parts.append("## Review Committee Outputs\n\n" + "\n\n---\n\n".join(rp))
-    if session.result:
-        final_review = session.result.get("final_review") or session.result.get("pc_chair_review")
-        if final_review:
-            parts.append(
-                "## Current Final Review\n\n"
-                + json.dumps(sanitize_final_review(final_review), indent=2, ensure_ascii=False)
-            )
+            if not content:
+                continue
+            if name == "independent_review":
+                independent.append(f"### {role}\n{content}")
+            elif name == "deliberation":
+                rnd = (output.get("metadata") or {}).get("round", "?")
+                deliberation.append(f"### Round {rnd} — {role}\n{content}")
+            elif name == "meta_review":
+                meta_outputs.append(f"### {role}\n{content}")
+    if independent:
+        parts.append("## Independent Reviews\n\n" + "\n\n---\n\n".join(independent))
+    if deliberation:
+        parts.append("## Deliberation Transcript\n\n" + "\n\n---\n\n".join(deliberation))
+    if meta_outputs:
+        parts.append("## Meta-Review Synthesis\n\n" + "\n\n---\n\n".join(meta_outputs))
+
+    if graph is None:
+        graph = _session_graph(session)
+    if graph is not None:
+        try:
+            payload = build_review_context_payload(paper_md or "", graph)
+            graph_sections = [
+                payload.graph_policy,
+                payload.structured_graph_analysis,
+                payload.visual_evidence_ledger,
+            ]
+            if payload.deliberation_fact_digest:
+                graph_sections.append(
+                    "### Graph Relationship Facts\n\n" + payload.deliberation_fact_digest
+                )
+            graph_block = "\n\n".join(s.strip() for s in graph_sections if s and s.strip())
+            if graph_block:
+                parts.append("## Knowledge Graph Evidence\n\n" + graph_block)
+        except Exception:
+            graph = None
+    if graph is None and getattr(session, "knowledge_graph", None):
+        gs = session.knowledge_graph.get("summary", "")
+        if gs:
+            parts.append(f"## Knowledge Graph Summary\n\n{gs}")
+
+    if paper_md:
+        parts.append(f"## Paper Content\n\n{paper_md}")
     return "\n\n".join(parts)
 
 def _resolve_chat_model(session) -> str:
@@ -2025,6 +2077,64 @@ def _pc_chair_system_prompt(session, context: str, user_role: str) -> str:
     )
 
 
+_PC_CHAIR_QUERY_TYPES = {
+    "overview",
+    "claims_without_support",
+    "methods_evaluation",
+    "baselines",
+    "claim_evidence",
+    "section_coverage",
+    "entity",
+}
+
+
+async def _run_pc_chair_tool_calls(
+    tool_calls: Any,
+    graph: KnowledgeGraph | None,
+) -> list[dict[str, Any]]:
+    """Run the chair's requested query_graph calls deterministically (bounded)."""
+    if not isinstance(tool_calls, list) or not tool_calls or graph is None:
+        return []
+    registry = create_tool_registry(graph=graph)
+    results: list[dict[str, Any]] = []
+    for call in tool_calls[:5]:
+        if not isinstance(call, dict):
+            continue
+        query_type = str(call.get("query_type") or call.get("name") or "").strip()
+        if query_type not in _PC_CHAIR_QUERY_TYPES:
+            continue
+        target = str(call.get("target") or "")
+        try:
+            result = await registry.dispatch(
+                "query_graph", query_type=query_type, target=target
+            )
+            results.append({
+                "query_type": query_type,
+                "target": target,
+                "result": result.data,
+            })
+        except Exception as exc:  # noqa: BLE001
+            results.append({"query_type": query_type, "target": target, "error": str(exc)})
+    return results
+
+
+def _tool_results_as_citations(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Turn graph query results into citation/proof entries for the UI."""
+    citations: list[dict[str, Any]] = []
+    for entry in tool_results or []:
+        if entry.get("error"):
+            continue
+        data = entry.get("result") or {}
+        citations.append({
+            "source": "query_graph",
+            "query_type": entry.get("query_type", ""),
+            "target": entry.get("target", ""),
+            "summary": data.get("summary", ""),
+            "count": data.get("count", 0),
+        })
+    return citations
+
+
 @router.post("/sessions/{session_id}/pc-chair-chat")
 async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
     """Chat with the post-review PC Chair and optionally apply bounded edits."""
@@ -2055,7 +2165,8 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
 
     history = list(session.app_data.get("pc_chair_chat", [])) if session.app_data else []
     compact_history = history[-8:]
-    context = _build_review_context(session)
+    chair_graph = _session_graph(session)
+    context = _build_review_context(session, chair_graph)
     focused_artifact = body.focused_artifact if isinstance(body.focused_artifact, dict) else None
     user_msg = (
         "Current editable final review JSON:\n"
@@ -2102,6 +2213,36 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
             "needs_user_decision": True,
         }
 
+    # Bounded query_graph tool loop: if the chair asked for graph facts, run
+    # them deterministically and re-prompt once so its claims are grounded.
+    tool_results = await _run_pc_chair_tool_calls(parsed.get("tool_calls"), chair_graph)
+    if tool_results:
+        followup = (
+            user_msg
+            + "\n\nGraph query results (use these as grounded facts and cite them in citations):\n"
+            + json.dumps(tool_results, indent=2, ensure_ascii=False)
+        )
+        try:
+            response = await _llm_client.complete(
+                model=chat_model,
+                messages=[
+                    {"role": "system", "content": _pc_chair_system_prompt(session, context, body.user_role)},
+                    {"role": "user", "content": followup},
+                ],
+                session_id=session_id,
+                max_tokens=4096,
+                temperature=0.2,
+                phase_policy="meta_synthesis",
+            )
+            reparsed = extract_json_object(
+                response.content,
+                required_keys={"reply", "final_review_patch", "edit_summary"},
+            )
+            if reparsed:
+                parsed = reparsed
+        except Exception as e:
+            logger.warning("PC Chair tool follow-up failed for %s: %s", session_id, e)
+
     patch = parsed.get("final_review_patch") if isinstance(parsed.get("final_review_patch"), dict) else {}
     patch, blocked_decision_fields = _filter_protected_review_patch(patch, message=message)
     edit_summary = parsed.get("edit_summary") if isinstance(parsed.get("edit_summary"), list) else []
@@ -2121,6 +2262,11 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         session.app_data.pop("review_packet", None)
         applied = True
 
+    citations = parsed.get("citations") if isinstance(parsed.get("citations"), list) else []
+    # Surface the deterministic graph queries the chair ran as proof, so they
+    # are visible in the UI rather than silently discarded.
+    citations = [*citations, *_tool_results_as_citations(tool_results)]
+
     turn = {
         "user": message,
         "reply": str(parsed.get("reply") or "").strip(),
@@ -2131,7 +2277,8 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         "user_role": body.user_role or "chair_editor",
         "focused_artifact": focused_artifact,
         "selected_review_field": body.selected_review_field or "",
-        "citations": parsed.get("citations") if isinstance(parsed.get("citations"), list) else [],
+        "citations": citations,
+        "tool_results": tool_results,
         "focused_artifacts": (
             parsed.get("focused_artifacts")
             if isinstance(parsed.get("focused_artifacts"), list)
@@ -2150,6 +2297,7 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         "final_review": updated_review,
         "applied_edits": applied,
         "citations": turn["citations"],
+        "tool_results": tool_results,
         "focused_artifacts": turn["focused_artifacts"],
         "needs_user_decision": turn["needs_user_decision"],
         "history": session.app_data.get("pc_chair_chat", []),
@@ -2441,6 +2589,7 @@ class SC26PacketReviewBody(BaseModel):
     user_instructions: str = ""
     context_mode: str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value
     execute_live: bool = False
+    output_subdir: str = ""
 
 
 def _normalize_title_for_match(value: str) -> str:
@@ -2578,6 +2727,7 @@ async def _run_one_sc26_packet_review(
     artifact_description_assumed_present: bool,
     artifact_description_status: str = "",
     context_mode: str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value,
+    output_subdir: str = "",
 ) -> dict[str, Any]:
     _session_manager = get_session_manager()
     template_path = _packet_review_template_path(packet_dir)
@@ -2641,6 +2791,9 @@ async def _run_one_sc26_packet_review(
                 "artifact_description_assumed_present": ad_assumed_present,
                 "preset": preset,
                 "context_mode": ReviewContextMode.coerce(context_mode).value,
+                "run_id": output_subdir,
+                "markdown_source": "reused_processed_markdown" if imported.document_markdown else "graph_summary_fallback",
+                "graph_source_detail": "reused_saved_graph",
             },
         },
         app_name=_APP_NAME,
@@ -2718,7 +2871,11 @@ async def _run_one_sc26_packet_review(
         raise RuntimeError(f"Session {session.session_id} disappeared during packet review")
 
     packet = session_to_review_packet(completed)
+    # Write to a run-scoped subdirectory when requested so prior outputs are
+    # preserved rather than overwritten.
     output_dir = packet_dir / "protoneo_outputs"
+    if output_subdir:
+        output_dir = output_dir / output_subdir
     prompt_pack_version = ""
     try:
         from .prompts import load_prompt_pack
@@ -2746,6 +2903,7 @@ async def _run_one_sc26_packet_review(
         "status": "completed",
         "session_id": packet.session_id,
         "output_dir": str(output_dir),
+        "run_id": output_subdir,
         "manifest": manifest,
     }
 
@@ -2764,10 +2922,11 @@ async def run_sc26_packet_reviews(
     artifact_description_status: str = "submitted",
     user_instructions: str = "",
     context_mode: str = ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value,
+    output_subdir: str = "",
 ) -> dict[str, Any]:
     results = []
     for packet_dir in _packet_dirs(packet_root, paper_ids):
-        if skip_completed and not force and _packet_manifest_complete(packet_dir):
+        if skip_completed and not force and not output_subdir and _packet_manifest_complete(packet_dir):
             results.append({
                 "paper_id": packet_dir.name,
                 "status": "skipped_completed",
@@ -2785,6 +2944,7 @@ async def run_sc26_packet_reviews(
                 artifact_description_assumed_present=artifact_description_assumed_present,
                 artifact_description_status=artifact_description_status,
                 context_mode=context_mode,
+                output_subdir=output_subdir,
             ))
         except Exception as e:
             logger.error("SC26 packet review failed for %s: %s", packet_dir, e, exc_info=True)
@@ -2840,6 +3000,7 @@ async def start_sc26_packet_review(body: SC26PacketReviewBody):
             artifact_description_status=body.artifact_description_status,
             user_instructions=body.user_instructions,
             context_mode=body.context_mode,
+            output_subdir=body.output_subdir,
         )
         batch_bus.emit("batch_complete", {
             "batch_id": batch_id,

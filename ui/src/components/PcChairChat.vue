@@ -45,6 +45,16 @@
                 <li v-for="(item, idx) in turn.edit_summary" :key="idx">{{ item }}</li>
               </ul>
 
+              <div v-if="proofItems(turn).length" class="proof-card">
+                <div class="proof-head">Proof &amp; citations</div>
+                <ul class="proof-list">
+                  <li v-for="(proof, idx) in proofItems(turn)" :key="idx" :class="proof.kind">
+                    <span class="proof-tag">{{ proof.tag }}</span>
+                    <span class="proof-text">{{ proof.text }}</span>
+                  </li>
+                </ul>
+              </div>
+
               <div v-if="hasPatch(turn.final_review_patch)" class="patch-card">
                 <div class="patch-head">
                   <span>Suggested edits</span>
@@ -109,12 +119,18 @@
             </select>
             <div class="composer-actions">
               <button v-if="draftApplied" type="button" @click="saveReview" :disabled="savingReview">
-                {{ savingReview ? 'Saving...' : 'Save Review' }}
+                {{ savingReview ? 'Saving...' : 'Save + Regenerate Exports' }}
               </button>
               <button type="submit" class="send-btn" :disabled="sending || !message.trim()">
                 {{ sending ? 'Thinking...' : 'Send' }}
               </button>
             </div>
+          </div>
+          <div v-if="exportNote" class="export-note">
+            <span>{{ exportNote }}</span>
+            <button v-if="canDownload" type="button" @click="downloadReview" :disabled="downloading">
+              {{ downloading ? 'Preparing...' : 'Download review' }}
+            </button>
           </div>
         </form>
       </aside>
@@ -124,7 +140,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
-import { pcChairChat, getPcChairChat } from '../api/kernel.js'
+import { pcChairChat, getPcChairChat, writeReviewArtifacts, getLinklingsReview } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 
 const md = renderMarkdown
@@ -146,6 +162,9 @@ const userRole = ref('chair_editor')
 const chatLog = ref(null)
 const draftApplied = ref(false)
 const savingReview = ref(false)
+const exportNote = ref('')
+const canDownload = ref(false)
+const downloading = ref(false)
 
 const selectedReviewField = computed(() => {
   const artifact = props.focusedArtifact
@@ -262,12 +281,72 @@ function rejectPatch(turn) {
 
 async function saveReview() {
   savingReview.value = true
+  exportNote.value = ''
   try {
     const saved = await emitSave()
-    if (saved !== false) draftApplied.value = false
+    if (saved !== false) {
+      draftApplied.value = false
+      // Persisted edits invalidate prior exports; regenerate from the saved review.
+      try {
+        const res = await writeReviewArtifacts(props.sessionId)
+        const dir = res.data?.output_dir
+        exportNote.value = dir ? `Exports regenerated: ${dir}` : 'Exports regenerated.'
+        canDownload.value = true
+      } catch (e) {
+        exportNote.value = 'Saved, but export regeneration failed: ' + (e.response?.data?.detail || e.message || 'unknown')
+        canDownload.value = false
+      }
+    }
   } finally {
     savingReview.value = false
   }
+}
+
+async function downloadReview() {
+  downloading.value = true
+  try {
+    const res = await getLinklingsReview(props.sessionId)
+    const blob = new Blob([res.data], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${props.sessionId}_review.txt`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    exportNote.value = 'Download failed: ' + (e.response?.data?.detail || e.message || 'unknown')
+  } finally {
+    downloading.value = false
+  }
+}
+
+function proofItems(turn) {
+  const items = []
+  for (const cite of turn.citations || []) {
+    if (!cite || typeof cite !== 'object') continue
+    if (cite.source === 'query_graph') {
+      items.push({
+        kind: 'graph',
+        tag: `graph:${cite.query_type || 'query'}`,
+        text: cite.summary || `${cite.count ?? ''} result(s)`,
+      })
+    } else {
+      const locator = [cite.section && `Section ${cite.section}`, cite.page && `p.${cite.page}`, cite.graph_ref]
+        .filter(Boolean)
+        .join(' · ')
+      const claim = cite.claim || cite.point || ''
+      const text = [claim, locator].filter(Boolean).join(' — ') || JSON.stringify(cite)
+      items.push({ kind: 'manuscript', tag: 'cite', text })
+    }
+  }
+  for (const tool of turn.tool_results || []) {
+    if (!tool || typeof tool !== 'object' || tool.error) continue
+    const summary = tool.result?.summary || ''
+    items.push({ kind: 'graph', tag: `graph:${tool.query_type || 'query'}`, text: summary })
+  }
+  return items
 }
 
 function emitSave() {
@@ -452,6 +531,68 @@ function scrollToBottom() {
   padding-left: var(--pn-space-4);
   color: var(--pn-text-secondary);
   font-size: 12px;
+}
+
+.proof-card {
+  margin-top: var(--pn-space-3);
+  border: 1px solid var(--pn-border);
+  background: var(--pn-bg);
+}
+
+.proof-head {
+  padding: var(--pn-space-2) var(--pn-space-3);
+  border-bottom: 1px solid var(--pn-border);
+  color: var(--pn-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.proof-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--pn-space-2) var(--pn-space-3);
+  display: grid;
+  gap: var(--pn-space-2);
+}
+
+.proof-list li {
+  display: flex;
+  gap: var(--pn-space-2);
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--pn-text-secondary);
+}
+
+.proof-tag {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border: 1px solid var(--pn-border-strong);
+  color: var(--pn-text-muted);
+}
+
+.proof-list li.graph .proof-tag {
+  border-color: var(--pn-accent, var(--pn-border-strong));
+}
+
+.proof-text {
+  overflow-wrap: anywhere;
+}
+
+.export-note {
+  margin-top: var(--pn-space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pn-space-2);
+  font-size: 11px;
+  color: var(--pn-text-secondary);
+  overflow-wrap: anywhere;
 }
 
 .patch-card {

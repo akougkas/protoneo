@@ -10,6 +10,7 @@ import uuid
 from typing import Any, AsyncGenerator, Callable
 
 from ..llm.client import LLMClient
+from ..tools.types import ToolRegistry, ToolResult
 from .protocol import SessionContext
 from .types import AgentOutput, Document, Message
 
@@ -42,6 +43,7 @@ class BaseAgent:
         phase_policy: str | None = None,
         presence_penalty: float | None = None,
         frequency_penalty: float | None = None,
+        tools: ToolRegistry | None = None,
     ):
         self._agent_id = agent_id or f"{role.lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
         self._role = role
@@ -59,10 +61,31 @@ class BaseAgent:
         self._phase_policy = phase_policy
         self._presence_penalty = presence_penalty
         self._frequency_penalty = frequency_penalty
+        self._tools = tools
 
     @property
     def agent_id(self) -> str:
         return self._agent_id
+
+    @property
+    def tools(self) -> ToolRegistry | None:
+        return self._tools
+
+    def available_tools(self) -> list[dict[str, str]]:
+        """Tool name/description pairs this agent may call (empty if none)."""
+        return self._tools.available_tools() if self._tools else []
+
+    async def call_tool(self, name: str, query: str = "", **kwargs: Any) -> ToolResult:
+        """Dispatch a single tool call through the attached registry.
+
+        Controlled, opt-in tool use: only agents constructed with a
+        ``ToolRegistry`` can call tools, and dispatch validates availability
+        before running. This does not alter the default review/deliberation
+        message flow.
+        """
+        if not self._tools:
+            raise RuntimeError(f"Agent {self._agent_id} has no tools attached")
+        return await self._tools.dispatch(name, query, **kwargs)
 
     @property
     def role(self) -> str:

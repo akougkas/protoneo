@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any
 
 from protoneo.knowledge.graph import GraphNode, KnowledgeGraph
+from protoneo.tools.graph_query import graph_fact_digest
 
 
 STRUCTURAL_NODE_TYPES = {"Paper", "Section", "Diagram", "Figure", "Table", "Reference", "Equation"}
@@ -76,6 +77,7 @@ class ReviewContextPayload:
     required_citation_instructions: str
     graph_quality: dict[str, Any]
     graph_metrics: dict[str, Any]
+    deliberation_fact_digest: str = ""
 
     def render_for_independent_review(
         self,
@@ -125,17 +127,31 @@ class ReviewContextPayload:
         mode: str | ReviewContextMode | None = None,
     ) -> str:
         mode = ReviewContextMode.coerce(mode)
+        # MARKDOWN_ONLY ablation: the manuscript is the only evidence, so make
+        # it available again during deliberation rather than leaving reviewers
+        # to argue from peer summaries alone.
         if mode == ReviewContextMode.MARKDOWN_ONLY:
-            return ""
-        if mode == ReviewContextMode.MARKDOWN_PLUS_GRAPH_BRIEFING:
-            return _join_parts([self.graph_policy, self.graph_briefing])
-        if mode == ReviewContextMode.MARKDOWN_PLUS_REQUIRED_GRAPH_CITATIONS:
+            return self.manuscript
+        # GRAPH_ONLY and BRIEFING ablations deliberately withhold the manuscript.
+        if mode == ReviewContextMode.GRAPH_ONLY:
             return _join_parts([
                 self.graph_policy,
                 self.graph_briefing,
                 self.structured_graph_analysis,
                 self.visual_evidence_ledger,
+                self._fact_digest_section(),
+            ])
+        if mode == ReviewContextMode.MARKDOWN_PLUS_GRAPH_BRIEFING:
+            return _join_parts([self.manuscript, self.graph_policy, self.graph_briefing])
+        if mode == ReviewContextMode.MARKDOWN_PLUS_REQUIRED_GRAPH_CITATIONS:
+            return _join_parts([
+                self.manuscript,
+                self.graph_policy,
+                self.graph_briefing,
+                self.structured_graph_analysis,
+                self.visual_evidence_ledger,
                 self.required_citation_instructions,
+                self._fact_digest_section(),
             ])
         if mode == ReviewContextMode.FULL_DELIBERATION_CONTEXT:
             return _join_parts([
@@ -145,13 +161,31 @@ class ReviewContextPayload:
                 self.structured_graph_analysis,
                 self.visual_evidence_ledger,
                 self.required_citation_instructions,
+                self._fact_digest_section(),
             ])
+        # Production default (MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE): give
+        # reviewers the manuscript again so evidence disputes are grounded in
+        # the actual text, plus a graph-fact tiebreaker digest when the graph
+        # passed the quality threshold.
         return _join_parts([
+            self.manuscript,
             self.graph_policy,
             self.graph_briefing,
             self.structured_graph_analysis,
             self.visual_evidence_ledger,
+            self._fact_digest_section(),
         ])
+
+    def _fact_digest_section(self) -> str:
+        if not self.deliberation_fact_digest:
+            return ""
+        return _wrap_section(
+            "Graph Relationship Facts (Deliberation Tiebreaker)",
+            "When two reviewers dispute whether the paper shows a relationship, use "
+            "these extracted positive facts as a neutral check, then confirm against "
+            "the manuscript passage. Do not cite these counts in author-facing prose.\n\n"
+            + self.deliberation_fact_digest,
+        )
 
     def render_full_deliberation_context(
         self,
@@ -256,6 +290,13 @@ def build_review_context_payload(
     if not briefing and quality["mode"] == "unavailable":
         briefing = "No reviewer-facing graph summary is available for this session."
     graph_metrics = _graph_metrics(graph, quality)
+    # The relationship-fact digest is reviewer evidence only when graph
+    # relationship extraction passed the quality threshold. Below threshold the
+    # graph is a navigation index, so we withhold the digest to avoid implying
+    # relationship facts the extraction does not actually support.
+    fact_digest = (
+        graph_fact_digest(graph) if quality.get("relationship_facts_usable") else ""
+    )
     return ReviewContextPayload(
         manuscript=manuscript_message,
         graph_policy=_build_graph_policy_context(quality),
@@ -265,6 +306,7 @@ def build_review_context_payload(
         required_citation_instructions=_required_citation_instructions(),
         graph_quality=quality,
         graph_metrics=graph_metrics,
+        deliberation_fact_digest=fact_digest,
     )
 
 

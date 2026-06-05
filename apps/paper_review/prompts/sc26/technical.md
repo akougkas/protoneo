@@ -38,7 +38,7 @@ SC spans 10 areas from Algorithms to System Software. Calibrate your technical e
 - **HPC for ML**: Expect training/inference at meaningful scale, not toy models. Distinguish HPC contributions from ML contributions. The HPC component must be substantial.
 - **Performance**: Expect rigorous measurement methodology, clearly defined metrics, and tools that are validated against known benchmarks.
 - **Post-Moore & Quantum**: Expect honest assessment of current limitations alongside projected advantages. Simulation-based results need clear caveats.
-- **State of the Practice**: Expect practical insights from real deployments. Novel research is not required, but novel observations, dissemination value, and actionable lessons are. Evaluate pap111s2-style work on whether it teaches useful SC practice, not whether it looks like a conventional research novelty paper.
+- **State of the Practice**: Expect practical insights from real deployments. Novel research is not required, but novel observations, dissemination value, and actionable lessons are. Evaluate State of the Practice work on whether it teaches useful SC practice, not whether it looks like a conventional research novelty paper.
 
 ## Technical scoring posture
 

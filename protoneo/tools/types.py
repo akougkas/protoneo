@@ -55,3 +55,17 @@ class ToolRegistry:
             for t in self._tools.values()
             if t.available()
         ]
+
+    async def dispatch(self, name: str, query: str = "", **kwargs: Any) -> ToolResult:
+        """Execute a registered tool by name.
+
+        Controlled entry point for agents and the post-review PC Chair: it
+        validates that the tool exists and is available before running it, so
+        callers get a clear error instead of an opaque failure.
+        """
+        tool = self._tools.get(name)
+        if tool is None:
+            raise KeyError(f"Unknown tool: {name!r}")
+        if not tool.available():
+            raise RuntimeError(f"Tool {name!r} is not available")
+        return await tool.execute(query, **kwargs)
