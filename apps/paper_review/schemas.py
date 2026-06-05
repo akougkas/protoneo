@@ -70,6 +70,9 @@ class DeliberationRound(BaseModel):
 class MetaReview(BaseModel):
     panel_summary: str = ""
     score_distribution: dict[str, Any] = Field(default_factory=dict)
+    initial_score_distribution: dict[str, Any] = Field(default_factory=dict)
+    final_score_distribution: dict[str, Any] = Field(default_factory=dict)
+    current_score_distribution: dict[str, Any] = Field(default_factory=dict)
     consensus: dict[str, Any] = Field(default_factory=dict)
     agreements: list[str] = Field(default_factory=list)
     disagreements: list[Any] = Field(default_factory=list)
@@ -104,6 +107,9 @@ _DEFAULT_FINAL_REVIEW: dict[str, Any] = {
     "reviewer_role": "Meta-Reviewer",
     "panel_summary": "",
     "score_distribution": {},
+    "initial_score_distribution": {},
+    "final_score_distribution": {},
+    "current_score_distribution": {},
     "consensus": {},
     "agreements": [],
     "disagreements": [],
@@ -519,6 +525,18 @@ def normalize_final_review_payload(payload: Any) -> dict[str, Any]:
             source.get("score_distribution")
             or payload.get("score_distribution")
         ),
+        "initial_score_distribution": (
+            source.get("initial_score_distribution")
+            or payload.get("initial_score_distribution")
+        ),
+        "final_score_distribution": (
+            source.get("final_score_distribution")
+            or payload.get("final_score_distribution")
+        ),
+        "current_score_distribution": (
+            source.get("current_score_distribution")
+            or payload.get("current_score_distribution")
+        ),
         "consensus": source.get("consensus") or payload.get("consensus"),
         "agreements": source.get("agreements") or payload.get("agreements"),
         "disagreements": source.get("disagreements") or payload.get("disagreements"),
@@ -653,6 +671,15 @@ def sanitize_final_review(payload: Any, fallback_comments: str = "") -> dict[str
         ),
         "score_distribution": _coerce_score_distribution(
             source.get("score_distribution")
+        ),
+        "initial_score_distribution": _coerce_score_distribution(
+            source.get("initial_score_distribution")
+        ),
+        "final_score_distribution": _coerce_score_distribution(
+            source.get("final_score_distribution")
+        ),
+        "current_score_distribution": _coerce_score_distribution(
+            source.get("current_score_distribution")
         ),
         "consensus": (
             dict(source.get("consensus"))

@@ -149,6 +149,7 @@ const props = defineProps({
   open: { type: Boolean, default: false },
   sessionId: { type: String, required: true },
   currentReview: { type: Object, default: () => ({}) },
+  reviewPacket: { type: Object, default: null },
   focusedArtifact: { type: Object, default: null },
 })
 
@@ -175,6 +176,15 @@ const selectedReviewField = computed(() => {
 })
 
 const selectedReviewExcerpt = computed(() => props.focusedArtifact?.excerpt || '')
+const sessionMetadata = computed(() => props.reviewPacket?.provenance_metadata?.session_metadata || {})
+const downloadPaperId = computed(() => {
+  const candidate = sessionMetadata.value.packet_paper_id ||
+    props.reviewPacket?.paper_id ||
+    props.currentReview?.packet_paper_id ||
+    props.currentReview?.paper_id ||
+    props.sessionId
+  return String(candidate || 'review').replace(/[^A-Za-z0-9._-]+/g, '_')
+})
 
 watch(() => props.open, async (value) => {
   if (value) {
@@ -310,7 +320,7 @@ async function downloadReview() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${props.sessionId}_review.txt`
+    a.download = `${downloadPaperId.value}_protoneo_offline_review.txt`
     document.body.appendChild(a)
     a.click()
     a.remove()

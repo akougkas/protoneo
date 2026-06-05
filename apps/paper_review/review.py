@@ -862,6 +862,63 @@ def _validate_score_distribution(scores: dict, max_score: int = 5) -> dict:
     return cleaned
 
 
+def _valid_review_score(value: Any, max_score: int = 5) -> int | None:
+    if isinstance(value, dict):
+        value = value.get("score")
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        return None
+    return score if 1 <= score <= max_score else None
+
+
+def _output_payload(output: Any) -> dict[str, Any]:
+    structured = getattr(output, "structured", None)
+    if isinstance(structured, dict) and structured:
+        return structured
+    parsed = _extract_json(getattr(output, "content", ""))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def score_distributions_from_result(result: DeliberationResult) -> tuple[dict[str, int], dict[str, int]]:
+    """Return initial review scores and current/final scores after deliberation."""
+    initial_scores: dict[str, int] = {}
+    for phase in result.phases:
+        if phase.phase_name != "independent_review":
+            continue
+        for output in phase.outputs:
+            payload = _output_payload(output)
+            score = _valid_review_score(payload.get("overall_merit"))
+            if score is None:
+                continue
+            reviewer = str(output.agent_id or output.agent_role or "").strip()
+            if reviewer:
+                initial_scores[reviewer] = score
+
+    current_scores = dict(initial_scores)
+    for phase in result.phases:
+        if phase.phase_name != "deliberation":
+            continue
+        for output in phase.outputs:
+            payload = _output_payload(output)
+            stance = payload.get("stance_change")
+            if not isinstance(stance, dict):
+                continue
+            score = _valid_review_score(stance.get("current_score"))
+            if score is None:
+                continue
+            speaker = str(
+                output.metadata.get("speaker_id")
+                or output.agent_id
+                or output.agent_role
+                or ""
+            ).strip()
+            if speaker:
+                current_scores[speaker] = score
+
+    return initial_scores, current_scores
+
+
 def parse_meta_review(output, no_chain_of_thought: bool = False) -> MetaReview:
     """Parse the meta-reviewer output."""
     content = apply_output_guardrails(
@@ -877,6 +934,15 @@ def parse_meta_review(output, no_chain_of_thought: bool = False) -> MetaReview:
         return MetaReview(
             panel_summary=parsed.get("panel_summary", ""),
             score_distribution=validated_scores,
+            initial_score_distribution=_validate_score_distribution(
+                parsed.get("initial_score_distribution", {})
+            ),
+            final_score_distribution=_validate_score_distribution(
+                parsed.get("final_score_distribution", {})
+            ),
+            current_score_distribution=_validate_score_distribution(
+                parsed.get("current_score_distribution", {})
+            ),
             consensus=parsed.get("consensus", {}),
             agreements=parsed.get("agreements", []),
             disagreements=parsed.get("disagreements", []),
@@ -977,15 +1043,22 @@ def result_to_packet(
                     no_chain_of_thought=no_chain_of_thought,
                 )
 
-    review_scores = {
-        review.agent_id or review.reviewer_role: review.overall_merit.get("score")
-        for review in reviews
-        if review.overall_merit.get("score") is not None
-    }
-    if review_scores:
-        # The meta-reviewer occasionally invents reviewer_N keys. The actual
-        # individual reviews are the source of truth for score distribution.
-        meta.score_distribution = review_scores
+    initial_scores, current_scores = score_distributions_from_result(result)
+    if not initial_scores:
+        initial_scores = {
+            review.agent_id or review.reviewer_role: review.overall_merit.get("score")
+            for review in reviews
+            if review.overall_merit.get("score") is not None
+        }
+        current_scores = dict(initial_scores)
+    if initial_scores:
+        # The meta-reviewer occasionally invents reviewer_N keys. Actual review
+        # outputs and deliberation stance changes are the score sources of truth.
+        final_scores = current_scores or initial_scores
+        meta.initial_score_distribution = initial_scores
+        meta.current_score_distribution = final_scores
+        meta.final_score_distribution = final_scores
+        meta.score_distribution = final_scores
 
     # Build packet-level provenance for reproducibility
     provenance: dict[str, Any] = {
@@ -1107,9 +1180,15 @@ def session_to_review_packet(session: Any) -> ReviewPacket:
                 "artifact_description_status",
                 "artifact_description_assumed_present",
                 "preset",
+                "context_mode",
+                "run_id",
             )
             if metadata.get(key) not in (None, "")
         }
+        if metadata.get("context_mode"):
+            packet.provenance_metadata["context_mode"] = metadata["context_mode"]
+        if metadata.get("run_id"):
+            packet.provenance_metadata["run_id"] = metadata["run_id"]
         if metadata.get("graph_source"):
             packet.provenance_metadata["graph_source"] = metadata["graph_source"]
         if metadata.get("source_session_id"):

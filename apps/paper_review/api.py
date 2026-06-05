@@ -2331,9 +2331,12 @@ async def _write_review_artifacts_for_session(session) -> tuple[dict[str, Any], 
 
     metadata = session.config.get("metadata", {}) if session.config else {}
     packet_dir_raw = metadata.get("packet_dir")
+    run_id = str(metadata.get("run_id") or "").strip()
+    context_mode = ReviewContextMode.coerce(metadata.get("context_mode", "")).value
+    session_id = str(getattr(session, "session_id", "") or metadata.get("source_session_id") or "session")
     if packet_dir_raw:
         packet_dir = Path(packet_dir_raw)
-        output_dir = packet_dir / "protoneo_outputs"
+        output_dir = _packet_output_dir(packet_dir, run_id)
         template_path = None
         try:
             template_path = _packet_review_template_path(packet_dir)
@@ -2371,6 +2374,8 @@ async def _write_review_artifacts_for_session(session) -> tuple[dict[str, Any], 
             metadata.get("artifact_description_assumed_present", False)
         ),
         artifact_description_status=str(metadata.get("artifact_description_status") or ""),
+        run_id=run_id,
+        context_mode=context_mode,
     )
     session.app_data["last_review_artifact_manifest"] = manifest
     return manifest, output_dir
@@ -2617,6 +2622,12 @@ def _packet_pdf_path(packet_dir: Path) -> Path:
         if not p.name.endswith("_details.pdf")
     )
     return matches[0] if matches else Path()
+
+
+def _packet_output_dir(packet_dir: Path, run_id: str = "") -> Path:
+    output_dir = packet_dir / "protoneo_outputs"
+    run_id = str(run_id or "").strip()
+    return output_dir / run_id if run_id else output_dir
 
 
 def _packet_title_from_template(template_path: Path) -> str:
@@ -2873,9 +2884,7 @@ async def _run_one_sc26_packet_review(
     packet = session_to_review_packet(completed)
     # Write to a run-scoped subdirectory when requested so prior outputs are
     # preserved rather than overwritten.
-    output_dir = packet_dir / "protoneo_outputs"
-    if output_subdir:
-        output_dir = output_dir / output_subdir
+    output_dir = _packet_output_dir(packet_dir, output_subdir)
     prompt_pack_version = ""
     try:
         from .prompts import load_prompt_pack
@@ -2897,6 +2906,8 @@ async def _run_one_sc26_packet_review(
         prompt_pack_version=prompt_pack_version,
         artifact_description_assumed_present=ad_assumed_present,
         artifact_description_status=ad_status,
+        run_id=output_subdir,
+        context_mode=context_mode.value,
     )
     return {
         "paper_id": packet_dir.name,

@@ -34,6 +34,7 @@ from .review import (
     build_user_message,
     parse_review_output,
     resolve_paper_review_model,
+    score_distributions_from_result,
     strip_json_fences,
 )
 from .review_context import (
@@ -115,27 +116,7 @@ def _apply_graph_output_guardrail(
 
 def _review_score_distribution(result: DeliberationResult) -> dict[str, int]:
     """Derive reviewer scores from actual independent-review outputs."""
-    scores: dict[str, int] = {}
-    for phase in result.phases:
-        if phase.phase_name != "independent_review":
-            continue
-        for output in phase.outputs:
-            parsed = output.structured if isinstance(output.structured, dict) else None
-            if not parsed:
-                try:
-                    parsed = json.loads(strip_json_fences(output.content))
-                except Exception:
-                    parsed = None
-            if not isinstance(parsed, dict):
-                continue
-            merit = parsed.get("overall_merit", {})
-            raw_score = merit.get("score") if isinstance(merit, dict) else merit
-            try:
-                score = int(raw_score)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= score <= 5:
-                scores[output.agent_id or output.agent_role] = score
+    scores, _ = score_distributions_from_result(result)
     return scores
 
 
@@ -421,9 +402,12 @@ async def _finalize_unified_synthesis(
         return
 
     final_review = _parse_final_review(output.content)
-    review_scores = _review_score_distribution(result)
-    if review_scores:
-        final_review["score_distribution"] = review_scores
+    initial_scores, final_scores = score_distributions_from_result(result)
+    if initial_scores:
+        final_review["initial_score_distribution"] = initial_scores
+        final_review["current_score_distribution"] = final_scores or initial_scores
+        final_review["final_score_distribution"] = final_scores or initial_scores
+        final_review["score_distribution"] = final_scores or initial_scores
     final_review = sanitize_final_review(
         _apply_graph_output_guardrail(final_review, paper_graph)
     )

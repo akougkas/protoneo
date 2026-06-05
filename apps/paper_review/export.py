@@ -402,6 +402,8 @@ def write_review_artifacts(
     prompt_pack_version: str = "",
     artifact_description_assumed_present: bool = False,
     artifact_description_status: str = "",
+    run_id: str = "",
+    context_mode: str = "",
 ) -> dict[str, Any]:
     """Write durable per-paper ProtoNeo review artifacts."""
     out = Path(output_dir)
@@ -466,9 +468,27 @@ def write_review_artifacts(
             if isinstance(info, dict) and info.get("model_id")
         }
 
+    session_metadata = packet.provenance_metadata.get("session_metadata", {})
+    if not isinstance(session_metadata, dict):
+        session_metadata = {}
+    manifest_run_id = str(
+        run_id
+        or packet.provenance_metadata.get("run_id")
+        or session_metadata.get("run_id")
+        or ""
+    )
+    manifest_context_mode = str(
+        context_mode
+        or packet.provenance_metadata.get("context_mode")
+        or session_metadata.get("context_mode")
+        or ""
+    )
+
     manifest = {
         "session_id": packet.session_id,
         "paper_id": paper_id,
+        "run_id": manifest_run_id,
+        "context_mode": manifest_context_mode,
         "paper_path": str(paper_path or ""),
         "conference": packet.conference,
         "model_map": model_map or {},
@@ -535,7 +555,24 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
             lines.append(line)
             lines.append("")
 
-    if meta.score_distribution:
+    initial_scores = meta.initial_score_distribution
+    final_scores = meta.final_score_distribution or meta.current_score_distribution or meta.score_distribution
+    if initial_scores and final_scores and initial_scores != final_scores:
+        lines.append("**Initial Score Distribution:**")
+        lines.append("")
+        lines.append("| Reviewer | Score |")
+        lines.append("|----------|-------|")
+        for reviewer, score in initial_scores.items():
+            lines.append(f"| {reviewer} | {score}/5 |")
+        lines.append("")
+        lines.append("**Final Score Distribution After Deliberation:**")
+        lines.append("")
+        lines.append("| Reviewer | Score |")
+        lines.append("|----------|-------|")
+        for reviewer, score in final_scores.items():
+            lines.append(f"| {reviewer} | {score}/5 |")
+        lines.append("")
+    elif meta.score_distribution:
         lines.append("**Score Distribution:**")
         lines.append("")
         lines.append("| Reviewer | Score |")

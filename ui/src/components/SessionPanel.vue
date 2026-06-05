@@ -251,6 +251,7 @@
       :open="pcChairOpen"
       :session-id="sessionId"
       :current-review="currentReviewPayload()"
+      :review-packet="packet"
       :focused-artifact="pcChairFocus"
       @close="pcChairOpen = false"
       @clear-focus="pcChairFocus = null"
