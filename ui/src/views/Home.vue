@@ -62,6 +62,19 @@
               Loading conferences...
             </div>
           </div>
+          <div class="venue-import">
+            <input
+              ref="venueTemplateInput"
+              type="file"
+              accept=".txt,.md,.yaml,.yml,.json"
+              style="display: none"
+              @change="onVenueTemplateSelect"
+            />
+            <button class="secondary-btn" :disabled="importingVenue" @click="$refs.venueTemplateInput.click()">
+              {{ importingVenue ? 'Importing...' : 'Import Venue Template' }}
+            </button>
+            <div class="venue-import-hint">CFP, review form, Markdown, YAML, or JSON profile</div>
+          </div>
         </div>
 
         <!-- Upload -->
@@ -335,7 +348,7 @@
       </div>
 
       <!-- Artifact status -->
-      <div v-if="selectedConference === 'sc26'" class="artifact-status-section">
+      <div class="artifact-status-section">
         <h2 class="section-heading">Artifact / AD Status</h2>
         <div class="artifact-status-row">
           <label
@@ -557,7 +570,7 @@ Examples:
 <script setup>
 import { ref, reactive, computed, inject, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getConferences, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, importGraphForReview, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
+import { getConferences, createConferenceFromTemplate, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, importGraphForReview, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
 
 const router = useRouter()
 const activeApp = inject('activeApp', ref(null))
@@ -584,7 +597,8 @@ const activeProviderCount = computed(() =>
 
 const conferences = ref([])
 const availableModels = ref([])
-const selectedConference = ref('')
+const selectedConference = ref('adaptive')
+const importingVenue = ref(false)
 const selectedFile = ref(null)
 const dragOver = ref(false)
 const launching = ref(false)
@@ -1025,16 +1039,41 @@ function graphSessionTitle(sess) {
     || sess.session_id.slice(0, 8)
 }
 
+async function refreshConferences() {
+  const confRes = await getConferences()
+  conferences.value = confRes.data.conferences || []
+  if (!selectedConference.value && conferences.value.length > 0) {
+    selectedConference.value = conferences.value[0].slug
+  }
+}
+
+async function onVenueTemplateSelect(e) {
+  const file = e.target.files?.[0]
+  if (!file) return
+  importingVenue.value = true
+  launchError.value = ''
+  try {
+    const res = await createConferenceFromTemplate(file)
+    await refreshConferences()
+    const slug = res.data?.conference?.slug
+    if (slug) await selectConference(slug)
+  } catch (err) {
+    launchError.value = err.response?.data?.detail || 'Failed to import venue template'
+  } finally {
+    importingVenue.value = false
+    e.target.value = ''
+  }
+}
+
 onMounted(async () => {
   try {
-    const [confRes, modelRes, sessRes, settRes, batchRes] = await Promise.all([
-      getConferences(),
+    const [modelRes, sessRes, settRes, batchRes] = await Promise.all([
       getModels(),
       listSessions(10),
       getSettings(),
       listBatches(5).catch(() => ({ data: { batches: [] } })),
     ])
-    conferences.value = confRes.data.conferences
+    await refreshConferences()
     availableModels.value = modelRes.data.models || []
     recentSessions.value = sessRes.data.sessions || []
     protoNeoSettings.value = settRes.data || { active_models: {} }
@@ -1117,7 +1156,6 @@ function truncateAbstract(text) {
 }
 
 function reviewLaunchOptions() {
-  if (selectedConference.value !== 'sc26') return {}
   return {
     artifactDescriptionStatus: artifactDescriptionStatus.value,
     artifactDescriptionAssumedPresent: artifactDescriptionStatus.value === 'submitted',
@@ -1522,6 +1560,30 @@ async function launchSavedGraph(sess) {
   font-size: 11px; color: var(--pn-text-muted); margin-top: var(--pn-space-2);
   line-height: 1.5; font-style: italic;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.venue-import {
+  display: flex;
+  align-items: center;
+  gap: var(--pn-space-3);
+  margin-top: var(--pn-space-4);
+}
+.secondary-btn {
+  border: 1px solid var(--pn-border-strong);
+  background: var(--pn-bg);
+  color: var(--pn-text);
+  font-family: var(--pn-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: var(--pn-space-2) var(--pn-space-3);
+  cursor: pointer;
+}
+.secondary-btn:hover:not(:disabled) { border-color: var(--pn-text); }
+.secondary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.venue-import-hint {
+  font-size: 11px;
+  color: var(--pn-text-muted);
 }
 
 /* ── Drop zone ── */

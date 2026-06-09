@@ -1,0 +1,90 @@
+conference:
+  slug: adaptive
+  name: "Adaptive Venue"
+  short_name: "Adaptive Venue"
+  location: ""
+  dates: ""
+  paper_types:
+    - id: regular
+      label: "Regular paper"
+scope:
+  summary: >
+    A generic peer-review harness profile. Upload a venue CFP, review form, or
+    template to create a venue-specific profile without changing repository code.
+  topics: []
+  must_show_scope_connection: true
+submission:
+  max_pages_excluding_references: 11
+  format: "Venue-specified format"
+  dual_anonymous: true
+review_form:
+  overall_merit:
+    scale: [1, 5]
+    labels:
+      1: "Reject"
+      2: "Weak reject"
+      3: "Borderline"
+      4: "Accept"
+      5: "Strong accept"
+  reviewer_expertise:
+    scale: [1, 4]
+    labels:
+      1: "Low"
+      2: "Medium"
+      3: "High"
+      4: "Expert"
+  sections:
+    - summary
+    - strengths
+    - weaknesses
+    - questions
+    - revision_actions
+panel:
+  agents:
+    technical:
+      role: "Technical Soundness Reviewer"
+      focus:
+        - methodology
+        - evidence
+        - correctness
+        - experimental support
+    novelty:
+      role: "Novelty and Positioning Reviewer"
+      focus:
+        - originality
+        - related work
+        - significance
+        - venue fit
+    clarity:
+      role: "Clarity and Presentation Reviewer"
+      focus:
+        - writing
+        - organization
+        - claims
+        - reader accessibility
+    skeptic:
+      role: "Adversarial Skeptic"
+      focus:
+        - failure modes
+        - unsupported claims
+        - threats to validity
+    meta_reviewer:
+      role: "Meta-Reviewer"
+      focus:
+        - synthesis
+        - score calibration
+        - author-facing action plan
+  optional_agents:
+    artifact:
+      role: "Artifact and Reproducibility Reviewer"
+      focus:
+        - artifact availability
+        - reproducibility
+        - open science
+        - experimental setup
+preflight_checks:
+  - "Check that the manuscript states a clear contribution."
+  - "Check that evaluation evidence is visible and connected to claims."
+  - "Check that the paper explains venue fit using the selected or uploaded venue template."
+graph:
+  pruning_threshold: 0.3

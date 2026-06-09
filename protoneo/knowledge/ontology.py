@@ -1155,7 +1155,7 @@ async def generate_ontology(
         llm_client: LLM client for generation calls.
         model: Which model to use.
         session_id: Optional session ID for cost tracking.
-        conference_context: Optional venue context (e.g., "HPDC: HPC conference").
+        conference_context: Optional venue context from the selected profile.
         metadata: Optional DocumentMetadata for structural context.
         markdown: Optional structured markdown.
 

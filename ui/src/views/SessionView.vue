@@ -77,7 +77,7 @@ const activeApp = inject('activeApp', ref(null))
 const appDisplayName = computed(() => activeApp.value?.display_name || 'Paper Review')
 
 const sessionId = computed(() => route.params.sessionId)
-const conference = computed(() => route.query.conference || 'hpdc26')
+const conference = computed(() => route.query.conference || 'adaptive')
 
 // Layout
 const viewMode = ref('split')

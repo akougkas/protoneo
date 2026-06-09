@@ -140,7 +140,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
-import { pcChairChat, getPcChairChat, writeReviewArtifacts, getLinklingsReview } from '../api/kernel.js'
+import { pcChairChat, getPcChairChat, writeReviewArtifacts, getOfflineReview } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 
 const md = renderMarkdown
@@ -315,7 +315,7 @@ async function saveReview() {
 async function downloadReview() {
   downloading.value = true
   try {
-    const res = await getLinklingsReview(props.sessionId)
+    const res = await getOfflineReview(props.sessionId)
     const blob = new Blob([res.data], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')

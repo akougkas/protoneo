@@ -315,9 +315,9 @@
           <div class="export-label">{{ fmt.label }}</div>
           <div class="export-format">{{ fmt.ext }}</div>
         </div>
-        <div v-if="hasLinklingsExport" class="export-card" @click="exportLinklingsReview">
-          <div class="export-icon">SC</div>
-          <div class="export-label">Linklings Review</div>
+        <div v-if="hasOfflineTemplateExport" class="export-card" @click="exportOfflineReview">
+          <div class="export-icon">TXT</div>
+          <div class="export-label">Offline Review</div>
           <div class="export-format">TXT</div>
         </div>
         <div class="export-card" @click="exportGraphJSON">
@@ -332,7 +332,7 @@
 
 <script setup>
 import { ref, computed, inject, onMounted } from 'vue'
-import { exportGraph, getExportFormats, exportSession, getLinklingsReview } from '../api/kernel.js'
+import { exportGraph, getExportFormats, exportSession, getOfflineReview } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 
 const md = renderMarkdown
@@ -369,9 +369,7 @@ if (props.packet.reviews?.length > 0) {
 const meta = computed(() => props.packet.meta_review || {})
 const utilization = computed(() => props.packet.graph_utilization || null)
 const sessionMetadata = computed(() => props.packet.provenance_metadata?.session_metadata || {})
-const hasLinklingsExport = computed(() =>
-  props.packet.conference === 'sc26' && Boolean(sessionMetadata.value.packet_paper_id)
-)
+const hasOfflineTemplateExport = computed(() => Boolean(sessionMetadata.value.packet_paper_id))
 
 const scores = computed(() => {
   return (props.packet.reviews || [])
@@ -594,9 +592,9 @@ async function exportGraphJSON() {
   }
 }
 
-async function exportLinklingsReview() {
+async function exportOfflineReview() {
   try {
-    const res = await getLinklingsReview(props.packet.session_id)
+    const res = await getOfflineReview(props.packet.session_id)
     const url = URL.createObjectURL(res.data)
     const paperId = sessionMetadata.value.packet_paper_id || props.packet.session_id || 'review'
     const a = document.createElement('a')
@@ -605,7 +603,7 @@ async function exportLinklingsReview() {
     a.click()
     URL.revokeObjectURL(url)
   } catch (e) {
-    console.error('Failed to export Linklings review:', e)
+    console.error('Failed to export offline review:', e)
   }
 }
 

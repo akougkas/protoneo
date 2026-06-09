@@ -1,7 +1,7 @@
 """Export renderers for review packets.
 
-Supports Markdown/PDF output, SC Linklings offline review files, and
-durable packet artifacts from ReviewPacket data.
+Supports Markdown/PDF output, venue offline review templates, and durable
+packet artifacts from ReviewPacket data.
 """
 
 import io
@@ -299,7 +299,7 @@ def fill_linklings_offline_review_template(
     template_text: str,
     final_review: dict[str, Any],
 ) -> str:
-    """Fill an SC Linklings offline-review template without changing prompts.
+    """Fill an offline-review template without changing prompts.
 
     The template's `<<...>>` question/comment lines are preserved. Text answers
     are inserted below their question blocks, and multiple-choice answers are
@@ -315,7 +315,7 @@ def fill_linklings_offline_review_template(
 
 
 def linklings_selection_counts(template_text: str) -> dict[str, int]:
-    """Return selected option counts for required Linklings MC fields."""
+    """Return selected option counts for required offline-review MC fields."""
     lines = template_text.splitlines()
     counts: dict[str, int] = {}
     for title in _LINKLINGS_REQUIRED_MC:

@@ -25,9 +25,20 @@ def _prompts_dir(conference_slug: str) -> Path:
     return Path(__file__).resolve().parent / "prompts" / conference_slug
 
 
+def _fallback_prompts_dir() -> Path:
+    return Path(__file__).resolve().parent / "prompts" / "adaptive"
+
+
+def _prompt_path(conference_slug: str, filename: str) -> Path:
+    primary = _prompts_dir(conference_slug) / filename
+    if primary.exists():
+        return primary
+    return _fallback_prompts_dir() / filename
+
+
 def load_prompt_pack(conference_slug: str) -> dict:
     """Load a prompt pack YAML config."""
-    pack_path = _prompts_dir(conference_slug) / "prompt-pack.yaml"
+    pack_path = _prompt_path(conference_slug, "prompt-pack.yaml")
     if not pack_path.exists():
         raise FileNotFoundError(f"Prompt pack not found for {conference_slug}")
     return yaml.safe_load(pack_path.read_text())
@@ -92,31 +103,22 @@ def apply_output_guardrails(
 
 def load_shared_prompt(conference_slug: str) -> str:
     """Load the shared base prompt."""
-    path = _prompts_dir(conference_slug) / "shared.md"
+    path = _prompt_path(conference_slug, "shared.md")
     return path.read_text() if path.exists() else ""
 
 
 def load_role_prompt(conference_slug: str, role: str) -> str:
     """Load a role-specific prompt overlay."""
-    path = _prompts_dir(conference_slug) / f"{role}.md"
+    path = _prompt_path(conference_slug, f"{role}.md")
     return path.read_text() if path.exists() else ""
 
 
 def load_pc_chair_prompt(conference_slug: str) -> str:
-    """Load a legacy venue final-synthesis prompt.
-
-    The current pipeline uses meta.md for synthesis. The interactive post-review
-    PC Chair is an API/UI workflow, not an automatic synthesis pass. Older
-    callers may still ask for pc_chair.md, so prefer meta.md and fall back to a
-    venue pc_chair.md only for legacy prompt packs.
-    """
-    meta = load_role_prompt(conference_slug, "meta")
-    if meta:
-        return meta
-    path = _prompts_dir(conference_slug) / "pc_chair.md"
+    """Load the interactive post-review PC Chair prompt."""
+    path = _prompt_path(conference_slug, "pc_chair.md")
     if path.exists():
         return path.read_text()
-    return ""
+    return load_role_prompt(conference_slug, "meta")
 
 
 def assemble_system_prompt(

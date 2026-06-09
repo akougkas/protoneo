@@ -618,8 +618,8 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         },
     ),
     ModelPreset(
-        name="sc26-openai-gpt55",
-        description="SC26 packet reviews one-by-one: imported graphs, GPT-5.5 reviewers with role-specific reasoning effort",
+        name="adaptive-openai-deep",
+        description="Adaptive venue reviews: imported graphs, GPT-5.5 reviewers with role-specific reasoning effort",
         assignments={
             "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
@@ -653,8 +653,8 @@ _BUILTIN_PRESETS: list[ModelPreset] = [
         },
     ),
     ModelPreset(
-        name="hpdc26-openai",
-        description="HPDC '26 reviews: Mini graph pipeline, GPT-5.5 analytical roles, GPT-5.5-mini clarity",
+        name="adaptive-openai-balanced",
+        description="Adaptive venue reviews: Mini graph pipeline, GPT-5.5 analytical roles, GPT-5.5-mini clarity",
         assignments={
             "ontology": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",
             "extraction": "lan-mini/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M",

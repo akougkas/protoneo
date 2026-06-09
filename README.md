@@ -7,7 +7,7 @@
   <img alt="Version" src="https://img.shields.io/badge/version-0.1.0-blue" />
   <img alt="Python" src="https://img.shields.io/badge/python-%E2%89%A53.12-3776ab" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-green" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-245%20passing-brightgreen" />
+  <img alt="Release" src="https://img.shields.io/badge/release-v0.1.0-blue" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" />
 </p>
 
@@ -25,7 +25,7 @@ Think of it as a practice defense for your paper. Upload a PDF, pick a venue, an
 - **Figure analysis** via local Vision-Language Models (your figures never leave your machine)
 - **Export** to Markdown or PDF review packets
 - **Batch mode** for reviewing multiple papers in sequence
-- **Conference profiles** with venue-specific criteria (ships with HPDC '26 and SC '26)
+- **Adaptive venue profiles** generated from CFPs, review forms, Markdown, YAML, or JSON templates
 
 ## Quick Start
 
@@ -41,7 +41,7 @@ Think of it as a practice defense for your paper. Upload a PDF, pick a venue, an
 ### Install
 
 ```bash
-git clone https://github.com/your-org/protoneo.git
+git clone https://github.com/akougkas/protoneo.git
 cd protoneo
 
 # Backend
@@ -85,7 +85,17 @@ The backend serves the built frontend automatically.
 2. Go to **Settings** and connect at least one LLM provider
 3. Click **Refresh All** to discover available models
 4. Select an active model for your provider
-5. Go back to **Home**, select a venue, upload a PDF, and launch
+5. Go back to **Home**, select **Adaptive Venue** or import a venue template, upload a PDF, and launch
+
+### Venue Templates
+
+ProtoNeo v0.1.0 ships as a generic paper-review harness rather than a bundle of private venue packs. The built-in **Adaptive Venue** profile is enough for a general review. For venue-calibrated feedback, use **Import Venue Template** on the Home screen and upload one of:
+
+- a call-for-papers text or Markdown file;
+- a review form or author instructions file;
+- a YAML/JSON profile using ProtoNeo's profile structure.
+
+Imported profiles are stored under `~/.protoneo/paper_review/profiles/`, outside the repository. They are intentionally not committed, so local review templates, paper packets, and venue-specific calibration files stay private.
 
 ---
 
@@ -199,8 +209,8 @@ For API keys and service URLs, edit `.env`:
 
 ```bash
 # Cloud providers (uncomment and fill in what you use)
-OPENAI_API_KEY=sk-...
-OPENROUTER_API_KEY=sk-or-v1-...
+OPENAI_API_KEY=...
+OPENROUTER_API_KEY=...
 
 # Optional tools for richer reviews
 SEMANTIC_SCHOLAR_API_KEY=...

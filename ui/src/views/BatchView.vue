@@ -294,7 +294,7 @@ function openSession(sid) {
 
 function showReviewConfig(sess) {
   reviewModal.value = sess
-  reviewConference.value = batch.value.conference || 'hpdc26'
+  reviewConference.value = batch.value.conference || 'adaptive'
   // Extract reviewer roles from session config
   const agentKeys = Object.keys(sess.pipeline_steps || {}).length > 0
     ? ['technical', 'methodology', 'clarity', 'adversarial', 'meta']

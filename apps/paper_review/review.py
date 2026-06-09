@@ -729,8 +729,8 @@ def build_deliberation_config(
 ) -> DeliberationConfig:
     """Build the standard 3-phase deliberation config for Paper Review.
 
-    When reviewer_ids is None, falls back to HPDC26 defaults for backward
-    compatibility. Callers should pass the actual reviewer IDs from the profile.
+    When reviewer_ids is None, falls back to generic adaptive reviewer roles.
+    Callers should pass the actual reviewer IDs from the profile.
     """
     if reviewer_ids is None:
         reviewer_ids = ["technical", "novelty", "clarity", "skeptic"]
@@ -1104,7 +1104,7 @@ def session_to_review_packet(session: Any) -> ReviewPacket:
 
     result = DeliberationResult.model_validate(session.result)
 
-    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+    conference_slug = session.config.get("metadata", {}).get("conference", "adaptive")
     try:
         from .conference import load_profile
 

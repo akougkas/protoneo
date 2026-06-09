@@ -201,7 +201,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--markdown", required=True, type=Path)
     parser.add_argument("--graph", required=True, type=Path)
-    parser.add_argument("--conference", default="sc26")
+    parser.add_argument("--conference", default="adaptive")
     parser.add_argument(
         "--context-mode",
         default=ReviewContextMode.MARKDOWN_PLUS_STRUCTURED_GRAPH_EVIDENCE.value,

@@ -15,6 +15,14 @@ export function getConferences() {
   return kernel.get('/api/apps/paper_review/conferences')
 }
 
+export function createConferenceFromTemplate(file) {
+  const form = new FormData()
+  form.append('file', file)
+  return kernel.post('/api/apps/paper_review/conferences/from-template', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
 export function getConference(slug) {
   return kernel.get(`/api/apps/paper_review/conferences/${slug}`)
 }
@@ -297,8 +305,8 @@ export function writeReviewArtifacts(sessionId) {
   return kernel.post(`/api/apps/paper_review/sessions/${sessionId}/write-review-artifacts`)
 }
 
-export function getLinklingsReview(sessionId) {
-  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/linklings-review.txt`, {
+export function getOfflineReview(sessionId) {
+  return kernel.get(`/api/apps/paper_review/sessions/${sessionId}/offline-review.txt`, {
     responseType: 'blob',
   })
 }

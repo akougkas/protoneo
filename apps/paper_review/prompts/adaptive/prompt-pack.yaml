@@ -1,0 +1,21 @@
+conference: adaptive
+version: "0.1.0"
+paths:
+  shared: "prompts/adaptive/shared.md"
+  roles:
+    technical:
+      path: "prompts/adaptive/technical.md"
+    novelty:
+      path: "prompts/adaptive/novelty.md"
+    clarity:
+      path: "prompts/adaptive/clarity.md"
+    skeptic:
+      path: "prompts/adaptive/skeptic.md"
+    artifact:
+      path: "prompts/adaptive/artifact.md"
+    meta:
+      path: "prompts/adaptive/meta.md"
+    pc_chair:
+      path: "prompts/adaptive/pc_chair.md"
+guardrails:
+  no_chain_of_thought: true

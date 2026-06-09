@@ -93,7 +93,7 @@ def test_result_to_packet_preserves_initial_and_final_score_distributions():
         ],
     )
 
-    packet = result_to_packet(result, load_profile("sc26"), paper_title="Synthetic")
+    packet = result_to_packet(result, load_profile("adaptive"), paper_title="Synthetic")
 
     assert packet.meta_review.initial_score_distribution == {"technical": 3, "systems": 3}
     assert packet.meta_review.current_score_distribution == {"technical": 2, "systems": 2}
@@ -113,7 +113,7 @@ async def test_write_review_artifacts_preserves_run_scoped_packet_output(tmp_pat
         session_id="session-run",
         config={
             "metadata": {
-                "conference": "sc26",
+                "conference": "adaptive",
                 "paper_title": "Synthetic",
                 "packet_dir": str(packet_dir),
                 "packet_paper_id": "papunit",
@@ -158,7 +158,7 @@ async def test_write_review_artifacts_preserves_run_scoped_packet_output(tmp_pat
 def test_write_review_artifacts_uses_packet_provenance_for_manifest(tmp_path):
     packet = ReviewPacket(
         session_id="session-provenance",
-        conference="sc26",
+        conference="adaptive",
         paper_title="Synthetic",
         meta_review=MetaReview(panel_summary="Done."),
         provenance_metadata={

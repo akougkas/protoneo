@@ -276,7 +276,7 @@ import PcChairChat from './PcChairChat.vue'
 
 const props = defineProps({
   sessionId: { type: String, required: true },
-  conference: { type: String, default: 'hpdc26' },
+  conference: { type: String, default: 'adaptive' },
 })
 
 const emit = defineEmits(['back', 'graph-update', 'graph-step-view', 'request-graph-focus', 'stage-changed'])

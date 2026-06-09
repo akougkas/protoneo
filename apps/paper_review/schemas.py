@@ -240,7 +240,7 @@ def _coerce_score_distribution(value: Any) -> dict[str, int]:
 
 
 def _coerce_dimension_dict(value: Any, default: dict[str, Any]) -> dict[str, Any]:
-    """Coerce Linklings-style rating fields while preserving rationale text."""
+    """Coerce offline-template rating fields while preserving rationale text."""
     if isinstance(value, dict):
         result = dict(default)
         result.update(value)

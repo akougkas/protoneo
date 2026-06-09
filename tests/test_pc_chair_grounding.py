@@ -28,7 +28,7 @@ def _graph_dump() -> dict:
 def _session():
     return SimpleNamespace(
         config={
-            "metadata": {"conference": "sc26", "paper_title": "VisionHPC"},
+            "metadata": {"conference": "adaptive", "paper_title": "VisionHPC"},
             "agents": {"meta": {"model": "mini/reviewer"}},
         },
         result={

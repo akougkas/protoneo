@@ -38,7 +38,13 @@ from protoneo.llm.settings import build_vlm_config, vlm_status
 from protoneo.llm.structured import extract_json_object
 from protoneo.tools import create_tool_registry
 
-from .conference import ConferenceProfile, list_profiles, load_profile
+from .conference import (
+    ConferenceProfile,
+    list_profiles,
+    load_profile,
+    profile_mapping_from_template,
+    save_profile_mapping,
+)
 _APP_NAME = "paper_review"
 _APP_VERSION = "0.1.0"
 from .context_audit import build_context_audit_artifact, summarize_context_audit
@@ -488,6 +494,22 @@ async def get_conference(slug: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Conference '{slug}' not found")
     return profile.model_dump()
+
+
+@router.post("/conferences/from-template")
+async def create_conference_from_template(file: UploadFile = File(...)):
+    """Create a user-local venue profile from a CFP, review form, or YAML profile."""
+    content = await file.read()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Venue template must be UTF-8 text, YAML, JSON, or Markdown") from exc
+    mapping = profile_mapping_from_template(text, filename=file.filename or "")
+    profile = save_profile_mapping(mapping)
+    return {
+        "conference": profile.model_dump(),
+        "message": "Venue profile created from template",
+    }
 
 # ── Preflight ────────────────────────────────────────
 
@@ -1244,7 +1266,7 @@ async def retry_session(session_id: str):
             detail=f"Session is '{status_val}', only failed or stopped sessions can be retried",
         )
 
-    conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+    conference_slug = session.config.get("metadata", {}).get("conference", "adaptive")
     try:
         profile = load_profile(conference_slug)
     except FileNotFoundError:
@@ -1352,7 +1374,7 @@ async def retry_failed_in_batch(batch_id: str):
             if not session:
                 continue
 
-            conference_slug = session.config.get("metadata", {}).get("conference", "hpdc26")
+            conference_slug = session.config.get("metadata", {}).get("conference", "adaptive")
             try:
                 profile = load_profile(conference_slug)
             except FileNotFoundError:
@@ -1463,7 +1485,7 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
 
     # Allow overriding conference for the review
     conference_slug = (body.conference if body and body.conference
-                      else session.config.get("metadata", {}).get("conference", "hpdc26"))
+                      else session.config.get("metadata", {}).get("conference", "adaptive"))
     try:
         profile = load_profile(conference_slug)
     except FileNotFoundError:
@@ -2038,7 +2060,7 @@ def _focused_artifact_text(artifact: dict[str, Any] | None) -> str:
 
 def _pc_chair_system_prompt(session, context: str, user_role: str) -> str:
     metadata = session.config.get("metadata", {}) if session.config else {}
-    conference_slug = metadata.get("conference", "hpdc26")
+    conference_slug = metadata.get("conference", "adaptive")
     venue_prompt = ""
     try:
         venue_prompt = load_role_prompt(conference_slug, "pc_chair")
@@ -2398,20 +2420,19 @@ async def write_session_review_artifacts(session_id: str):
     }
 
 
+@router.get("/sessions/{session_id}/offline-review.txt")
 @router.get("/sessions/{session_id}/linklings-review.txt")
 async def download_linklings_review(session_id: str):
-    """Regenerate and download the venue-templated SC Linklings review file."""
+    """Regenerate and download a venue-templated offline review file."""
     _session_manager = get_session_manager()
     session = await _session_manager.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     metadata = session.config.get("metadata", {}) if session.config else {}
-    if str(metadata.get("conference") or "").lower() != "sc26":
-        raise HTTPException(status_code=404, detail="Linklings export is only available for SC26 sessions")
     packet_dir_raw = metadata.get("packet_dir")
     if not packet_dir_raw:
-        raise HTTPException(status_code=404, detail="No Linklings packet template is attached to this session")
+        raise HTTPException(status_code=404, detail="No offline review template is attached to this session")
 
     packet_dir = Path(packet_dir_raw)
     try:
@@ -2427,7 +2448,7 @@ async def download_linklings_review(session_id: str):
     offline_path_raw = manifest.get("artifact_paths", {}).get(offline_name)
     offline_path = Path(offline_path_raw) if offline_path_raw else output_dir / offline_name
     if not offline_path.exists():
-        raise HTTPException(status_code=500, detail="Linklings review artifact was not written")
+        raise HTTPException(status_code=500, detail="Offline review artifact was not written")
 
     return Response(
         content=offline_path.read_text(),
@@ -2567,23 +2588,13 @@ async def review_with_graph(
     }
 
 
-# ── SC26 Packet Review ──────────────────────────────
-
-SC26_PACKET_IDS = (
-    "pap111s2",
-    "pap1162s2",
-    "pap282s2",
-    "pap440s2",
-    "pap535s2",
-    "pap616s2",
-    "pap651s2",
-)
+# ── Offline Packet Review ───────────────────────────
 
 
-class SC26PacketReviewBody(BaseModel):
-    packet_root: str = "submission_packets_sc26"
+class PacketReviewBody(BaseModel):
+    packet_root: str = "submission_packets"
     paper_ids: list[str] = Field(default_factory=list)
-    conference: str = "sc26"
+    conference: str = "adaptive"
     model_map: dict[str, Any] = Field(default_factory=dict)
     preset: str = ""
     max_rounds: int = 2
@@ -2608,7 +2619,7 @@ def _packet_review_template_path(packet_dir: Path) -> Path:
         return direct
     matches = sorted(packet_dir.glob("*_review.txt"))
     if not matches:
-        raise FileNotFoundError(f"No Linklings review template found in {packet_dir}")
+        raise FileNotFoundError(f"No offline review template found in {packet_dir}")
     return matches[0]
 
 
@@ -2651,8 +2662,11 @@ def _packet_manifest_complete(packet_dir: Path) -> bool:
 
 def _packet_dirs(packet_root: str | Path, paper_ids: list[str] | None = None) -> list[Path]:
     root = Path(packet_root)
-    requested = paper_ids or list(SC26_PACKET_IDS)
-    return [root / pid for pid in requested if (root / pid).is_dir()]
+    if paper_ids:
+        return [root / pid for pid in paper_ids if (root / pid).is_dir()]
+    if not root.exists():
+        return []
+    return sorted(path for path in root.iterdir() if path.is_dir())
 
 
 def _preset_model_map(preset: str) -> dict[str, str]:
@@ -2727,7 +2741,7 @@ def _locate_saved_graph_for_packet(packet_dir: Path, title: str) -> Path | None:
     return best[1] if best and best[0] >= 3 else None
 
 
-async def _run_one_sc26_packet_review(
+async def _run_one_packet_review(
     packet_dir: Path,
     *,
     conference: str,
@@ -2852,7 +2866,7 @@ async def _run_one_sc26_packet_review(
     bus.emit("stage_started", {
         "stage": "review",
         "step": "independent_reviews",
-        "message": "Starting SC26 packet review...",
+        "message": "Starting packet review...",
     })
     bus.emit("step_started", {
         "stage": "review",
@@ -2919,11 +2933,11 @@ async def _run_one_sc26_packet_review(
     }
 
 
-async def run_sc26_packet_reviews(
+async def run_packet_reviews(
     *,
-    packet_root: str = "submission_packets_sc26",
+    packet_root: str = "submission_packets",
     paper_ids: list[str] | None = None,
-    conference: str = "sc26",
+    conference: str = "adaptive",
     model_map: dict[str, Any] | None = None,
     preset: str = "",
     max_rounds: int = 2,
@@ -2945,7 +2959,7 @@ async def run_sc26_packet_reviews(
             })
             continue
         try:
-            results.append(await _run_one_sc26_packet_review(
+            results.append(await _run_one_packet_review(
                 packet_dir,
                 conference=conference,
                 model_map=model_map or {},
@@ -2958,7 +2972,7 @@ async def run_sc26_packet_reviews(
                 output_subdir=output_subdir,
             ))
         except Exception as e:
-            logger.error("SC26 packet review failed for %s: %s", packet_dir, e, exc_info=True)
+            logger.error("Packet review failed for %s: %s", packet_dir, e, exc_info=True)
             results.append({
                 "paper_id": packet_dir.name,
                 "status": "failed",
@@ -2971,9 +2985,9 @@ async def run_sc26_packet_reviews(
     }
 
 
-@router.post("/sc26/packet-review")
-async def start_sc26_packet_review(body: SC26PacketReviewBody):
-    """Run imported-graph review for SC26 packet folders.
+@router.post("/packet-review")
+async def start_packet_review(body: PacketReviewBody):
+    """Run imported-graph review for packet folders with offline review templates.
 
     The task runs in the background because each paper may take minutes. Use
     the returned batch id to correlate logs; artifacts are written under each
@@ -2985,20 +2999,20 @@ async def start_sc26_packet_review(body: SC26PacketReviewBody):
             "live_execution_required": True,
             "message": "No model reviews launched. Resubmit with execute_live=true after inspecting offline context audits.",
             "packet_root": body.packet_root,
-            "paper_ids": body.paper_ids or list(SC26_PACKET_IDS),
+            "paper_ids": body.paper_ids,
             "context_mode": ReviewContextMode.coerce(body.context_mode).value,
         }
 
     batch_id = uuid.uuid4().hex
     batch_bus = SessionEventBus()
-    get_event_buses()[f"sc26_packet_{batch_id}"] = batch_bus
+    get_event_buses()[f"packet_{batch_id}"] = batch_bus
 
     async def _run() -> None:
         batch_bus.emit("batch_progress", {
             "batch_id": batch_id,
             "status": "running",
         })
-        result = await run_sc26_packet_reviews(
+        result = await run_packet_reviews(
             packet_root=body.packet_root,
             paper_ids=body.paper_ids or None,
             conference=body.conference,
@@ -3023,7 +3037,7 @@ async def start_sc26_packet_review(body: SC26PacketReviewBody):
         "batch_id": batch_id,
         "status": "running",
         "packet_root": body.packet_root,
-        "paper_ids": body.paper_ids or list(SC26_PACKET_IDS),
+        "paper_ids": body.paper_ids,
     }
 
 
@@ -3130,7 +3144,7 @@ async def get_review_context_audit(
         return summarize_context_audit(existing)
 
     metadata = session.config.get("metadata", {}) if session.config else {}
-    conference_slug = metadata.get("conference", "hpdc26")
+    conference_slug = metadata.get("conference", "adaptive")
     try:
         profile = load_profile(conference_slug)
     except FileNotFoundError:
