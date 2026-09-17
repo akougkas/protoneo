@@ -168,9 +168,28 @@ npm --prefix ui run build
 uv build
 ```
 
-Build the frontend **before** `uv build`. The wheel includes it as `protoneo/static`; the source distribution carries the built assets so a wheel built from the source distribution also serves the UI. Version 0.1.0 produces `dist/protoneo-0.1.0-py3-none-any.whl` and `dist/protoneo-0.1.0.tar.gz`.
+Build the frontend **before** `uv build`. `uv build` creates the source distribution first and builds the wheel from it; the wheel includes the frontend as `protoneo/static`. Version 0.2.0 produces `dist/protoneo-0.2.0-py3-none-any.whl` and `dist/protoneo-0.2.0.tar.gz`.
 
-The current 32-test suite uses controlled model responses. Additional candidate checks exercised browser setup and editing, malformed uploads and settings, batch execution, cancellation and resume ordering, real PDF table extraction, CLI reload, and serving the packaged UI outside the checkout. These checks establish specific runtime behavior, not model quality. Before publishing, validate configured providers with real manuscript reviews, inspect scores and evidence, and install the final artifacts in a clean environment.
+### What 0.2.0 was validated against
+
+Validation ran on Ubuntu 24.04 under WSL2 with Python 3.12 and Node 22. macOS and Windows were not tested.
+
+- **Automated checks:** 33 tests with controlled model responses, undefined-name lint, compilation, frontend build, and packaging all passed.
+- **Providers exercised with real inference:** LM Studio on a LAN host (`qwen3.8-27b`, including vision) and a llama.cpp router (`qwen3.6-35b-moe`, `qwopus3.8-27b-dense-q6`). Discovery, exact routing, completion, streaming, usage reporting, context limits, and error messages were checked for these endpoints. OpenAI and OpenRouter were not validated because no working credentials were available. OpenRouter discovery still listed models with an expired key, so a populated catalog does not show that inference works.
+- **Complete reviews** of a synthetic two-page systems paper with planted defects: a manuscript-only review with zero rounds, graph-backed reviews with zero and two rounds, a packet review that filled a Linklings-style offline form, and a review from the installed wheel. Reviewers consistently caught the planted headline-number mismatch, the unmeasured scale claim, and the small-file regression described as parity; most also flagged the missing variance. Table values were quoted exactly. One meta-review invented a citation mismatch, and two discussion rounds changed no scores.
+- **Parsing:** Docling layout and table extraction, OCR on a rasterized scan, formula decoding to LaTeX, and vision descriptions of a figure and a table, recorded as `vision_grounded` provenance.
+- **Operations:** sequential batches with a per-paper parse failure, the graph inspection gate, pause and resume, cancellation mid-discussion followed by retry, WebSocket reconnect replay, server restart followed by retry, and an unreachable reviewer endpoint producing a disclosed partial panel.
+
+Observed durations on this hardware for the two-page paper, which will vary with models and GPUs:
+
+| Workflow | Model calls | Time |
+| --- | --- | --- |
+| Manuscript-only, 3 reviewers, 0 rounds, reasoning model on an RTX 5090 | 4 (about 48k tokens, 21k reasoning) | 7.3 min |
+| Knowledge graph build (ontology, extraction, coreference, verification) | 4 steps, reasoning disabled | about 2 min |
+| Graph-backed, 3 reviewers, 2 rounds | 10 review turns | 8 min after the graph |
+| Manuscript-only, 2 reviewers, 1 round, non-reasoning MoE model | 5 | 77 s |
+
+A retry reuses accepted phases and discussion turns when its inputs and configuration match. Test results and these runs establish runtime behavior on the configurations above. They do not guarantee review quality with other models or manuscripts.
 
 ## License
 

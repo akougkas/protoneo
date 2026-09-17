@@ -60,5 +60,8 @@ packages = ["protoneo", "apps"]
 [tool.hatch.build.targets.wheel.force-include]
 "ui/dist" = "protoneo/static"
 
+[tool.hatch.build.targets.sdist]
+exclude = ["node_modules", "ui/node_modules", "data", "dist", ".env"]
+
 [tool.hatch.build.targets.sdist.force-include]
 "ui/dist" = "ui/dist"

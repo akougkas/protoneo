@@ -730,7 +730,7 @@ async def preflight_check(
             _preflight_jobs[job_id].update(stage="checks", progress=80)
             result = run_preflight(
                 doc.text,
-                doc.filename,
+                filename,
                 profile,
                 figure_count=len(doc.metadata.get("figures") or []),
                 table_count=int(
