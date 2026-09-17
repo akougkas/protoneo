@@ -12,7 +12,10 @@ and find context beyond the paper's reference list.
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .types import ToolResult
 
 import httpx
 from dotenv import load_dotenv

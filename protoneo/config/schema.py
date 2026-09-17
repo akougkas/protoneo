@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
 # Load .env from project root
 _project_root = Path(__file__).resolve().parents[2]
-for _candidate in [_project_root / ".env"]:
+for _candidate in [Path.cwd() / ".env", _project_root / ".env"]:
     if _candidate.exists():
-        load_dotenv(_candidate, override=True)
+        load_dotenv(_candidate, override=False)
         break
 
 
@@ -40,7 +40,7 @@ class AgentConfig(BaseModel):
     model: str
     system_prompt: str = ""
     focus: str = ""
-    max_tokens: int = 4096
+    max_tokens: int = Field(default=4096, gt=0)
     grounding: list[dict[str, Any]] = Field(default_factory=list)
     temperature: float | None = None
     top_p: float | None = None
@@ -57,25 +57,34 @@ class PhaseConfig(BaseModel):
     """Configuration for a single deliberation phase."""
 
     name: str
-    mode: str = Field(description="'parallel', 'round_robin', or 'sequential'")
-    agents: list[str]
-    max_rounds: int = 1
-    visibility: str = "open"
+    mode: Literal["parallel", "round_robin", "sequential"]
+    agents: list[str] = Field(min_length=1)
+    max_rounds: int = Field(default=1, ge=0, le=20)
+    visibility: Literal["open", "blind"] = "open"
     input: str | None = None
+    min_successful_agents: int = Field(default=1, ge=1)
+    timeout_seconds: float = Field(default=600, gt=0)
 
 
 class DeliberationConfig(BaseModel):
     """Configuration for the deliberation pattern."""
 
-    pattern: str = "independent_synthesis"
+    pattern: Literal["independent_synthesis", "sequential", "round_robin", "parallel", "custom"] = "independent_synthesis"
     phases: list[PhaseConfig] = Field(default_factory=list)
+    max_concurrency: int = Field(default=4, ge=1, le=32)
+    max_attempts: int = Field(default=2, ge=1, le=4)
 
 
 class StorageConfig(BaseModel):
     """Storage backend configuration."""
 
     session_dir: str = Field(
-        default_factory=lambda: str(Path(__file__).resolve().parents[2] / "data" / "sessions")
+        default_factory=lambda: os.getenv("PROTONEO_SESSION_DIR") or str(
+            Path(os.getenv("PROTONEO_DATA_DIR", str(
+                _project_root / "data" if (_project_root / "pyproject.toml").exists()
+                else Path.home() / ".protoneo" / "data"
+            ))).expanduser() / "sessions"
+        )
     )
 
 
@@ -173,6 +182,7 @@ class AppManifest:
 
     # Registration callback: receives constrained interface, not raw FastAPI
     on_register: Callable[[AppRegistration], None] | None = None
+    on_startup: Callable[[], Awaitable[None]] | None = None
 
     # Domain knowledge (injected into kernel knowledge modules)
     domain_config: DomainConfig | None = None

@@ -1,7 +1,7 @@
 """Output schemas for Paper Review review packets."""
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -89,7 +89,7 @@ class ReviewPacket(BaseModel):
     session_id: str
     conference: str
     paper_title: str = ""
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     reviews: list[IndividualReview] = Field(default_factory=list)
     deliberation: list[DeliberationRound] = Field(default_factory=list)
     meta_review: MetaReview = Field(default_factory=MetaReview)
@@ -113,13 +113,13 @@ _DEFAULT_FINAL_REVIEW: dict[str, Any] = {
     "consensus": {},
     "agreements": [],
     "disagreements": [],
-    "final_recommendation": {"score": 3, "label": "Borderline"},
-    "confidence": {"score": 3, "reason": ""},
+    "final_recommendation": {},
+    "confidence": {},
     "decision_risk_notes": [],
     "author_facing_summary": "",
     "prioritized_revision_plan": [],
-    "overall_merit": {"score": 3, "label": "Borderline"},
-    "reviewer_expertise": {"score": 3, "label": "Knowledgeable"},
+    "overall_merit": {},
+    "reviewer_expertise": {},
     "paper_summary": "",
     "strengths": [],
     "weaknesses": [],
@@ -130,24 +130,20 @@ _DEFAULT_FINAL_REVIEW: dict[str, Any] = {
     "internal_committee_concerns": [],
     "questions_for_authors": [],
     "revision_actions": [],
-    "relevance": {"score": 4, "label": "HIGH", "rationale": ""},
-    "technical_soundness": {"score": 3, "label": "MODERATE", "rationale": ""},
-    "technical_importance": {"score": 3, "label": "MODERATE", "rationale": ""},
-    "originality": {"score": 3, "label": "MODERATE", "rationale": ""},
-    "quality_of_presentation": {"score": 3, "label": "MODERATE", "rationale": ""},
-    "recommended_action": {"score": 3, "label": "WEAK REJECT", "rationale": ""},
-    "level_of_confidence": {"score": 4, "label": "HIGH", "reason": ""},
-    "level_of_expertise": {"score": 4, "label": "HIGH", "reason": ""},
-    "best_paper_consideration": {
-        "nominate": False,
-        "label": "No",
-        "rationale": "",
-    },
+    "relevance": {},
+    "technical_soundness": {},
+    "technical_importance": {},
+    "originality": {},
+    "quality_of_presentation": {},
+    "recommended_action": {},
+    "level_of_confidence": {},
+    "level_of_expertise": {},
+    "best_paper_consideration": {},
     "reproducibility_committee_focus": "",
     "linklings_offline_review_text": "",
     "offline_review_path": "",
     "submission_readiness": {
-        "status": "revise_before_submit",
+        "status": "not_assessed",
         "reason": "",
     },
 }
@@ -202,21 +198,23 @@ def _coerce_text(value: Any) -> str:
 def _coerce_score_dict(value: Any, default: dict[str, Any]) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return {"score": value, "label": default.get("label", "")}
     if isinstance(value, str) and value:
-        return {"score": default.get("score", 3), "label": value}
+        return {"label": value}
     return dict(default)
 
 
 def _score_value(value: Any) -> int | None:
     if isinstance(value, dict):
         value = value.get("score")
+    if isinstance(value, bool):
+        return None
     try:
         score = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return score if 1 <= score <= 5 else None
+    return score if 0 <= score <= 10_000 and str(value) in (str(score), str(float(score))) else None
 
 
 def _coerce_score_distribution(value: Any) -> dict[str, int]:
@@ -268,16 +266,20 @@ def _coerce_best_paper(value: Any) -> dict[str, Any]:
         result = dict(default)
         result.update(value)
         raw_nominate = result.get("nominate", result.get("selected", result.get("yes")))
+        if raw_nominate is None:
+            label = _coerce_text(result.get("label")).strip().lower()
+            if label not in {"yes", "no"}:
+                return result
+            raw_nominate = label
         if isinstance(raw_nominate, str):
-            result["nominate"] = raw_nominate.strip().lower() in {
-                "yes",
-                "true",
-                "1",
-                "nominate",
-            }
+            normalized = raw_nominate.strip().lower()
+            if normalized not in {"yes", "true", "1", "nominate", "no", "false", "0"}:
+                result.pop("nominate", None)
+                return result
+            result["nominate"] = normalized in {"yes", "true", "1", "nominate"}
         else:
             result["nominate"] = bool(raw_nominate)
-        result["label"] = _coerce_text(result.get("label") or ("Yes" if result["nominate"] else "No"))
+        result["label"] = "Yes" if result["nominate"] else "No"
         result["rationale"] = _coerce_text(result.get("rationale", ""))
         return result
     if isinstance(value, bool):
@@ -288,6 +290,8 @@ def _coerce_best_paper(value: Any) -> dict[str, Any]:
         }
     if isinstance(value, str) and value:
         lowered = value.strip().lower()
+        if lowered not in {"yes", "no", "true", "false", "nominate"}:
+            return {**default, "rationale": value.strip()}
         nominate = lowered.startswith("yes") or lowered in {"true", "nominate"}
         return {
             **default,

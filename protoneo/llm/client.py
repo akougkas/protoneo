@@ -14,8 +14,9 @@ import asyncio
 import base64
 import json
 import logging
+import inspect
 from collections import defaultdict
-from typing import Any, AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable, TYPE_CHECKING
 
 import httpx
 import litellm
@@ -35,6 +36,8 @@ from .structured import extract_json_value, strip_thinking_output
 from .types import LLMResponse, ModelCapability, ModelInfo, TokenUsage
 
 logger = logging.getLogger("protoneo.llm.client")
+if TYPE_CHECKING:
+    from ..config.schema import ProtoNeoConfig
 
 litellm.suppress_debug_info = True
 litellm.drop_params = True
@@ -292,6 +295,20 @@ class LLMClient:
     async def _build_kwargs_async(self, model: str, messages: list[dict], **overrides: Any) -> dict[str, Any]:
         """Build LiteLLM kwargs for local, homelab, OpenRouter, and API-key providers."""
         info: ModelInfo = self.registry.get(model)
+        if info.max_context > 0:
+            try:
+                input_tokens = litellm.token_counter(model=info.effective_model, messages=messages)
+            except Exception:
+                input_tokens = sum(len(str(m.get("content", "")).encode("utf-8")) // 3 + 8 for m in messages)
+            available = info.max_context - input_tokens - 256
+            if available <= 0:
+                raise ValueError(
+                    f"Source and discussion exceed the {info.max_context}-token context of {model}; "
+                    "select a model with a larger context window"
+                )
+            requested = overrides.get("max_tokens")
+            if requested is not None:
+                overrides["max_tokens"] = min(requested, available)
         overrides = self._filter_request_overrides(info, overrides)
 
         kwargs: dict[str, Any] = {
@@ -305,24 +322,7 @@ class LLMClient:
         provider = info.provider
         api_key = await self._resolve_api_key_async(provider)
         if api_key:
-            if False:  # DISABLED: Anthropic OAuth routing removed
-                # if _is_anthropic_oauth(provider, api_key):
-                #     kwargs["api_key"] = ""
-                #     kwargs["extra_headers"] = {
-                #         "Authorization": f"Bearer {api_key}",
-                #         "anthropic-beta": _ANTHROPIC_BETA,
-                #         "user-agent": "claude-cli/2.1.75",
-                #         "x-app": "cli",
-                #         "x-api-key": "",
-                #     }
-                #     msgs = kwargs["messages"]
-                #     if msgs and msgs[0].get("role") == "system":
-                #         msgs[0] = {**msgs[0], "content": _ANTHROPIC_SYSTEM_PREFIX + "\n\n" + msgs[0]["content"]}
-                #     else:
-                #         msgs.insert(0, {"role": "system", "content": _ANTHROPIC_SYSTEM_PREFIX})
-                pass
-            else:
-                kwargs["api_key"] = api_key
+            kwargs["api_key"] = api_key
         elif info.api_base:
             kwargs["api_key"] = "none"
 
@@ -393,13 +393,13 @@ class LLMClient:
             return
 
         if policy.temperature is not None:
-            filtered["temperature"] = policy.temperature
+            filtered.setdefault("temperature", policy.temperature)
         if policy.top_p is not None:
-            filtered["top_p"] = policy.top_p
+            filtered.setdefault("top_p", policy.top_p)
 
         extra_body = dict(filtered.get("extra_body") or {})
         if policy.top_k is not None:
-            extra_body["top_k"] = policy.top_k
+            extra_body.setdefault("top_k", policy.top_k)
 
         chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
         if policy.enable_thinking is False:
@@ -414,6 +414,8 @@ class LLMClient:
                 chat_template_kwargs["reasoning_budget"] = policy.reasoning_budget
             if policy.thinking_token_budget is not None:
                 extra_body["thinking_token_budget"] = policy.thinking_token_budget
+        elif policy.enable_thinking is True:
+            chat_template_kwargs["enable_thinking"] = False
 
         if chat_template_kwargs:
             extra_body["chat_template_kwargs"] = chat_template_kwargs
@@ -461,15 +463,19 @@ class LLMClient:
         model: str,
         messages: list[dict],
         session_id: str | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         max_retries: int = _MAX_RETRIES,
         **kwargs: Any,
     ) -> LLMResponse:
         """Send a chat completion request with retry on transient errors."""
+        if max_retries < 1:
+            raise ValueError("max_retries must be at least 1")
         info: ModelInfo = self.registry.get(model)
         provider = info.provider
         response_policy = policy_for_label(kwargs.get("phase_policy"))
+        if temperature is None:
+            temperature = response_policy.temperature if response_policy and response_policy.temperature is not None else 0.7
 
         # GPT-5 models only support temperature=1
         if "gpt-5" in model.lower():
@@ -581,7 +587,7 @@ class LLMClient:
         model: str,
         messages: list[dict],
         session_id: str | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[str, None]:
@@ -592,6 +598,9 @@ class LLMClient:
         )
         info: ModelInfo = self.registry.get(model)
         provider = info.provider
+        if temperature is None:
+            policy = policy_for_label(kwargs.get("phase_policy"))
+            temperature = policy.temperature if policy and policy.temperature is not None else 0.7
 
         # GPT-5 models only support temperature=1
         if "gpt-5" in model.lower():
@@ -630,21 +639,26 @@ class LLMClient:
         call_kwargs = await self._build_kwargs_async(model, messages, **call_overrides)
 
         response = await acompletion(**call_kwargs)
-
-        async for chunk in response:
-            # Capture usage from the final chunk (choices may be empty)
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage:
-                usage = {
-                    "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
-                    "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
-                    "total_tokens": getattr(chunk_usage, "total_tokens", 0) or 0,
-                }
-                if usage_callback:
-                    usage_callback(usage)
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta and delta.content:
-                yield delta.content
+        usage = TokenUsage()
+        try:
+            async for chunk in response:
+                # Providers report cumulative usage, sometimes more than once.
+                # Charge once using the last report, including cancelled streams.
+                if getattr(chunk, "usage", None):
+                    usage = self._extract_usage(chunk, info)
+                    if usage_callback:
+                        usage_callback(usage.model_dump())
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield delta.content
+        finally:
+            if session_id:
+                self._session_costs[session_id] += usage.cost
+            close = getattr(response, "aclose", None)
+            if close:
+                closed = close()
+                if inspect.isawaitable(closed):
+                    await closed
 
     def session_cost(self, session_id: str) -> float:
         return self._session_costs.get(session_id, 0.0)

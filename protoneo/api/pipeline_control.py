@@ -26,6 +26,7 @@ class PipelineControl:
         self.paused: bool = False
         self.cancelled: bool = False
         self._task: asyncio.Task | None = None
+        self._advance_pending = False
 
     def set_task(self, task: asyncio.Task) -> None:
         self._task = task
@@ -48,26 +49,35 @@ class PipelineControl:
         When skip_gate is True, the gate is skipped entirely so the
         pipeline runs straight through without human interaction.
         """
-        if self.skip_gate:
+        if self.cancelled:
+            raise asyncio.CancelledError("Pipeline cancelled by user")
+        if self.skip_gate or self._advance_pending:
+            self._advance_pending = False
             return
         self._gate.clear()
         self.paused = True
         await self._gate.wait()
         self.paused = False
+        self._advance_pending = False
         if self.cancelled:
             raise asyncio.CancelledError("Pipeline cancelled by user")
 
     async def wait_if_paused(self) -> None:
         """Block only if manually paused (not for mandatory gates)."""
         if not self.auto_advance:
+            if self._advance_pending and not self.cancelled:
+                self._advance_pending = False
+                return
             self._gate.clear()
             self.paused = True
             await self._gate.wait()
             self.paused = False
+            self._advance_pending = False
         if self.cancelled:
             raise asyncio.CancelledError("Pipeline cancelled by user")
 
     def advance(self) -> None:
+        self._advance_pending = True
         self.paused = False
         self._gate.set()
 

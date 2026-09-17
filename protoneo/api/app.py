@@ -8,6 +8,7 @@ registers kernel routes, and mounts application routes.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -77,34 +78,42 @@ def create_app(
     @app.on_event("startup")
     async def _startup_recovery():
         for m in manifests.values():
-            recover = getattr(
-                __import__(f"apps.{m.name}.api", fromlist=["_recover_stale_sessions"]),
-                "_recover_stale_sessions",
-                None,
-            )
-            if recover:
-                await recover()
+            if m.on_startup:
+                await m.on_startup()
+
+    @app.on_event("shutdown")
+    async def _shutdown_tasks():
+        from .tasks import stop_session_tasks
+        await stop_session_tasks()
 
     # Serve built UI if available
     ui_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
+    if not ui_dist.exists():
+        ui_dist = Path(__file__).resolve().parents[1] / "static"
+    if os.getenv("PROTONEO_UI_DIR"):
+        ui_dist = Path(os.environ["PROTONEO_UI_DIR"]).expanduser()
     if ui_dist.exists():
         index_html = ui_dist / "index.html"
 
         # SPA fallback: serve index.html for any non-API, non-file path
         # so that Vue Router client-side routes work on refresh/bookmark.
         if index_html.exists():
-            from starlette.responses import HTMLResponse
-
-            _index_content = index_html.read_text()
+            from starlette.responses import FileResponse
 
             @app.get("/{full_path:path}")
             async def _spa_fallback(full_path: str):
+                from fastapi import HTTPException
+                if full_path == "api" or full_path.startswith("api/"):
+                    raise HTTPException(status_code=404, detail="API route not found")
                 # Let static files (JS, CSS, images) fall through to the mount
-                file_candidate = ui_dist / full_path
+                file_candidate = (ui_dist / full_path).resolve()
+                if not file_candidate.is_relative_to(ui_dist.resolve()):
+                    raise HTTPException(status_code=404, detail="File not found")
                 if full_path and file_candidate.exists() and file_candidate.is_file():
-                    from starlette.responses import FileResponse
                     return FileResponse(file_candidate)
-                return HTMLResponse(_index_content)
+                if Path(full_path).suffix:
+                    raise HTTPException(status_code=404, detail="File not found")
+                return FileResponse(index_html, headers={"Cache-Control": "no-cache"})
 
         app.mount("/", StaticFiles(directory=str(ui_dist), html=True))
 

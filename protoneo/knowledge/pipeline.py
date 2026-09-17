@@ -112,8 +112,9 @@ class GraphPipeline:
 
         # Restore graph from last checkpoint snapshot if resuming
         paper_graph = KnowledgeGraph()
-        if session.checkpoints:
-            last_cp = session.checkpoints[-1]
+        graph_checkpoints = [cp for cp in session.checkpoints if cp.stage_name in KERNEL_STAGES]
+        if graph_checkpoints:
+            last_cp = graph_checkpoints[-1]
             # output_key format: "graph_after_step.<key>" or "knowledge_graph"
             snapshot = None
             if last_cp.output_key.startswith("graph_after_step."):
@@ -127,6 +128,8 @@ class GraphPipeline:
                     "Resuming from checkpoint '%s' (%d nodes, %d edges)",
                     last_cp.stage_name, len(paper_graph.nodes), len(paper_graph.edges),
                 )
+            else:
+                raise RuntimeError(f"Graph checkpoint '{last_cp.stage_name}' has no saved graph; rebuild this stage")
 
         ctl.enter_stage("pre_review")
 
@@ -147,6 +150,7 @@ class GraphPipeline:
 
         # ── Step 2: Metadata ───────────────────────────────
         if not self._has_checkpoint(session, "metadata"):
+            await ctl.wait_if_paused()
             ctl.enter_step("metadata")
             step_start = _time.time()
             bus.emit("step_started", {
@@ -222,11 +226,13 @@ class GraphPipeline:
                 self._write_checkpoint(session, "metadata", "graph_after_step.nlp_prepass")
                 await self.sessions.update(session)
         else:
-            metadata = extract_metadata(document.text)
+            metadata = (extract_metadata_from_markdown(document.markdown, document.text)
+                        if document.markdown else extract_metadata(document.text))
             logger.info("Skipping metadata (checkpoint exists)")
 
         # ── Step 3: Ontology ───────────────────────────────
         if not self._has_checkpoint(session, "ontology"):
+            await ctl.wait_if_paused()
             ctl.enter_step("ontology")
             step_start = _time.time()
             bus.emit("step_started", {
@@ -267,11 +273,6 @@ class GraphPipeline:
                 self._write_checkpoint(session, "ontology", "graph_after_step.ontology")
                 await self.sessions.update(session)
 
-            await ctl.wait_if_paused()
-            # Re-read ontology in case it was edited during pause
-            if session_id in ontology_cache:
-                ontology = ontology_cache[session_id]
-                paper_graph.ontology = ontology
         else:
             ontology = ontology_cache.get(session_id)
             if not ontology and session.graph_after_step.get("ontology"):
@@ -282,6 +283,10 @@ class GraphPipeline:
 
         # ── Step 4: Extraction ─────────────────────────────
         if not self._has_checkpoint(session, "extraction"):
+            await ctl.wait_if_paused()
+            # Apply edits made while the completed ontology was being inspected.
+            ontology = ontology_cache.get(session_id, ontology)
+            paper_graph.ontology = ontology
             ctl.enter_step("extract")
             step_start = _time.time()
             nodes_before = len(paper_graph.nodes)
@@ -325,6 +330,7 @@ class GraphPipeline:
 
         # ── Step 5: Coreference Resolution ─────────────────
         if not self._has_checkpoint(session, "coref"):
+            await ctl.wait_if_paused()
             ctl.enter_step("coref")
             step_start = _time.time()
             bus.emit("step_started", {
@@ -368,6 +374,7 @@ class GraphPipeline:
 
         # ── Step 6: Verification ───────────────────────────
         if not self._has_checkpoint(session, "verification"):
+            await ctl.wait_if_paused()
             ctl.enter_step("verify")
             step_start = _time.time()
             bus.emit("step_started", {
@@ -416,6 +423,7 @@ class GraphPipeline:
 
         # ── Step 7: Summary ────────────────────────────────
         if not self._has_checkpoint(session, "summary"):
+            await ctl.wait_if_paused()
             ctl.enter_step("summarize")
             step_start = _time.time()
             bus.emit("step_started", {
@@ -460,6 +468,9 @@ class GraphPipeline:
             logger.info("Skipping summary (checkpoint exists)")
 
         ctl.stage_done("pre_review")
-        bus.emit("stage_complete", {"stage": "pre_review"})
+        graph_cache[session_id] = paper_graph.to_d3_format()
+        if paper_graph.ontology:
+            ontology_cache[session_id] = paper_graph.ontology
+        bus.emit("stage_complete", {"stage": "pre_review", "gate_required": not ctl.skip_gate})
 
         return paper_graph

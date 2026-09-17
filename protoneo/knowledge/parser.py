@@ -20,8 +20,6 @@ logger = logging.getLogger("protoneo.knowledge.parser")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".html", ".md", ".markdown", ".txt"}
 
-# Lines that are bare numbers (PDF line number artifacts from two-column layouts)
-_BARE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*$")
 _FORMULA_NOT_DECODED_RE = re.compile(r"<!--\s*formula-not-decoded\s*-->", re.IGNORECASE)
 _EQUATION_PLACEHOLDER_RE = re.compile(
     r"\[Equation\s+(?P<index>\d+)\s+not decoded;\s+see graph evidence\]",
@@ -68,42 +66,6 @@ def _resolve_caption(document, element) -> str:
                 if text:
                     return text
     return ""
-
-
-def _strip_line_number_pollution(text: str) -> str:
-    """Remove bare line numbers from two-column PDF extraction.
-
-    ACM and IEEE two-column papers have page-margin line numbers that get
-    extracted as standalone lines. This removes all bare-number lines that
-    appear to be sequential page line numbers.
-    """
-    lines = text.split("\n")
-    result: list[str] = []
-    stripped = 0
-    last_num = -100
-
-    for line in lines:
-        if _BARE_NUMBER_RE.match(line):
-            try:
-                num = int(line.strip())
-            except ValueError:
-                result.append(line)
-                continue
-            if abs(num - last_num) <= 3 or (last_num < 0 and num <= 5):
-                last_num = num
-                stripped += 1
-                continue
-            last_num = num
-            stripped += 1
-            continue
-        else:
-            last_num = -100
-        result.append(line)
-
-    if stripped > 0:
-        logger.info("Stripped %d bare line-number lines from PDF text", stripped)
-
-    return "\n".join(result)
 
 
 def _clean_markdown(md: str) -> str:
@@ -860,14 +822,15 @@ def parse_file(
         raise ValueError(f"Unsupported file format: {suffix}")
 
     if suffix == ".pdf":
+        if docling_options is None:
+            from ..llm.settings import load_settings
+            docling_options = load_settings().pdf_options.model_dump()
         effective_vlm = None if fast else vlm_config
         text, markdown, figures, tables, formulas, figures_dir, table_count = _parse_pdf_docling(
             file_path,
             effective_vlm,
             docling_options,
         )
-        text = _strip_line_number_pollution(text)
-        markdown = _strip_line_number_pollution(markdown)
         text = _clean_markdown(text)
         markdown = _clean_markdown(markdown)
         text, text_equations = repair_formula_placeholders(text, docling_formulas=formulas)

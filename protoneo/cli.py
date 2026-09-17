@@ -6,6 +6,7 @@ the HTTP server.
 
 import argparse
 import importlib
+from importlib.metadata import entry_points
 import os
 
 from protoneo.config.schema import AppManifest
@@ -22,11 +23,24 @@ def _load_app_manifest(spec: str) -> AppManifest:
     return manifest
 
 
+def create_cli_app():
+    """Importable factory so reload workers use the same application selection."""
+    from protoneo.api.app import create_app
+    from protoneo.config.schema import ProtoNeoConfig
+
+    specs = [spec.strip() for spec in os.getenv("PROTONEO_APPS", "").split(",") if spec.strip()]
+    if specs:
+        manifests = [_load_app_manifest(spec) for spec in dict.fromkeys(specs)]
+    else:
+        manifests = [entry.load() for entry in sorted(entry_points(group="protoneo.apps"), key=lambda e: e.name)]
+    return create_app(ProtoNeoConfig.from_env(), apps=manifests)
+
+
 def main():
     """Boot ProtoNeo kernel with registered applications."""
     parser = argparse.ArgumentParser(description="ProtoNeo deliberation kernel")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=5002, help="Port (default: 5002)")
+    parser.add_argument("--host", default=os.getenv("PROTONEO_HOST", "0.0.0.0"), help="Bind address (or PROTONEO_HOST)")
+    parser.add_argument("--port", type=int, default=os.getenv("PROTONEO_PORT", "5002"), help="Port (or PROTONEO_PORT; default: 5002)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
     parser.add_argument(
         "--app",
@@ -39,19 +53,16 @@ def main():
 
     import uvicorn
 
-    from protoneo.api.app import create_app
-    from protoneo.config.schema import ProtoNeoConfig
-
     env_apps = [
         spec.strip()
         for spec in os.getenv("PROTONEO_APPS", "").split(",")
         if spec.strip()
     ]
-    apps = [_load_app_manifest(spec) for spec in [*env_apps, *args.app]]
-
-    config = ProtoNeoConfig.from_env()
-    app = create_app(config, apps=apps)
-    uvicorn.run(app, host=args.host, port=args.port)
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    if args.app:
+        os.environ["PROTONEO_APPS"] = ",".join(dict.fromkeys([*env_apps, *args.app]))
+    uvicorn.run("protoneo.cli:create_cli_app", factory=True, host=args.host, port=args.port, reload=args.reload)
 
 
 if __name__ == "__main__":

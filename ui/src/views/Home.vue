@@ -27,7 +27,7 @@
       <span class="sys-banner-indicator sys-banner-indicator--ok"></span>
       <div class="sys-banner-content">
         {{ activeModelCount }} model(s) active across {{ activeProviderCount }} provider(s).
-        Quality scales with compute.
+        Choose a panel and review workflow below.
         <router-link to="/settings">Manage</router-link>
       </div>
     </div>
@@ -43,6 +43,11 @@
               v-for="conf in conferences"
               :key="conf.slug"
               :class="['venue-option', { selected: selectedConference === conf.slug }]"
+              role="button"
+              tabindex="0"
+              :aria-pressed="selectedConference === conf.slug"
+              @keydown.enter="selectConference(conf.slug)"
+              @keydown.space.prevent="selectConference(conf.slug)"
               @click="selectConference(conf.slug)"
             >
               <div class="venue-top">
@@ -253,6 +258,40 @@
         </details>
       </div>
 
+      <div class="workflow-section">
+        <div class="workflow-title">
+          <h2 class="section-heading">Review workflow</h2>
+          <span>Set the depth before choosing your panel.</span>
+        </div>
+        <div class="workflow-controls">
+          <label v-if="uploadMode !== 'batch'" class="workflow-field">
+            <span>Discussion rounds</span>
+            <select v-model.number="maxRounds" class="model-select">
+              <option :value="0">0 · Independent reviews + synthesis</option>
+              <option :value="1">1 · Focused discussion</option>
+              <option :value="2">2 · Full deliberation</option>
+              <option :value="3">3 · Extended deliberation</option>
+              <option :value="4">4 · Deep deliberation</option>
+            </select>
+          </label>
+          <label v-if="uploadMode === 'single' || uploadMode === 'batch-review'" class="workflow-field">
+            <span>Evidence preparation</span>
+            <select v-model="skipGraph" class="model-select">
+              <option :value="false">Manuscript + knowledge graph</option>
+              <option :value="true">Manuscript only · fewer model calls</option>
+            </select>
+          </label>
+          <label v-if="uploadMode === 'single' || uploadMode === 'batch-review'" class="workflow-check">
+            <input v-model="fastParse" type="checkbox" />
+            <span>Fast PDF parsing<small>Skips figure descriptions; retains PDF layout and text extraction.</small></span>
+          </label>
+          <label v-if="uploadMode === 'single' && !skipGraph" class="workflow-check">
+            <input v-model="inspectGraph" type="checkbox" />
+            <span>Inspect graph before review<small>Pause after graph preparation for your approval.</small></span>
+          </label>
+        </div>
+      </div>
+
       <!-- Preset Selector -->
       <div v-if="presets.length > 0 && panelAgents.length > 0" class="panel-section preset-section">
         <h2 class="section-heading">
@@ -292,8 +331,11 @@
               <button
                 class="aac-toggle"
                 :class="{ on: pa.enabled }"
+                :disabled="pa.isMeta"
+                :aria-pressed="pa.enabled"
+                :aria-label="`${pa.role}: ${pa.isMeta ? 'required' : pa.enabled ? 'enabled' : 'disabled'}`"
                 @click="pa.enabled = !pa.enabled"
-              >{{ pa.enabled ? 'On' : 'Off' }}</button>
+              >{{ pa.isMeta ? 'Required' : pa.enabled ? 'On' : 'Off' }}</button>
             </div>
             <div class="aac-focus">
               <span v-for="f in pa.focus" :key="f" class="focus-chip">{{ f }}</span>
@@ -329,7 +371,7 @@
       </div>
 
       <!-- Graph Processing Models -->
-      <div class="panel-section" v-if="routableModels.length > 0">
+      <div class="panel-section" v-if="needsGraph && routableModels.length > 0">
         <h2 class="section-heading">
           Graph Processing
           <span class="agent-count">Local providers are preferred; manual override is allowed</span>
@@ -460,13 +502,27 @@ Examples:
         </div>
       </div>
 
+      <div class="readiness-panel" :class="{ blocked: readiness && !readiness.ready }" role="status" aria-live="polite">
+        <div class="readiness-heading">
+          <span class="readiness-marker"></span>
+          <strong>{{ readinessPending ? 'Checking review setup…' : readiness?.ready ? 'Setup ready' : 'Complete your setup' }}</strong>
+          <span v-if="readiness?.ready && readiness.review_turns" class="readiness-count">{{ readiness.reviewer_count }} reviewers · {{ readiness.review_turns }} review turns per paper</span>
+        </div>
+        <p v-if="readiness?.ready">Model assignments are configured. Availability is checked when the workflow starts.</p>
+        <ul v-if="readiness?.blockers?.length">
+          <li v-for="issue in readiness.blockers" :key="issue">{{ issue }}</li>
+        </ul>
+        <p v-for="note in readiness?.warnings || []" :key="note">{{ note }}</p>
+        <router-link v-if="readiness && !readiness.ready" to="/settings">Configure providers →</router-link>
+      </div>
+
       <!-- Actions -->
       <div class="action-row">
         <template v-if="uploadMode === 'single'">
           <button
             v-if="!preflight"
             :class="['action-btn preflight-btn', { ready: canLaunch }]"
-            :disabled="!canLaunch || preflighting"
+            :disabled="!hasManuscript || preflighting"
             @click="runPreflightCheck"
           >
             {{ preflighting ? 'Checking...' : 'Run Preflight Check' }}
@@ -483,7 +539,7 @@ Examples:
         <template v-if="uploadMode === 'batch'">
           <button
             :class="['action-btn launch-btn', { ready: batchFiles.length > 0 && selectedConference }]"
-            :disabled="batchFiles.length === 0 || !selectedConference || launching"
+            :disabled="!canLaunch || launching"
             @click="launchBatch"
           >
             {{ launching ? 'Building graphs...' : `Build ${batchFiles.length} Graph${batchFiles.length !== 1 ? 's' : ''}` }}
@@ -492,7 +548,7 @@ Examples:
         <template v-if="uploadMode === 'batch-review'">
           <button
             :class="['action-btn launch-btn', { ready: batchReviewFiles.length > 0 && selectedConference }]"
-            :disabled="batchReviewFiles.length === 0 || !selectedConference || launching"
+            :disabled="!canLaunch || launching"
             @click="launchBatchReview"
           >
             {{ launching ? 'Starting reviews...' : `Review ${batchReviewFiles.length} Paper${batchReviewFiles.length !== 1 ? 's' : ''}` }}
@@ -568,9 +624,9 @@ Examples:
 </template>
 
 <script setup>
-import { ref, reactive, computed, inject, onMounted, watch } from 'vue'
+import { ref, reactive, computed, inject, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getConferences, createConferenceFromTemplate, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, importGraphForReview, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
+import { getReviewReadiness, getConferences, createConferenceFromTemplate, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, importGraphForReview, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
 
 const router = useRouter()
 const activeApp = inject('activeApp', ref(null))
@@ -604,6 +660,18 @@ const dragOver = ref(false)
 const launching = ref(false)
 const preflighting = ref(false)
 const launchError = ref('')
+const maxRounds = ref(2)
+const skipGraph = ref(false)
+const fastParse = ref(false)
+const inspectGraph = ref(false)
+const readiness = ref(null)
+const readinessPending = ref(false)
+const setupLoaded = ref(false)
+const needsGraph = computed(() => uploadMode.value === 'batch' || (uploadMode.value !== 'import' && !skipGraph.value))
+let readinessTimer
+let readinessVersion = 0
+let disposed = false
+
 const preflight = ref(null)
 const preflightJob = ref(null)
 const preflightProgress = ref(0)
@@ -684,16 +752,15 @@ const graphSteps = [
 
 // Graph pipeline steps use local models only. Subscription tokens
 // (OpenAI) are reserved for review roles.
-const _SUBSCRIPTION_PROVIDERS = new Set(['openai'])  // anthropic removed
 const routableModels = computed(() =>
   availableModels.value.filter(m => modelIsRoutable(m))
 )
 const localModels = computed(() =>
-  routableModels.value.filter(m => !_SUBSCRIPTION_PROVIDERS.has(modelProviderId(m)))
+  routableModels.value.filter(m => m.is_local || m.tier === 'local' || ['localhost', 'lan'].includes(m.runtime_location))
 )
 const graphModels = computed(() => [
   ...localModels.value,
-  ...routableModels.value.filter(m => _SUBSCRIPTION_PROVIDERS.has(modelProviderId(m))),
+  ...routableModels.value.filter(m => !localModels.value.includes(m)),
 ])
 
 function modelProviderId(model) {
@@ -701,7 +768,7 @@ function modelProviderId(model) {
 }
 
 function modelIsRoutable(model) {
-  return model?.availability !== 'unsupported' && model?.review_routable !== false
+  return model?.enabled !== false && model?.availability !== 'unsupported' && model?.review_routable !== false
 }
 
 function modelFullId(model) {
@@ -827,17 +894,56 @@ const preflightStageLabel = computed(() => {
 
 const preflightGroundingLabel = computed(() => {
   const status = preflight.value?.vlm_status || preflightVlmStatus.value
-  if (status?.configured && status?.reachable) return 'Vision-grounded'
+  if (preflight.value?.vlm_used) return 'Vision-grounded'
   if (preflight.value) return 'Text-only'
   return ''
 })
 
-const canLaunch = computed(() => {
+const hasManuscript = computed(() => {
   if (uploadMode.value === 'single') return selectedConference.value && selectedFile.value
   if (uploadMode.value === 'batch') return selectedConference.value && batchFiles.value.length > 0
   if (uploadMode.value === 'batch-review') return selectedConference.value && batchReviewFiles.value.length > 0
   if (uploadMode.value === 'import') return selectedConference.value && importFile.value
   return false
+})
+
+const canLaunch = computed(() => hasManuscript.value && !readinessPending.value && readiness.value?.ready)
+
+watch(() => JSON.stringify({
+  conference: selectedConference.value, models: modelMap,
+  agents: panelAgents.value.map(a => [a.id, a.enabled]), reasoning: reasoningMap,
+  mode: uploadMode.value, skip: skipGraph.value, rounds: maxRounds.value, loaded: setupLoaded.value,
+}), () => {
+  clearTimeout(readinessTimer)
+  const version = ++readinessVersion
+  readiness.value = null
+  if (!setupLoaded.value || !selectedConference.value) return
+  readinessPending.value = true
+  readinessTimer = setTimeout(async () => {
+    try {
+      const models = uploadMode.value === 'batch' ? {} : buildReviewModelMap()
+      if (needsGraph.value) addGraphModelMap(models)
+      const response = await getReviewReadiness({
+        conference: selectedConference.value, model_map: models,
+        skip_graph: !needsGraph.value, graph_only: uploadMode.value === 'batch',
+        max_rounds: maxRounds.value,
+      })
+      if (version === readinessVersion && !disposed) readiness.value = response.data
+    } catch (error) {
+      if (version === readinessVersion && !disposed) readiness.value = {
+        ready: false, blockers: [error.response?.data?.detail || error.message || 'Could not check review setup.'], warnings: [],
+      }
+    } finally {
+      if (version === readinessVersion) readinessPending.value = false
+    }
+  }, 250)
+})
+
+onUnmounted(() => {
+  disposed = true
+  readinessVersion++
+  preflightJob.value = null
+  clearTimeout(readinessTimer)
 })
 
 watch([selectedFile, selectedConference], () => {
@@ -861,6 +967,7 @@ async function selectConference(slug) {
   selectedConference.value = slug
   try {
     const res = await getConference(slug)
+    if (selectedConference.value !== slug) return
     const profile = res.data
     buildPanelFromProfile(profile)
   } catch (e) {
@@ -1017,7 +1124,7 @@ function modelDetail(modelId) {
 function buildReviewModelMap() {
   const enabledMap = {}
   for (const pa of panelAgents.value) {
-    if (!pa.enabled) continue
+    if (!pa.enabled) { enabledMap[pa.id] = null; continue }
     const model = normalizeModelId(modelMap[pa.id])
     if (!model) continue
     const effort = reasoningMap[pa.id] || ''
@@ -1117,7 +1224,9 @@ onMounted(async () => {
       if (preset) applyPresetAssignments(preset.assignments)
     }
   } catch (e) {
-    console.error('Failed to load config:', e)
+    launchError.value = e.response?.data?.detail || 'Could not load application configuration. Reload to try again.'
+  } finally {
+    setupLoaded.value = true
   }
 })
 
@@ -1157,25 +1266,34 @@ function truncateAbstract(text) {
 
 function reviewLaunchOptions() {
   return {
+    fastParse: fastParse.value,
+    skipGraph: skipGraph.value,
+    inspectGraph: inspectGraph.value,
     artifactDescriptionStatus: artifactDescriptionStatus.value,
     artifactDescriptionAssumedPresent: artifactDescriptionStatus.value === 'submitted',
   }
 }
 
 async function runPreflightCheck() {
-  if (!canLaunch.value) return
+  if (!hasManuscript.value || preflighting.value) return
   preflighting.value = true
   launchError.value = ''
   preflight.value = null
   preflightProgress.value = 0
   preflightStage.value = 'queued'
   preflightVlmStatus.value = null
+  const file = selectedFile.value
+  const venue = selectedConference.value
   try {
     const res = await runPreflight(selectedFile.value, selectedConference.value)
-    preflightJob.value = res.data.job_id
-    while (preflightJob.value) {
+    if (disposed || file !== selectedFile.value || venue !== selectedConference.value) return
+    const jobId = res.data.job_id
+    preflightJob.value = jobId
+    while (!disposed && preflightJob.value === jobId) {
       await new Promise(resolve => setTimeout(resolve, 700))
-      const statusRes = await getPreflightStatus(preflightJob.value)
+      if (disposed || preflightJob.value !== jobId) break
+      const statusRes = await getPreflightStatus(jobId)
+      if (disposed || preflightJob.value !== jobId) break
       const job = statusRes.data
       preflightProgress.value = job.progress || 0
       preflightStage.value = job.stage || job.status || ''
@@ -1201,12 +1319,12 @@ async function doLaunchReview() {
   launchError.value = ''
   try {
     // Build model map from enabled agents + graph processing steps
-    const enabledMap = addGraphModelMap(buildReviewModelMap())
+    const enabledMap = needsGraph.value ? addGraphModelMap(buildReviewModelMap()) : buildReviewModelMap()
     const res = await startReview(
       selectedFile.value,
       selectedConference.value,
       enabledMap,
-      2,
+      maxRounds.value,
       userInstructions.value,
       reviewLaunchOptions()
     )
@@ -1276,12 +1394,12 @@ async function previewImportGraph(file) {
 }
 
 async function launchBatch() {
-  if (batchFiles.value.length === 0) return
+  if (!canLaunch.value) return
   launching.value = true
   launchError.value = ''
   try {
-    const enabledMap = addGraphModelMap(buildReviewModelMap())
-    const res = await startBatch(batchFiles.value, selectedConference.value, enabledMap)
+    const enabledMap = needsGraph.value ? addGraphModelMap(buildReviewModelMap()) : buildReviewModelMap()
+    const res = await startBatch(batchFiles.value, selectedConference.value, addGraphModelMap({}))
     router.push({ name: 'Batch', params: { batchId: res.data.batch_id } })
   } catch (e) {
     launchError.value = e.response?.data?.detail || e.message || 'Failed to start batch'
@@ -1291,16 +1409,16 @@ async function launchBatch() {
 }
 
 async function launchBatchReview() {
-  if (batchReviewFiles.value.length === 0) return
+  if (!canLaunch.value) return
   launching.value = true
   launchError.value = ''
   try {
-    const enabledMap = addGraphModelMap(buildReviewModelMap())
+    const enabledMap = needsGraph.value ? addGraphModelMap(buildReviewModelMap()) : buildReviewModelMap()
     const res = await startBatchReview(
       batchReviewFiles.value,
       selectedConference.value,
       enabledMap,
-      2,
+      maxRounds.value,
       userInstructions.value,
       reviewLaunchOptions()
     )
@@ -1322,7 +1440,7 @@ async function launchImport() {
       importFile.value,
       selectedConference.value,
       enabledMap,
-      2,
+      maxRounds.value,
       userInstructions.value,
       reviewLaunchOptions()
     )
@@ -1350,7 +1468,7 @@ async function launchSavedGraph(sess) {
       graphFile,
       selectedConference.value,
       enabledMap,
-      2,
+      maxRounds.value,
       userInstructions.value,
       reviewLaunchOptions()
     )
@@ -1364,6 +1482,25 @@ async function launchSavedGraph(sess) {
 </script>
 
 <style scoped>
+.workflow-section { padding: 22px; margin: 24px 0; border: 1px solid var(--pn-border); border-left: 3px solid var(--pn-accent, #bc7548); }
+.workflow-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.workflow-title .section-heading { margin: 0; }
+.workflow-title > span, .workflow-check small { font-size: 12px; color: var(--pn-text-muted); }
+.workflow-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
+.workflow-field { display: grid; gap: 8px; font-size: 12px; }
+.workflow-check { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; cursor: pointer; }
+.workflow-check input { margin-top: 3px; accent-color: var(--pn-accent, #bc7548); }
+.workflow-check small { display: block; margin-top: 4px; line-height: 1.5; }
+.readiness-panel { border-top: 1px solid var(--pn-border); padding: 22px 0 6px; margin-top: 24px; font-size: 13px; }
+.readiness-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.readiness-marker { width: 7px; height: 7px; border-radius: 50%; background: #5b9778; }
+.blocked .readiness-marker { background: #bc7548; }
+.readiness-count { margin-left: auto; font-family: var(--pn-mono); font-size: 11px; color: var(--pn-text-muted); }
+.readiness-panel p, .readiness-panel li { color: var(--pn-text-muted); line-height: 1.6; }
+.readiness-panel a { color: var(--pn-text); text-underline-offset: 4px; }
+.aac-toggle:disabled { cursor: default; opacity: .7; }
+@media (max-width: 600px) { .workflow-controls { grid-template-columns: 1fr; } .workflow-title { display: block; } .workflow-title > span { display: block; margin-top: 8px; } .readiness-count { margin-left: 17px; } }
+
 /* ═══════════════════════════════════════════════════════════
    HOME VIEW — Session launcher
    ═══════════════════════════════════════════════════════════ */
@@ -2195,5 +2332,15 @@ async function launchSavedGraph(sess) {
 .saved-graph-btn:not(:disabled):hover {
   border-color: var(--pn-accent);
   color: var(--pn-accent);
+}
+@media (max-width: 760px) {
+  .setup-grid, .artifact-status-row { grid-template-columns: minmax(0, 1fr); }
+  .setup-card { min-width: 0; padding: 18px; }
+  .panel-header, .header-left, .preset-row, .action-row { flex-wrap: wrap; }
+  .agent-count { font-size: 10px; }
+  .section-heading { flex-wrap: wrap; }
+  .check-row { flex-wrap: wrap; }
+  .agent-assignment-grid, .graph-model-grid { grid-template-columns: minmax(0, 1fr); }
+  .workflow-section { padding: 18px; }
 }
 </style>

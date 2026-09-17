@@ -8,6 +8,7 @@ export, ontology, and all review-specific session operations.
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from protoneo.api.routes import (
     PipelineControl,
     SessionEventBus,
     get_batch_manager,
+    get_config,
     get_event_buses,
     get_llm_client,
     get_pipeline_controls,
@@ -28,6 +30,7 @@ from protoneo.api.routes import (
     get_session_graphs,
     _get_upload_dir,
 )
+from protoneo.api.tasks import start_background_task, start_session_task
 from protoneo.config.schema import AgentConfig, DeliberationConfig
 from protoneo.deliberation.session import SessionStatus, StepState
 from protoneo.knowledge.chunker import chunk_document
@@ -62,18 +65,174 @@ from .review_context import (
 )
 from .review import (
     artifact_description_assumed_from_status,
-    build_agent_configs,
+    build_agent_configs as _build_agent_configs,
     build_deliberation_config,
     build_user_message,
     normalize_artifact_description_status,
     session_to_review_packet,
 )
 from .schemas import sanitize_final_review
+from .readiness import review_readiness
 
 logger = logging.getLogger("protoneo.paper_review.api")
 
 router = APIRouter()
 _preflight_jobs: dict[str, dict[str, Any]] = {}
+
+
+def _start_pipeline_task(sid, coroutine, bus, ctl):
+    return start_session_task(
+        sid, coroutine, sessions=get_session_manager(), bus=bus,
+        control=ctl, controls=get_pipeline_controls(),
+    )
+
+
+async def _parse_upload_and_run(
+    sid, file_path, filename, profile, model_map, agent_configs, bus, ctl,
+    *, fast_parse=False, delib_config=None, graph_only=False, skip_graph=False,
+):
+    import time
+    manager = get_session_manager()
+    started = time.time()
+    session = await manager.get(sid)
+    session.status, session.error = SessionStatus.RUNNING, None
+    session.config.setdefault("metadata", {}).update(
+        upload_path=str(file_path), fast_parse=fast_parse, skip_graph=skip_graph,
+    )
+    session.config["model_map"] = model_map
+    session.pipeline_steps["parse"] = StepState(status="running", started_at=started).model_dump()
+    await manager.update(session)
+    ctl.enter_stage("pre_review")
+    ctl.enter_step("parse")
+    bus.emit("step_started", {"stage": "pre_review", "step": "parse", "message": f"Parsing {filename}..."})
+    await ctl.wait_if_paused()
+    vlm = build_vlm_config()
+    doc = await asyncio.to_thread(parse_file, str(file_path), fast=fast_parse, vlm_config=vlm)
+    if not (doc.text or doc.markdown or "").strip():
+        raise ValueError("No readable manuscript text was extracted. For a scanned PDF, enable OCR in Settings and retry.")
+    doc.filename = filename
+    doc = chunk_document(doc)
+    session = await manager.get(sid)
+    session.document_text, session.document_markdown = doc.text, doc.markdown or ""
+    session.document_ids = [doc.document_id]
+    session.pipeline_steps["parse"] = StepState(
+        status="complete", started_at=started, completed_at=time.time(),
+        model_used=vlm.get("model", "") if vlm and not fast_parse else "",
+    ).model_dump()
+    session.app_data["parse"] = _parse_provenance(
+        doc, fast_parse=fast_parse, vlm=vlm, duration_seconds=time.time() - started,
+    )
+    await manager.update(session)
+    bus.emit("step_completed", {"stage": "pre_review", "step": "parse", "duration": time.time() - started})
+    get_session_manager().get_context(sid).add_document(doc)
+    await _run_graph_pipeline(
+        sid, doc, profile, model_map, agent_configs, bus, ctl,
+        delib_config=delib_config, graph_only=graph_only, skip_graph=skip_graph,
+    )
+
+
+def _parse_model_map(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw) if raw else {}
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="model_map_json must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=422, detail="model_map_json must be a JSON object")
+    for key, assignment in value.items():
+        if assignment is None:
+            continue
+        if isinstance(assignment, str) and assignment.strip():
+            continue
+        if isinstance(assignment, dict):
+            model = assignment.get("model_id") or assignment.get("provider_model_id") or assignment.get("model")
+            if isinstance(model, str) and model.strip():
+                effort = assignment.get("reasoning_effort")
+                if effort is None or effort in {"", "none", "minimal", "low", "medium", "high", "xhigh"}:
+                    continue
+        raise HTTPException(status_code=422, detail=f"Invalid model assignment for '{key}'")
+    return value
+
+
+def build_agent_configs(*args, **kwargs):
+    try:
+        return _build_agent_configs(*args, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _require_ready(agents, model_map, **options):
+    readiness = review_readiness(agents, model_map, config=get_config(), **options)
+    if not readiness["ready"]:
+        raise HTTPException(status_code=422, detail=" ".join(readiness["blockers"]))
+    model_map.update(readiness["graph_models"])
+    return readiness
+
+
+async def _read_paper_upload(file: UploadFile) -> bytes:
+    filename = file.filename or "paper.pdf"
+    if Path(filename).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=422, detail=f"{Path(filename).name}: upload a PDF manuscript")
+    limit = int(os.getenv("PROTONEO_MAX_UPLOAD_MB", "100")) * 1024 * 1024
+    if file.size is not None and file.size > limit:
+        raise HTTPException(status_code=413, detail="Manuscript exceeds the upload size limit")
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail="Manuscript exceeds the upload size limit")
+    if not content or b"%PDF-" not in content[:1024]:
+        raise HTTPException(status_code=422, detail=f"{Path(filename).name}: empty or invalid PDF")
+    return content
+
+
+async def _save_paper_uploads(files: list[UploadFile]) -> list[tuple[Path, str]]:
+    if not files:
+        raise HTTPException(status_code=422, detail="Upload at least one PDF")
+    saved = []
+    try:
+        for file in files:
+            content = await _read_paper_upload(file)
+            filename = Path((file.filename or "paper.pdf").replace("\\", "/")).name
+            path = _get_upload_dir() / f"{uuid.uuid4().hex}_{filename}"
+            saved.append((path, filename))
+            await asyncio.to_thread(path.write_bytes, content)
+        return saved
+    except BaseException:
+        for path, _ in saved:
+            path.unlink(missing_ok=True)
+        raise
+
+
+class ReadinessBody(BaseModel):
+    conference: str
+    model_map: dict[str, Any] = Field(default_factory=dict)
+    max_rounds: int = Field(default=2, ge=0, le=20)
+    skip_graph: bool = False
+    graph_only: bool = False
+
+
+@router.post("/readiness")
+async def check_readiness(body: ReadinessBody):
+    try:
+        profile = load_profile(body.conference)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Conference profile not found") from exc
+    models = _parse_model_map(json.dumps(body.model_map))
+    agents = build_agent_configs(profile, body.conference, models)
+    return review_readiness(agents, models, skip_graph=body.skip_graph,
+                            graph_only=body.graph_only, max_rounds=body.max_rounds,
+                            config=get_config())
+
+
+def _saved_model_map(session) -> dict[str, Any]:
+    models = dict(session.config.get("model_map") or {})
+    for key, step in {"ontology": "ontology", "extraction": "extract",
+                      "coref": "coref", "verification": "verify"}.items():
+        model = session.pipeline_steps.get(step, {}).get("model_used")
+        if model:
+            models.setdefault(key, model)
+    for key, agent in session.config.get("agents", {}).items():
+        if isinstance(agent, dict) and agent.get("model"):
+            models.setdefault(key, agent["model"])
+    return models
 
 _SAVED_GRAPH_FILENAME_RE = re.compile(
     r"(?P<session_id>[0-9a-f]{32})(?:_graph|-graph|\.graph)?\.json$",
@@ -436,12 +595,12 @@ async def _recover_stale_sessions() -> None:
     """
     _session_manager = get_session_manager()
     _session_graphs = get_session_graphs()
-    sessions = await _session_manager.list_sessions(limit=100)
+    sessions = await _session_manager.list_sessions(limit=0)
     recovered = 0
     graphs_loaded = 0
     for s in sessions:
         status_val = s.status if isinstance(s.status, str) else s.status.value
-        if status_val == "running":
+        if status_val == "running" or (status_val == "created" and s.batch_id):
             s.status = SessionStatus.STOPPED
             await _session_manager.update(s)
             recovered += 1
@@ -526,8 +685,15 @@ async def preflight_check(
             status_code=404, detail=f"Conference profile '{conference}' not found"
         )
 
-    content = await file.read()
-    filename = file.filename or "paper.pdf"
+    content = await _read_paper_upload(file)
+    filename = Path((file.filename or "paper.pdf").replace("\\", "/")).name
+    for old_id, job in list(_preflight_jobs.items()):
+        if len(_preflight_jobs) < 100:
+            break
+        if job["status"] in {"done", "error"}:
+            _preflight_jobs.pop(old_id, None)
+    if len(_preflight_jobs) >= 100:
+        raise HTTPException(status_code=429, detail="Too many preflight checks are running; try again shortly")
     job_id = uuid.uuid4().hex
     _preflight_jobs[job_id] = {
         "status": "queued",
@@ -545,7 +711,7 @@ async def preflight_check(
                 stage="probing_vlm",
                 progress=10,
             )
-            status = vlm_status()
+            status = await asyncio.to_thread(vlm_status)
 
             _preflight_jobs[job_id].update(stage="parsing", progress=30)
             upload_dir = _get_upload_dir()
@@ -574,6 +740,7 @@ async def preflight_check(
             )
             payload = result.model_dump(mode="json")
             payload["vlm_status"] = status
+            payload["vlm_used"] = bool(doc.metadata.get("vlm_used"))
             _preflight_jobs[job_id].update(
                 status="done",
                 stage="done",
@@ -588,10 +755,10 @@ async def preflight_check(
                 status="error",
                 stage="error",
                 progress=100,
-                error=str(exc),
+                error=sanitize_error_message(exc),
             )
 
-    asyncio.create_task(_run())
+    start_background_task(_run())
     return {"job_id": job_id}
 
 
@@ -611,10 +778,11 @@ async def start_panel_review(
     file: UploadFile = File(...),
     conference: str = Form(...),
     model_map_json: str = Form("{}"),
-    max_rounds: int = Form(2),
+    max_rounds: int = Form(2, ge=0, le=20),
     user_instructions: str = Form(""),
     skip_graph: bool = Form(False),
     fast_parse: bool = Form(False),
+    inspect_graph: bool = Form(False),
     artifact_description_assumed_present: bool = Form(False),
     artifact_description_status: str = Form(""),
 ):
@@ -635,21 +803,11 @@ async def start_panel_review(
             status_code=404, detail=f"Conference profile '{conference}' not found"
         )
 
-    try:
-        model_map = json.loads(model_map_json) if model_map_json else {}
-    except json.JSONDecodeError:
-        model_map = {}
+    model_map = _parse_model_map(model_map_json)
     ad_status, ad_assumed_present = _artifact_status_metadata(
         artifact_description_status,
         assumed_present=artifact_description_assumed_present,
     )
-
-    upload_dir = _get_upload_dir()
-    safe_name = f"{uuid.uuid4().hex}_{file.filename}"
-    file_path = upload_dir / safe_name
-
-    content = await file.read()
-    file_path.write_bytes(content)
 
     agent_configs = build_agent_configs(
         profile=profile,
@@ -660,6 +818,9 @@ async def start_panel_review(
         artifact_description_status=ad_status,
     )
 
+    _require_ready(agent_configs, model_map, skip_graph=skip_graph, max_rounds=max_rounds)
+    [(file_path, filename)] = await _save_paper_uploads([file])
+
     reviewer_ids = [k for k in agent_configs if k != "meta"]
     delib_config = build_deliberation_config(
         reviewer_ids=reviewer_ids, max_rounds=max_rounds,
@@ -668,10 +829,16 @@ async def start_panel_review(
     session = await _session_manager.create(
         config={
             "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+            "model_map": model_map,
             "deliberation": delib_config.model_dump(),
             "metadata": {
                 "type": "panel_review",
                 "pipeline_mode": "full_review",
+                "skip_graph": skip_graph,
+                "fast_parse": fast_parse,
+                "inspect_graph": inspect_graph,
+                "upload_path": str(file_path),
+                "user_instructions": user_instructions,
                 "conference": conference,
                 "filename": file.filename,
                 "paper_title": "",
@@ -686,78 +853,13 @@ async def start_panel_review(
     bus = SessionEventBus()
     _event_buses[session.session_id] = bus
     ctl = PipelineControl()
+    ctl.skip_gate = not inspect_graph
     _pipeline_controls[session.session_id] = ctl
 
-    async def _parse_and_run(sid: str) -> None:
-        """Parse PDF in background, then run the full pipeline."""
-        import time as _time
-
-        session = await _session_manager.get(sid)
-        if session:
-            session.status = SessionStatus.RUNNING
-            session.pipeline_steps["parse"] = StepState(
-                status="running", started_at=_time.monotonic(),
-            ).model_dump()
-            await _session_manager.update(session)
-
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": "parse",
-            "message": f"Parsing {file.filename}...",
-        })
-        await asyncio.sleep(0)
-
-        try:
-            loop = asyncio.get_running_loop()
-            vlm = build_vlm_config()
-            doc = await loop.run_in_executor(
-                None, lambda: parse_file(str(file_path), fast=fast_parse, vlm_config=vlm),
-            )
-            doc = chunk_document(doc)
-            session = await _session_manager.get(sid)
-            if session:
-                existing = session.pipeline_steps.get("parse") or {}
-                completed_at = _time.monotonic()
-                session.pipeline_steps["parse"] = StepState(
-                    status="complete",
-                    started_at=existing.get("started_at"),
-                    completed_at=completed_at,
-                    model_used=vlm.get("model", "") if vlm and not fast_parse else "",
-                ).model_dump()
-                started_at = existing.get("started_at") or completed_at
-                session.app_data["parse"] = _parse_provenance(
-                    doc,
-                    fast_parse=fast_parse,
-                    vlm=vlm,
-                    duration_seconds=completed_at - float(started_at),
-                )
-                await _session_manager.update(session)
-        except Exception as e:
-            file_path.unlink(missing_ok=True)
-            logger.warning("Failed to parse %s: %s", file.filename, e)
-            session = await _session_manager.get(sid)
-            if session:
-                session.status = SessionStatus.FAILED
-                session.error = f"Parse failed: {e}"
-                await _session_manager.update(session)
-            bus.emit("error", {"detail": f"Parse failed: {e}"})
-            return
-
-        ctx = _session_manager.get_context(sid)
-        ctx.add_document(doc)
-        session = await _session_manager.get(sid)
-        if session:
-            session.document_ids.append(doc.document_id)
-            await _session_manager.update(session)
-
-        await _run_graph_pipeline(
-            sid, doc, profile, model_map,
-            agent_configs, bus, ctl,
-            delib_config=delib_config, graph_only=False,
-            skip_graph=skip_graph,
-        )
-
-    task = asyncio.create_task(_parse_and_run(session.session_id))
-    ctl.set_task(task)
+    _start_pipeline_task(session.session_id, _parse_upload_and_run(
+        session.session_id, file_path, file.filename, profile, model_map, agent_configs, bus, ctl,
+        fast_parse=fast_parse, delib_config=delib_config, skip_graph=skip_graph,
+    ), bus, ctl)
 
     return {
         "session_id": session.session_id,
@@ -792,36 +894,33 @@ async def start_batch(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Conference profile '{conference}' not found")
 
-    try:
-        model_map = json.loads(model_map_json) if model_map_json else {}
-    except json.JSONDecodeError:
-        model_map = {}
+    model_map = _parse_model_map(model_map_json)
 
     agent_configs = build_agent_configs(
         profile=profile, conference_slug=conference,
         model_map=model_map if model_map else None,
     )
 
-    upload_dir = _get_upload_dir()
+    _require_ready(agent_configs, model_map, graph_only=True)
+    saved_uploads = await _save_paper_uploads(files)
     batch = await _batch_manager.create(conference=conference)
 
     # Save files to disk and create sessions immediately (no parsing yet)
     pending: list[tuple[str, Path, str]] = []  # (session_id, file_path, filename)
     session_ids = []
-    for file in files:
-        safe_name = f"{uuid.uuid4().hex}_{file.filename}"
-        file_path = upload_dir / safe_name
-        content = await file.read()
-        file_path.write_bytes(content)
+    for file_path, filename in saved_uploads:
 
         session = await _session_manager.create(
             config={
                 "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+                "model_map": model_map,
                 "metadata": {
                     "type": "panel_review",
                     "pipeline_mode": "graph_only",
                     "conference": conference,
-                    "filename": file.filename,
+                    "filename": filename,
+                    "upload_path": str(file_path),
+                    "fast_parse": fast_parse,
                     "paper_title": "",
                 },
             },
@@ -831,7 +930,7 @@ async def start_batch(
         session.batch_id = batch.batch_id
         await _session_manager.update(session)
         session_ids.append(session.session_id)
-        pending.append((session.session_id, file_path, file.filename))
+        pending.append((session.session_id, file_path, filename))
 
     batch.session_ids = session_ids
     await _batch_manager.update(batch)
@@ -843,104 +942,33 @@ async def start_batch(
     _event_buses[f"batch_{batch.batch_id}"] = batch_bus
 
     async def _run_batch_sequential() -> None:
-        import time as _time
-        for i, (sid, fpath, fname) in enumerate(pending):
-            bus = _event_buses.get(sid)
-            if not bus:
-                bus = SessionEventBus()
-                _event_buses[sid] = bus
-
-            batch_bus.emit("batch_progress", {
-                "current": i + 1, "total": len(pending),
-                "filename": fname, "session_id": sid,
-            })
-
-            session = await _session_manager.get(sid)
-            if session:
-                session.status = SessionStatus.RUNNING
-                session.pipeline_steps["parse"] = StepState(
-                    status="running", started_at=_time.monotonic(),
-                ).model_dump()
-                await _session_manager.update(session)
-
-            bus.emit("step_started", {
-                "stage": "pre_review", "step": "parse",
-                "message": f"Parsing {fname} ({i + 1}/{len(pending)})...",
-            })
-            await asyncio.sleep(0)
-
-            try:
-                loop = asyncio.get_running_loop()
-                vlm = build_vlm_config()
-                doc = await loop.run_in_executor(
-                    None, lambda: parse_file(str(fpath), fast=fast_parse, vlm_config=vlm),
-                )
-                doc = chunk_document(doc)
-                session = await _session_manager.get(sid)
-                if session:
-                    existing = session.pipeline_steps.get("parse") or {}
-                    completed_at = _time.monotonic()
-                    session.pipeline_steps["parse"] = StepState(
-                        status="complete",
-                        started_at=existing.get("started_at"),
-                        completed_at=completed_at,
-                        model_used=vlm.get("model", "") if vlm and not fast_parse else "",
-                    ).model_dump()
-                    started_at = existing.get("started_at") or completed_at
-                    session.app_data["parse"] = _parse_provenance(
-                        doc,
-                        fast_parse=fast_parse,
-                        vlm=vlm,
-                        duration_seconds=completed_at - float(started_at),
-                    )
-                    await _session_manager.update(session)
-            except Exception as e:
-                fpath.unlink(missing_ok=True)
-                logger.warning("Failed to parse %s: %s", fname, e)
-                session = await _session_manager.get(sid)
-                if session:
-                    session.status = SessionStatus.FAILED
-                    session.error = f"Parse failed: {e}"
-                    await _session_manager.update(session)
-                bus.emit("error", {"detail": f"Parse failed: {e}"})
-                batch_bus.emit("paper_failed", {
-                    "session_id": sid, "error": f"Parse failed: {e}",
-                })
+        for index, (sid, file_path, filename) in enumerate(pending, 1):
+            current = await _session_manager.get(sid)
+            if not current or current.status == SessionStatus.STOPPED:
                 continue
-
-            session = await _session_manager.get(sid)
-            if session:
-                ctx = _session_manager.get_context(sid)
-                ctx.add_document(doc)
-                session.document_ids.append(doc.document_id)
-                await _session_manager.update(session)
-
+            bus = _event_buses.setdefault(sid, SessionEventBus())
             ctl = PipelineControl()
-            _pipeline_controls[sid] = ctl
-
-            try:
-                await _run_graph_pipeline(
-                    sid, doc, profile, model_map,
-                    agent_configs, bus, ctl, graph_only=True,
-                )
-                batch_bus.emit("paper_complete", {
-                    "session_id": sid, "index": i + 1,
-                    "total": len(pending), "filename": fname,
-                })
-            except Exception as e:
-                logger.error("Pipeline failed for %s in batch: %s", fname, e)
-                session = await _session_manager.get(sid)
-                if session and session.status != SessionStatus.FAILED:
-                    session.status = SessionStatus.FAILED
-                    session.error = str(e)
-                    await _session_manager.update(session)
-                batch_bus.emit("paper_failed", {
-                    "session_id": sid, "error": str(e),
-                })
-
+            ctl.skip_gate = True
+            batch_bus.emit("batch_progress", {
+                "current": index, "total": len(pending), "filename": filename, "session_id": sid,
+            })
+            config = build_deliberation_config(
+                reviewer_ids=[key for key in agent_configs if key != "meta"], max_rounds=0,
+            )
+            await _start_pipeline_task(sid, _parse_upload_and_run(
+                sid, file_path, filename, profile, model_map, agent_configs, bus, ctl,
+                fast_parse=fast_parse, delib_config=config, graph_only=True,
+            ), bus, ctl)
+            finished = await _session_manager.get(sid)
+            successful = finished and finished.status == SessionStatus.COMPLETED
+            batch_bus.emit("paper_complete" if successful else "paper_failed", {
+                "session_id": sid, "index": index, "total": len(pending), "filename": filename,
+                "error": finished.error if finished else "Session missing",
+            })
+        await get_batch(batch.batch_id)
         batch_bus.emit("batch_complete", {"total": len(pending)})
 
-    asyncio.create_task(_run_batch_sequential())
+    start_background_task(_run_batch_sequential())
 
     return {
         "batch_id": batch.batch_id,
@@ -1046,9 +1074,10 @@ async def start_batch_review(
     files: list[UploadFile] = File(...),
     conference: str = Form(...),
     model_map_json: str = Form("{}"),
-    max_rounds: int = Form(2),
+    max_rounds: int = Form(2, ge=0, le=20),
     user_instructions: str = Form(""),
     fast_parse: bool = Form(False),
+    skip_graph: bool = Form(False),
     artifact_description_assumed_present: bool = Form(False),
     artifact_description_status: str = Form("not_provided_to_protoneo"),
 ):
@@ -1067,10 +1096,7 @@ async def start_batch_review(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Conference profile '{conference}' not found")
 
-    try:
-        model_map = json.loads(model_map_json) if model_map_json else {}
-    except json.JSONDecodeError:
-        model_map = {}
+    model_map = _parse_model_map(model_map_json)
     ad_status, ad_assumed_present = _artifact_status_metadata(
         artifact_description_status,
         assumed_present=artifact_description_assumed_present,
@@ -1084,16 +1110,13 @@ async def start_batch_review(
         artifact_description_status=ad_status,
     )
 
-    upload_dir = _get_upload_dir()
+    _require_ready(agent_configs, model_map, skip_graph=skip_graph, max_rounds=max_rounds)
+    saved_uploads = await _save_paper_uploads(files)
     batch = await _batch_manager.create(conference=conference)
 
     pending: list[tuple[str, Path, str]] = []
     session_ids = []
-    for file in files:
-        safe_name = f"{uuid.uuid4().hex}_{file.filename}"
-        file_path = upload_dir / safe_name
-        content = await file.read()
-        file_path.write_bytes(content)
+    for file_path, filename in saved_uploads:
 
         reviewer_ids = [k for k in agent_configs if k != "meta"]
         delib_config = build_deliberation_config(
@@ -1103,12 +1126,17 @@ async def start_batch_review(
         session = await _session_manager.create(
             config={
                 "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+                "model_map": model_map,
                 "deliberation": delib_config.model_dump(),
                 "metadata": {
                     "type": "panel_review",
                     "pipeline_mode": "full_review",
                     "conference": conference,
-                    "filename": file.filename,
+                    "filename": filename,
+                    "upload_path": str(file_path),
+                    "fast_parse": fast_parse,
+                    "skip_graph": skip_graph,
+                    "user_instructions": user_instructions,
                     "paper_title": "",
                     "artifact_description_status": ad_status,
                     "artifact_description_assumed_present": ad_assumed_present,
@@ -1120,7 +1148,7 @@ async def start_batch_review(
         session.batch_id = batch.batch_id
         await _session_manager.update(session)
         session_ids.append(session.session_id)
-        pending.append((session.session_id, file_path, file.filename))
+        pending.append((session.session_id, file_path, filename))
 
     batch.session_ids = session_ids
     await _batch_manager.update(batch)
@@ -1129,113 +1157,33 @@ async def start_batch_review(
     _event_buses[f"batch_{batch.batch_id}"] = batch_bus
 
     async def _run_batch_review_sequential() -> None:
-        import time as _time
-        for i, (sid, fpath, fname) in enumerate(pending):
-            bus = _event_buses.get(sid)
-            if not bus:
-                bus = SessionEventBus()
-                _event_buses[sid] = bus
-
-            batch_bus.emit("batch_progress", {
-                "current": i + 1, "total": len(pending),
-                "filename": fname, "session_id": sid,
-            })
-
-            session = await _session_manager.get(sid)
-            if session:
-                session.status = SessionStatus.RUNNING
-                session.pipeline_steps["parse"] = StepState(
-                    status="running", started_at=_time.monotonic(),
-                ).model_dump()
-                await _session_manager.update(session)
-
-            bus.emit("step_started", {
-                "stage": "pre_review", "step": "parse",
-                "message": f"Parsing {fname} ({i + 1}/{len(pending)})...",
-            })
-            await asyncio.sleep(0)
-
-            try:
-                loop = asyncio.get_running_loop()
-                vlm = build_vlm_config()
-                doc = await loop.run_in_executor(
-                    None, lambda: parse_file(str(fpath), fast=fast_parse, vlm_config=vlm),
-                )
-                doc = chunk_document(doc)
-                session = await _session_manager.get(sid)
-                if session:
-                    existing = session.pipeline_steps.get("parse") or {}
-                    completed_at = _time.monotonic()
-                    session.pipeline_steps["parse"] = StepState(
-                        status="complete",
-                        started_at=existing.get("started_at"),
-                        completed_at=completed_at,
-                        model_used=vlm.get("model", "") if vlm and not fast_parse else "",
-                    ).model_dump()
-                    started_at = existing.get("started_at") or completed_at
-                    session.app_data["parse"] = _parse_provenance(
-                        doc,
-                        fast_parse=fast_parse,
-                        vlm=vlm,
-                        duration_seconds=completed_at - float(started_at),
-                    )
-                    await _session_manager.update(session)
-            except Exception as e:
-                fpath.unlink(missing_ok=True)
-                logger.warning("Failed to parse %s: %s", fname, e)
-                session = await _session_manager.get(sid)
-                if session:
-                    session.status = SessionStatus.FAILED
-                    session.error = f"Parse failed: {e}"
-                    await _session_manager.update(session)
-                bus.emit("error", {"detail": f"Parse failed: {e}"})
-                batch_bus.emit("paper_failed", {
-                    "session_id": sid, "error": f"Parse failed: {e}",
-                })
+        for index, (sid, file_path, filename) in enumerate(pending, 1):
+            current = await _session_manager.get(sid)
+            if not current or current.status == SessionStatus.STOPPED:
                 continue
-
-            session = await _session_manager.get(sid)
-            if session:
-                ctx = _session_manager.get_context(sid)
-                ctx.add_document(doc)
-                session.document_ids.append(doc.document_id)
-                await _session_manager.update(session)
-
+            bus = _event_buses.setdefault(sid, SessionEventBus())
             ctl = PipelineControl()
             ctl.skip_gate = True
-            _pipeline_controls[sid] = ctl
-
-            reviewer_ids = [k for k in agent_configs if k != "meta"]
-            delib_config = build_deliberation_config(
-                reviewer_ids=reviewer_ids, max_rounds=max_rounds,
+            batch_bus.emit("batch_progress", {
+                "current": index, "total": len(pending), "filename": filename, "session_id": sid,
+            })
+            config = build_deliberation_config(
+                reviewer_ids=[key for key in agent_configs if key != "meta"], max_rounds=max_rounds,
             )
-
-            try:
-                # Run full pipeline (graph + review) with auto-advance gate
-                await _run_graph_pipeline(
-                    sid, doc, profile, model_map,
-                    agent_configs, bus, ctl,
-                    delib_config=delib_config,
-                    graph_only=False,
-                )
-                batch_bus.emit("paper_complete", {
-                    "session_id": sid, "index": i + 1,
-                    "total": len(pending), "filename": fname,
-                })
-            except Exception as e:
-                logger.error("Full pipeline failed for %s in batch: %s", fname, e)
-                session = await _session_manager.get(sid)
-                if session and session.status != SessionStatus.FAILED:
-                    session.status = SessionStatus.FAILED
-                    session.error = str(e)
-                    await _session_manager.update(session)
-                batch_bus.emit("paper_failed", {
-                    "session_id": sid, "error": str(e),
-                })
-
+            await _start_pipeline_task(sid, _parse_upload_and_run(
+                sid, file_path, filename, profile, model_map, agent_configs, bus, ctl,
+                fast_parse=fast_parse, delib_config=config, graph_only=False, skip_graph=skip_graph,
+            ), bus, ctl)
+            finished = await _session_manager.get(sid)
+            successful = finished and finished.status == SessionStatus.COMPLETED
+            batch_bus.emit("paper_complete" if successful else "paper_failed", {
+                "session_id": sid, "index": index, "total": len(pending), "filename": filename,
+                "error": finished.error if finished else "Session missing",
+            })
+        await get_batch(batch.batch_id)
         batch_bus.emit("batch_complete", {"total": len(pending)})
 
-    asyncio.create_task(_run_batch_review_sequential())
+    start_background_task(_run_batch_review_sequential())
 
     return {
         "batch_id": batch.batch_id,
@@ -1282,7 +1230,22 @@ async def retry_session(session_id: str):
     doc_md = session.document_markdown or ""
     filename = session.config.get("metadata", {}).get("filename", "paper.pdf")
     if not doc_text and pipeline_mode != "imported_graph_review":
-        raise HTTPException(status_code=400, detail="No paper text stored. Cannot retry.")
+        metadata = session.config.get("metadata", {})
+        upload_path = Path(metadata.get("upload_path") or "")
+        if not upload_path.is_file():
+            raise HTTPException(status_code=400, detail="Neither parsed paper text nor the original upload is available")
+        bus = _event_buses.setdefault(session_id, SessionEventBus())
+        bus.reset()
+        ctl = PipelineControl()
+        ctl.skip_gate = True
+        session.status, session.error = SessionStatus.RUNNING, None
+        await _session_manager.update(session)
+        _start_pipeline_task(session_id, _parse_upload_and_run(
+            session_id, upload_path, filename, profile, _saved_model_map(session), agent_configs, bus, ctl,
+            fast_parse=bool(metadata.get("fast_parse")), delib_config=delib_config,
+            graph_only=pipeline_mode == "graph_only", skip_graph=bool(metadata.get("skip_graph")),
+        ), bus, ctl)
+        return {"session_id": session_id, "status": "running", "action": "retry_parse"}
 
     from protoneo.agents.types import Document as _Doc
     doc = _Doc(
@@ -1292,34 +1255,26 @@ async def retry_session(session_id: str):
         markdown=doc_md,
     )
 
-    model_map_raw = {}
-    for step_key in ("ontology", "extraction", "coref", "verification"):
-        for step_data in session.pipeline_steps.values():
-            if isinstance(step_data, dict) and step_data.get("model_used"):
-                model_map_raw.setdefault(step_key, step_data["model_used"])
-    for k, v in agent_configs_raw.items():
-        if isinstance(v, dict) and v.get("model"):
-            model_map_raw[k] = v["model"]
+    model_map_raw = _saved_model_map(session)
 
     session.status = SessionStatus.RUNNING
     session.error = None
     await _session_manager.update(session)
 
-    bus = SessionEventBus()
-    _event_buses[session_id] = bus
+    bus = _event_buses.setdefault(session_id, SessionEventBus())
+    bus.reset()
     ctl = PipelineControl()
     _pipeline_controls[session_id] = ctl
 
     if pipeline_mode == "imported_graph_review" and session.knowledge_graph:
-        task = asyncio.create_task(_run_review_only_pipeline(
+        _start_pipeline_task(session_id, _run_review_only_pipeline(
             session_id,
             profile,
             agent_configs,
             delib_config,
             bus,
             ctl,
-        ))
-        ctl.set_task(task)
+        ), bus, ctl)
         return {"session_id": session_id, "status": "running", "action": "retry"}
 
     # Full-review retries should continue through the review stage without
@@ -1327,13 +1282,13 @@ async def retry_session(session_id: str):
     graph_only = pipeline_mode == "graph_only"
     if not graph_only:
         ctl.skip_gate = True
-    task = asyncio.create_task(_run_graph_pipeline(
+    _start_pipeline_task(session_id, _run_graph_pipeline(
         session_id, doc, profile, model_map_raw,
         agent_configs, bus, ctl,
         delib_config=delib_config,
         graph_only=graph_only,
-    ))
-    ctl.set_task(task)
+        skip_graph=bool(session.config.get("metadata", {}).get("skip_graph")),
+    ), bus, ctl)
 
     return {"session_id": session_id, "status": "running", "action": "retry"}
 
@@ -1364,87 +1319,27 @@ async def retry_failed_in_batch(batch_id: str):
     _event_buses[f"batch_{batch_id}"] = batch_bus
 
     async def _retry_failed_sequential() -> None:
-        for i, sid in enumerate(failed_sids):
+        for index, sid in enumerate(failed_sids, 1):
             batch_bus.emit("batch_progress", {
-                "current": i + 1, "total": len(failed_sids),
-                "session_id": sid, "action": "retry",
+                "current": index, "total": len(failed_sids), "session_id": sid, "action": "retry",
             })
-
-            session = await _session_manager.get(sid)
-            if not session:
-                continue
-
-            conference_slug = session.config.get("metadata", {}).get("conference", "adaptive")
             try:
-                profile = load_profile(conference_slug)
-            except FileNotFoundError:
-                continue
-
-            agent_configs_raw = session.config.get("agents", {})
-            ac = {k: AgentConfig(**v) for k, v in agent_configs_raw.items()}
-            dc = DeliberationConfig(**session.config.get("deliberation", {}))
-            pipeline_mode = _session_pipeline_mode(session)
-
-            doc_text = session.document_text or session.document_markdown
-            if not doc_text and pipeline_mode != "imported_graph_review":
-                continue
-
-            from protoneo.agents.types import Document as _Doc
-            doc = _Doc(
-                document_id=uuid.uuid4().hex,
-                filename=session.config.get("metadata", {}).get("filename", "paper.pdf"),
-                text=doc_text or "",
-                markdown=session.document_markdown or "",
-            )
-
-            model_map_raw = {}
-            for k, v in agent_configs_raw.items():
-                if isinstance(v, dict) and v.get("model"):
-                    model_map_raw[k] = v["model"]
-
-            session.status = SessionStatus.RUNNING
-            session.error = None
-            await _session_manager.update(session)
-
-            bus = _event_buses.get(sid)
-            if not bus:
-                bus = SessionEventBus()
-                _event_buses[sid] = bus
-
-            ctl = PipelineControl()
-            _pipeline_controls[sid] = ctl
-            graph_only = pipeline_mode == "graph_only"
-            if not graph_only:
-                ctl.skip_gate = True
-
-            try:
-                if pipeline_mode == "imported_graph_review" and session.knowledge_graph:
-                    await _run_review_only_pipeline(sid, profile, ac, dc, bus, ctl)
-                else:
-                    await _run_graph_pipeline(
-                        sid, doc, profile, model_map_raw,
-                        ac, bus, ctl,
-                        delib_config=dc,
-                        graph_only=graph_only,
-                    )
-                batch_bus.emit("paper_complete", {
-                    "session_id": sid, "index": i + 1,
-                    "total": len(failed_sids),
+                await retry_session(sid)
+                control = _pipeline_controls.get(sid)
+                if control and control._task:
+                    await control._task
+                finished = await _session_manager.get(sid)
+                successful = finished and finished.status == SessionStatus.COMPLETED
+                batch_bus.emit("paper_complete" if successful else "paper_failed", {
+                    "session_id": sid, "index": index, "total": len(failed_sids),
+                    "error": finished.error if finished else "Session missing",
                 })
-            except Exception as e:
-                logger.error("Retry failed for %s: %s", sid, e)
-                session = await _session_manager.get(sid)
-                if session and session.status != SessionStatus.FAILED:
-                    session.status = SessionStatus.FAILED
-                    session.error = str(e)
-                    await _session_manager.update(session)
-                batch_bus.emit("paper_failed", {
-                    "session_id": sid, "error": str(e),
-                })
-
+            except Exception as exc:
+                batch_bus.emit("paper_failed", {"session_id": sid, "error": sanitize_error_message(exc)})
+        await get_batch(batch_id)
         batch_bus.emit("batch_complete", {"total": len(failed_sids)})
 
-    asyncio.create_task(_retry_failed_sequential())
+    start_background_task(_retry_failed_sequential())
 
     return {
         "batch_id": batch_id,
@@ -1458,7 +1353,7 @@ async def retry_failed_in_batch(batch_id: str):
 class LaunchReviewBody(BaseModel):
     model_map: dict[str, Any] = Field(default_factory=dict)
     conference: str = ""
-    max_rounds: int = 0
+    max_rounds: int | None = Field(default=None, ge=0, le=20)
     user_instructions: str = ""
     artifact_description_assumed_present: bool = False
     artifact_description_status: str = ""
@@ -1483,6 +1378,9 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
     if not session.knowledge_graph:
         raise HTTPException(status_code=400, detail="Session has no graph. Build or import a graph first.")
 
+    if session_id in _pipeline_controls or session.status == SessionStatus.RUNNING:
+        raise HTTPException(status_code=409, detail="Session already has an active pipeline")
+
     # Allow overriding conference for the review
     conference_slug = (body.conference if body and body.conference
                       else session.config.get("metadata", {}).get("conference", "adaptive"))
@@ -1502,6 +1400,7 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
     # Rebuild agent configs with new model_map or review metadata if provided.
     if body and (
         body.model_map
+        or body.conference
         or body.user_instructions
         or body.artifact_description_assumed_present
         or body.artifact_description_status
@@ -1527,6 +1426,10 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
         if body:
             metadata["context_mode"] = ReviewContextMode.coerce(body.context_mode).value
             await _session_manager.update(session)
+    metadata["conference"] = conference_slug
+    metadata["pipeline_mode"] = "imported_graph_review"
+    metadata["artifact_description_status"] = ad_status
+    metadata["artifact_description_assumed_present"] = ad_assumed_present
     delib_raw = session.config.get("deliberation", {})
     if delib_raw and delib_raw.get("phases"):
         delib_config = DeliberationConfig(**delib_raw)
@@ -1534,8 +1437,17 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
         reviewer_ids = [k for k in agent_configs if k != "meta"]
         delib_config = build_deliberation_config(
             reviewer_ids=reviewer_ids,
-            max_rounds=body.max_rounds if body and body.max_rounds else 2,
+            max_rounds=body.max_rounds if body and body.max_rounds is not None else 2,
         )
+    if body and (body.max_rounds is not None or body.conference or body.model_map):
+        previous_rounds = next((p.max_rounds for p in delib_config.phases if p.mode == "round_robin"), 2)
+        delib_config = build_deliberation_config(
+            reviewer_ids=[key for key in agent_configs if key != "meta"],
+            max_rounds=body.max_rounds if body.max_rounds is not None else previous_rounds,
+        )
+    _require_ready(agent_configs, {}, skip_graph=True,
+                   max_rounds=next((p.max_rounds for p in delib_config.phases if p.mode == "round_robin"), 0))
+    session.config["deliberation"] = delib_config.model_dump()
 
     pg = KnowledgeGraph.model_validate(session.knowledge_graph)
 
@@ -1578,10 +1490,16 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
     if not bus:
         bus = SessionEventBus()
         _event_buses[session_id] = bus
+    bus.reset()
     ctl = PipelineControl()
     _pipeline_controls[session_id] = ctl
 
     session.status = SessionStatus.RUNNING
+    session.error = None
+    session.result = None
+    for key in ("final_review", "review_packet", "rendered_prompts"):
+        session.app_data.pop(key, None)
+    session.checkpoints = [cp for cp in session.checkpoints if cp.stage_name not in {"independent_review", "deliberation", "meta_review"}]
     session.current_stage = "review"
     session.pipeline_steps["independent_reviews"] = StepState(
         status="running",
@@ -1625,16 +1543,15 @@ async def launch_review(session_id: str, body: LaunchReviewBody | None = None):
             bus.emit("completed", {"result": sess.result if sess else {}})
 
         except asyncio.CancelledError:
-            bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
+            raise
         except Exception as e:
             error = sanitize_error_message(e)
             logger.error("Review failed for session %s: %s", sid, error, exc_info=True)
-            bus.emit("error", {"detail": error})
+            raise
         finally:
             get_pipeline_controls().pop(sid, None)
 
-    task = asyncio.create_task(_run_review_only(session_id))
-    ctl.set_task(task)
+    _start_pipeline_task(session_id, _run_review_only(session_id), bus, ctl)
 
     return {
         "session_id": session_id,
@@ -1815,7 +1732,7 @@ async def refine_field(session_id: str, body: RefineFieldRequest):
             logger.error("Refine failed for %s/%s: %s", session_id, body.field, e)
             bus.emit("refine_error", {"field": body.field, "detail": str(e)})
 
-    asyncio.create_task(_stream())
+    start_background_task(_stream())
     return {"status": "streaming", "field": body.field, "model": chat_model}
 
 class ScoreLightpassRequest(BaseModel):
@@ -1899,12 +1816,29 @@ async def update_final_review(session_id: str, body: UpdateFinalReviewRequest):
         raise HTTPException(status_code=409, detail="No review results")
 
     final_review = sanitize_final_review(body.final_review)
+    conference = session.config.get("metadata", {}).get("conference", "")
+    profile = load_profile(conference)
+    for key, scale in (("overall_merit", profile.review_form.overall_merit),
+                       ("final_recommendation", profile.review_form.overall_merit),
+                       ("reviewer_expertise", profile.review_form.reviewer_expertise)):
+        rating = final_review.get(key, {})
+        score = rating.get("score")
+        if score is None:
+            continue
+        if type(score) is not int or not scale.scale[0] <= score <= scale.scale[1]:
+            raise HTTPException(status_code=422, detail=f"{key} must be an integer from {scale.scale[0]} to {scale.scale[1]}")
+        if score in scale.labels:
+            rating["label"] = scale.labels[score]
+    merit = final_review.get("overall_merit", {}).get("score")
+    recommendation = final_review.get("final_recommendation", {}).get("score")
+    if merit is not None and recommendation is not None and merit != recommendation:
+        raise HTTPException(status_code=422, detail="Overall merit and final recommendation must agree")
     session.result["final_review"] = final_review
     session.result["pc_chair_review"] = final_review
     session.app_data["final_review"] = final_review
     session.app_data.pop("review_packet", None)
     await _session_manager.update(session)
-    return {"status": "saved"}
+    return {"status": "saved", "final_review": final_review}
 
 
 class PCChairChatRequest(BaseModel):
@@ -2181,6 +2115,7 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         or session.result.get("final_review")
         or {}
     )
+    original_review = json.dumps(session.result.get("final_review") or session.result.get("pc_chair_review") or {}, sort_keys=True)
     chat_model = _resolve_chat_model(session)
     if not chat_model:
         raise HTTPException(status_code=409, detail="No model configured for PC Chair")
@@ -2276,7 +2211,17 @@ async def pc_chair_chat(session_id: str, body: PCChairChatRequest):
         ]
     updated_review = base_review
     applied = False
-    if body.apply_edits and patch:
+    latest = await _session_manager.get(session_id)
+    if not latest or not latest.result:
+        raise HTTPException(status_code=409, detail="The review changed while the chair was responding; reload the session")
+    latest_review = latest.result.get("final_review") or latest.result.get("pc_chair_review") or {}
+    review_changed = json.dumps(latest_review, sort_keys=True) != original_review
+    session = latest
+    if review_changed:
+        updated_review = sanitize_final_review(latest_review)
+        parsed["needs_user_decision"] = True
+        edit_summary.append("The review was edited during this response; the proposed patch has not been applied.")
+    if body.apply_edits and patch and not review_changed:
         updated_review = sanitize_final_review(_merge_review_patch(base_review, patch))
         session.result["final_review"] = updated_review
         session.result["pc_chair_review"] = updated_review
@@ -2465,7 +2410,7 @@ async def review_with_graph(
     graph_file: UploadFile = File(...),
     conference: str = Form(...),
     model_map_json: str = Form("{}"),
-    max_rounds: int = Form(2),
+    max_rounds: int = Form(2, ge=0, le=20),
     user_instructions: str = Form(""),
     artifact_description_assumed_present: bool = Form(False),
     artifact_description_status: str = Form(""),
@@ -2499,10 +2444,7 @@ async def review_with_graph(
     paper_title = imported.paper_title
     imported_markdown = imported.document_markdown or imported.document_text
 
-    try:
-        model_map = json.loads(model_map_json) if model_map_json else {}
-    except json.JSONDecodeError:
-        model_map = {}
+    model_map = _parse_model_map(model_map_json)
     ad_status, ad_assumed_present = _artifact_status_metadata(
         artifact_description_status,
         assumed_present=artifact_description_assumed_present
@@ -2525,6 +2467,7 @@ async def review_with_graph(
     session = await _session_manager.create(
         config={
             "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+            "model_map": model_map,
             "deliberation": delib_config.model_dump(),
             "metadata": {
                 "type": "panel_review",
@@ -2798,6 +2741,7 @@ async def _run_one_packet_review(
     session = await _session_manager.create(
         config={
             "agents": {k: v.model_dump() for k, v in agent_configs.items()},
+            "model_map": resolved_model_map,
             "deliberation": delib_config.model_dump(),
             "metadata": {
                 "type": "panel_review",
@@ -2861,76 +2805,89 @@ async def _run_one_packet_review(
     get_event_buses()[session.session_id] = bus
     ctl = PipelineControl()
     get_pipeline_controls()[session.session_id] = ctl
-    ctl.enter_stage("review")
-    ctl.enter_step("independent_reviews")
-    bus.emit("stage_started", {
-        "stage": "review",
-        "step": "independent_reviews",
-        "message": "Starting packet review...",
-    })
-    bus.emit("step_started", {
-        "stage": "review",
-        "step": "independent_reviews",
-        "message": "Starting independent peer reviews...",
-    })
-    await _run_review_stage(
-        session.session_id,
-        agent_configs,
-        delib_config,
-        enriched_message,
-        bus,
-        ctl,
-        pg,
-        context_payload=context_payload,
-        context_mode=context_mode,
-        stream_tokens=False,
-    )
+    outcome = {}
 
-    completed = await _session_manager.get(session.session_id)
-    if completed:
-        completed.knowledge_graph = pg.model_dump(mode="json")
-        completed.current_stage = "review"
+    async def review_and_export():
+        ctl.enter_stage("review")
+        ctl.enter_step("independent_reviews")
+        bus.emit("stage_started", {
+            "stage": "review",
+            "step": "independent_reviews",
+            "message": "Starting packet review...",
+        })
+        bus.emit("step_started", {
+            "stage": "review",
+            "step": "independent_reviews",
+            "message": "Starting independent peer reviews...",
+        })
+        await _run_review_stage(
+            session.session_id,
+            agent_configs,
+            delib_config,
+            enriched_message,
+            bus,
+            ctl,
+            pg,
+            context_payload=context_payload,
+            context_mode=context_mode,
+            stream_tokens=False,
+        )
+
+        completed = await _session_manager.get(session.session_id)
+        if completed:
+            completed.knowledge_graph = pg.model_dump(mode="json")
+            completed.current_stage = "review"
+            await _session_manager.update(completed)
+        else:
+            raise RuntimeError(f"Session {session.session_id} disappeared during packet review")
+
+        packet = session_to_review_packet(completed)
+        # Write to a run-scoped subdirectory when requested so prior outputs are
+        # preserved rather than overwritten.
+        output_dir = _packet_output_dir(packet_dir, output_subdir)
+        prompt_pack_version = ""
+        try:
+            from .prompts import load_prompt_pack
+
+            prompt_pack_version = str(load_prompt_pack(conference).get("version", ""))
+        except Exception:
+            pass
+        manifest = write_review_artifacts(
+            packet,
+            output_dir,
+            source_graph=pg,
+            template_path=template_path,
+            paper_id=packet_dir.name,
+            paper_path=paper_pdf,
+            source_graph_path=graph_path,
+            source_session_id=imported.source_session_id,
+            model_map=resolved_model_map,
+            preset=preset,
+            prompt_pack_version=prompt_pack_version,
+            artifact_description_assumed_present=ad_assumed_present,
+            artifact_description_status=ad_status,
+            run_id=output_subdir,
+            context_mode=context_mode.value,
+        )
         completed.status = SessionStatus.COMPLETED
+        completed.current_stage = "post_review"
+        completed.app_data["artifacts"] = manifest
         await _session_manager.update(completed)
-    else:
-        raise RuntimeError(f"Session {session.session_id} disappeared during packet review")
+        bus.emit("completed", {"result": completed.result})
+        outcome.update({
+            "paper_id": packet_dir.name,
+            "status": "completed",
+            "session_id": packet.session_id,
+            "output_dir": str(output_dir),
+            "run_id": output_subdir,
+            "manifest": manifest,
+        })
 
-    packet = session_to_review_packet(completed)
-    # Write to a run-scoped subdirectory when requested so prior outputs are
-    # preserved rather than overwritten.
-    output_dir = _packet_output_dir(packet_dir, output_subdir)
-    prompt_pack_version = ""
-    try:
-        from .prompts import load_prompt_pack
-
-        prompt_pack_version = str(load_prompt_pack(conference).get("version", ""))
-    except Exception:
-        pass
-    manifest = write_review_artifacts(
-        packet,
-        output_dir,
-        source_graph=pg,
-        template_path=template_path,
-        paper_id=packet_dir.name,
-        paper_path=paper_pdf,
-        source_graph_path=graph_path,
-        source_session_id=imported.source_session_id,
-        model_map=resolved_model_map,
-        preset=preset,
-        prompt_pack_version=prompt_pack_version,
-        artifact_description_assumed_present=ad_assumed_present,
-        artifact_description_status=ad_status,
-        run_id=output_subdir,
-        context_mode=context_mode.value,
-    )
-    return {
-        "paper_id": packet_dir.name,
-        "status": "completed",
-        "session_id": packet.session_id,
-        "output_dir": str(output_dir),
-        "run_id": output_subdir,
-        "manifest": manifest,
-    }
+    await _start_pipeline_task(session.session_id, review_and_export(), bus, ctl)
+    if not outcome:
+        failed = await _session_manager.get(session.session_id)
+        raise RuntimeError(failed.error or "Packet review stopped before export completed")
+    return outcome
 
 
 async def run_packet_reviews(
@@ -3032,7 +2989,7 @@ async def start_packet_review(body: PacketReviewBody):
             **result,
         })
 
-    asyncio.create_task(_run())
+    start_background_task(_run())
     return {
         "batch_id": batch_id,
         "status": "running",

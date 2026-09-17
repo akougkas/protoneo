@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ..config.schema import AgentConfig, AppManifest, DeliberationConfig, ProtoNeoConfig
 from ..deliberation.engine import DeliberationEngine
@@ -28,6 +28,7 @@ from ..llm.registry import CapabilityRegistry
 from ..llm.settings import build_vlm_config
 from .events import SessionEventBus
 from .pipeline_control import PipelineControl
+from .tasks import start_session_task
 
 logger = logging.getLogger("protoneo.api")
 
@@ -157,6 +158,10 @@ async def _run_with_events(
             deliberation_config=delib_config,
             user_message=user_message,
             on_event=lambda evt_type, data: bus.emit(evt_type, data),
+            before_turn=(
+                _pipeline_controls[session_id].wait_if_paused
+                if session_id in _pipeline_controls else None
+            ),
         )
         bus.emit("completed", {"result": result.model_dump(mode="json")})
     except Exception as e:
@@ -184,6 +189,7 @@ async def _auto_discover_after_login():
             force_refresh=True,
         )
 
+        settings = load_settings()  # Preserve edits made while discovery was in flight.
         cached, _ = _discovery_cache_updates(results, settings.discovered_models)
         settings.discovered_models = {**settings.discovered_models, **cached}
         save_settings(settings)
@@ -266,7 +272,14 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
     async def put_settings(body: dict[str, Any]):
         """Update settings (partial merge)."""
         from ..llm.settings import update_settings
-        updated = update_settings(body)
+        try:
+            updated = update_settings(body)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail="; ".join(
+                f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in exc.errors()
+            )) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if _llm_client is not None:
             _llm_client.registry = CapabilityRegistry.from_settings(updated)
         return updated.model_dump()
@@ -354,6 +367,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             force_refresh=True,
         )
 
+        settings = load_settings()
         cached, live_success = _discovery_cache_updates(results, settings.discovered_models)
         settings.discovered_models = {**settings.discovered_models, **cached}
         for group_name in ("localhost", "lan"):
@@ -914,7 +928,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         session = await _session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        if session.status == SessionStatus.RUNNING:
+        if session.status == SessionStatus.RUNNING or session_id in _pipeline_controls:
             raise HTTPException(status_code=409, detail="Session already running")
 
         cfg = session.config
@@ -928,8 +942,15 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         bus = SessionEventBus()
         _event_buses[session_id] = bus
-        asyncio.create_task(
-            _run_with_events(session_id, agent_configs, delib_config, req.message, bus)
+        try:
+            _engine.validate_config(agent_configs, delib_config)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        session.status, session.error = SessionStatus.RUNNING, None
+        await _session_manager.update(session)
+        start_session_task(
+            session_id, _run_with_events(session_id, agent_configs, delib_config, req.message, bus),
+            sessions=_session_manager, bus=bus, control=PipelineControl(), controls=_pipeline_controls,
         )
 
         return {"session_id": session_id, "status": "running"}
@@ -939,9 +960,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         session = await _session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        session.status = SessionStatus.STOPPED
-        await _session_manager.update(session)
-        return {"session_id": session_id, "status": "stopped"}
+        return await pipeline_cancel(session_id)
 
     # ── WebSocket streaming ─────────────────────────────────
 
@@ -986,17 +1005,28 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
                             cfg = current.config
                             ac = {k: AgentConfig(**v) for k, v in cfg.get("agents", {}).items()}
                             dc = DeliberationConfig(**cfg.get("deliberation", {}))
-                            asyncio.create_task(
-                                _run_with_events(session_id, ac, dc, msg.get("message", ""), bus)
+                            if session_id in _pipeline_controls:
+                                continue
+                            _engine.validate_config(ac, dc)
+                            current.status, current.error = SessionStatus.RUNNING, None
+                            await _session_manager.update(current)
+                            bus.reset()
+                            start_session_task(
+                                session_id, _run_with_events(session_id, ac, dc, msg.get("message", ""), bus),
+                                sessions=_session_manager, bus=bus, control=PipelineControl(), controls=_pipeline_controls,
                             )
             except Exception:
                 pass
+            finally:
+                SessionEventBus._enqueue(queue, {"type": "_disconnected"})
 
         read_task = asyncio.create_task(read_client())
 
         try:
             while True:
                 event = await queue.get()
+                if event["type"] == "_disconnected":
+                    break
                 await websocket.send_json(event)
                 # Only terminate on unrecoverable errors.
                 # Keep the connection alive after "completed" so
@@ -1377,7 +1407,7 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
 
         if bus:
             bus.emit("pipeline_cancelled", {"message": "Pipeline cancelled"})
-            bus.emit("error", {"detail": "Pipeline cancelled"})
+
 
         return {"session_id": session_id, "status": "cancelled"}
 
@@ -1399,6 +1429,13 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         if body.edited_edge_types is not None:
             ontology.edge_types = [EdgeType(**rt) for rt in body.edited_edge_types]
         _session_ontologies[session_id] = ontology
+
+        session = await _session_manager.get(session_id)
+        if session and session.graph_after_step.get("ontology"):
+            saved = KnowledgeGraph.restore_from_snapshot(session.graph_after_step["ontology"])
+            saved.ontology = ontology
+            session.graph_after_step["ontology"] = saved.snapshot()
+            await _session_manager.update(session)
 
         bus = _event_buses.get(session_id)
         if bus:
@@ -1431,38 +1468,61 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             bus = SessionEventBus()
             _event_buses[session_id] = bus
 
+        if session_id in _pipeline_controls or session.status == SessionStatus.RUNNING:
+            raise HTTPException(status_code=409, detail="Stop the active pipeline before rebuilding a graph stage")
+        if not (session.document_text or session.document_markdown):
+            raise HTTPException(status_code=400, detail="No source document available to rebuild the graph")
+        from ..agents.types import Document
+        from ..knowledge.pipeline import GraphPipeline
         step_idx = valid_steps.index(step_name)
-        kg = KnowledgeGraph()
-        if step_idx > 0:
-            prev_step = valid_steps[step_idx - 1]
-            prev_snapshot = session.graph_after_step.get(prev_step)
-            if prev_snapshot:
-                kg = KnowledgeGraph.restore_from_snapshot(prev_snapshot)
-            elif session.knowledge_graph:
-                kg = KnowledgeGraph.model_validate(session.knowledge_graph)
-
-        step_state = StepState(status="running", started_at=_time.time())
-        session.pipeline_steps[step_name] = step_state.model_dump()
-
-        for downstream in valid_steps[step_idx + 1:]:
-            if downstream in session.pipeline_steps:
-                ds = session.pipeline_steps[downstream]
-                if isinstance(ds, dict):
-                    ds["status"] = "pending"
-
+        checkpoint_names = ["metadata", "ontology", "extraction", "coref", "verification", "summary"]
+        keep = set(checkpoint_names[:step_idx])
+        session.checkpoints = [cp for cp in session.checkpoints if cp.stage_name in keep]
+        session.last_checkpoint = session.checkpoints[-1].stage_name if session.checkpoints else ""
+        for stale in valid_steps[step_idx:] + ["independent_reviews", "deliberation", "meta_review"]:
+            session.pipeline_steps.pop(stale, None)
+            session.graph_after_step.pop(stale, None)
+        session.knowledge_graph, session.result, session.error = None, None, None
+        for key in ("final_review", "review_packet", "review_context_audit", "rendered_prompts"):
+            session.app_data.pop(key, None)
+        session.status = SessionStatus.RUNNING
+        session.current_stage = "pre_review"
         await _session_manager.update(session)
+        _session_graphs.pop(session_id, None)
+        _session_ontologies.pop(session_id, None)
+        ctl = PipelineControl()
+        ctl.skip_gate = True
+        bus.reset()
+        manifest = _manifests.get(session.app_name)
+        models = dict(session.config.get("model_map") or {})
+        assignments = session.config.get("agents", {})
+        fallback = next((cfg.get("model") for cfg in assignments.values() if cfg.get("model")), "")
+        for key in ("ontology", "extraction", "coref", "verification"):
+            models.setdefault(key, fallback)
 
-        bus.emit("step_started", {
-            "stage": "pre_review", "step": step_name,
-            "message": f"Running step: {step_name}",
-        })
+        async def rebuild():
+            graph = await GraphPipeline(
+                _llm_client, _session_manager, manifest.domain_config if manifest else None,
+            ).run(
+                session_id, Document(
+                    document_id=uuid.uuid4().hex,
+                    filename=session.config.get("metadata", {}).get("filename", "paper.pdf"),
+                    text=session.document_text or session.document_markdown,
+                    markdown=session.document_markdown,
+                ), bus, ctl, models=models,
+                graph_cache=_session_graphs, ontology_cache=_session_ontologies,
+            )
+            current = await _session_manager.get(session_id)
+            current.knowledge_graph = graph.model_dump(mode="json")
+            current.config.setdefault("metadata", {})["pipeline_mode"] = "graph_only"
+            current.status = SessionStatus.COMPLETED
+            await _session_manager.update(current)
+            bus.emit("completed", {"result": {"graph_only": True}})
 
-        return {
-            "session_id": session_id,
-            "step": step_name,
-            "status": "running",
-            "stale_steps": valid_steps[step_idx + 1:],
-        }
+        start_session_task(session_id, rebuild(), sessions=_session_manager, bus=bus,
+                           control=ctl, controls=_pipeline_controls)
+        return {"session_id": session_id, "step": step_name, "status": "running",
+                "stale_steps": valid_steps[step_idx + 1:]}
 
     @app.post("/api/sessions/{session_id}/pipeline/step/{step_name}/cancel")
     async def cancel_pipeline_step(session_id: str, step_name: str):
@@ -1471,6 +1531,11 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        ctl = _pipeline_controls.get(session_id)
+        if ctl:
+            ctl.cancel()
+        session.status = SessionStatus.STOPPED
+        await _session_manager.update(session)
         if step_name in session.pipeline_steps:
             step_data = session.pipeline_steps[step_name]
             if isinstance(step_data, dict):

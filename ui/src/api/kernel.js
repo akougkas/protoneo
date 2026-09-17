@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const KERNEL_BASE = import.meta.env.VITE_KERNEL_URL || 'http://localhost:5002'
+const KERNEL_BASE = (import.meta.env.VITE_KERNEL_URL || window.location.origin).replace(/\/$/, '')
 
 const kernel = axios.create({
   baseURL: KERNEL_BASE,
@@ -31,18 +31,25 @@ export function getModels() {
   return kernel.get('/api/models')
 }
 
-export function startReview(file, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
+export function startReview(file, conference, modelMap = {}, maxRounds = 2, userInstructions = '', options = {}) {
   const form = new FormData()
   form.append('file', file)
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
+  if (options.fastParse) form.append('fast_parse', 'true')
+  if (options.skipGraph) form.append('skip_graph', 'true')
+  if (options.inspectGraph) form.append('inspect_graph', 'true')
   if (userInstructions) form.append('user_instructions', userInstructions)
   if (options.artifactDescriptionStatus) form.append('artifact_description_status', options.artifactDescriptionStatus)
   if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
   return kernel.post('/api/apps/paper_review/review', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
+}
+
+export function getReviewReadiness(plan) {
+  return kernel.post('/api/apps/paper_review/readiness', plan)
 }
 
 export function getSession(sessionId) {
@@ -222,12 +229,14 @@ export function startBatch(files, conference, modelMap = {}) {
   })
 }
 
-export function startBatchReview(files, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
+export function startBatchReview(files, conference, modelMap = {}, maxRounds = 2, userInstructions = '', options = {}) {
   const form = new FormData()
   files.forEach(f => form.append('files', f))
   form.append('conference', conference)
   form.append('model_map_json', JSON.stringify(modelMap))
   form.append('max_rounds', maxRounds.toString())
+  if (options.skipGraph) form.append('skip_graph', 'true')
+  if (options.fastParse) form.append('fast_parse', 'true')
   if (userInstructions) form.append('user_instructions', userInstructions)
   if (options.artifactDescriptionStatus) form.append('artifact_description_status', options.artifactDescriptionStatus)
   if (options.artifactDescriptionAssumedPresent) form.append('artifact_description_assumed_present', 'true')
@@ -318,7 +327,7 @@ export function exportGraph(sessionId) {
   })
 }
 
-export function importGraphForReview(graphFile, conference, modelMap = {}, maxRounds = 3, userInstructions = '', options = {}) {
+export function importGraphForReview(graphFile, conference, modelMap = {}, maxRounds = 2, userInstructions = '', options = {}) {
   const form = new FormData()
   form.append('graph_file', graphFile)
   form.append('conference', conference)

@@ -330,31 +330,11 @@ class CapabilityRegistry:
             if _raw_model_id(provider, candidate.model_id) == requested_raw_id:
                 return candidate
 
-        requested_tokens = _tokenize(requested_raw_id)
-        requested_norm = _normalize(requested_raw_id)
-
-        best: tuple[float, ModelInfo] | None = None
-        for candidate in candidates:
-            raw_candidate = _raw_model_id(provider, candidate.model_id)
-            candidate_tokens = _tokenize(raw_candidate)
-            candidate_norm = _normalize(raw_candidate)
-
-            score = 0.0
-            if requested_norm and requested_norm in candidate_norm:
-                score += 2.0
-            if candidate_norm and candidate_norm in requested_norm:
-                score += 1.0
-
-            overlap = requested_tokens & candidate_tokens
-            if requested_tokens:
-                score += len(overlap) / len(requested_tokens)
-
-            if score <= 0:
-                continue
-            if best is None or score > best[0]:
-                best = (score, candidate)
-
-        return best[1] if best and best[0] >= 1.0 else None
+        # Formatting aliases may resolve only when unambiguous. Token overlap
+        # must never route one model version or quantization to another.
+        matches = [candidate for candidate in candidates
+                   if _normalize(_raw_model_id(provider, candidate.model_id)) == _normalize(requested_raw_id)]
+        return matches[0] if len(matches) == 1 else None
 
     def get(self, model_id: str) -> ModelInfo:
         """
@@ -383,7 +363,11 @@ class CapabilityRegistry:
         if provider_match is not None:
             return provider_match
 
-        fallback = ModelInfo(model_id=model_id, provider=mapped_provider)
+        fallback = self._build_model_info(
+            provider=mapped_provider, raw_model_id=requested_raw_id,
+            entry={"id": requested_raw_id}, benchmark=None,
+            endpoint=endpoint_map(self._settings).get(mapped_provider),
+        )
         logger.debug("Model %s not in registry, using fallback (provider=%s)", model_id, mapped_provider)
         return fallback
 

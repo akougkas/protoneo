@@ -1,971 +1,295 @@
-"""
-Built-in deliberation patterns.
-
-Each pattern orchestrates agents according to a specific interaction
-model. Patterns are composable: IndependentSynthesis chains a parallel
-phase, an optional round-robin phase, and a sequential synthesis phase.
-"""
+"""Composable execution patterns with bounded calls and validated output commits."""
 
 import asyncio
-import json
-import logging
-import re
 import time
-from typing import Callable
+from collections.abc import Awaitable, Callable
 
 from ..agents.base import BaseAgent
 from ..agents.types import AgentOutput, Message
 from ..llm.errors import sanitize_error_message
+from .policy import DeliberationPolicy
 from .session import SessionContext
 from .types import DeliberationResult, DeliberationRules, PhaseResult
 
-logger = logging.getLogger("protoneo.deliberation.patterns")
-
-
-def _try_extract_json(text: str) -> dict | None:
-    """Best-effort JSON extraction from LLM output for the structured field."""
-    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
-    cleaned = re.sub(r"\n?\s*```\s*$", "", cleaned).strip()
-    try:
-        obj = json.loads(cleaned)
-        if isinstance(obj, dict):
-            return obj
-    except (json.JSONDecodeError, TypeError):
-        pass
-    match = re.search(r"\{[\s\S]*\}", cleaned)
-    if match:
-        try:
-            obj = json.loads(match.group())
-            if isinstance(obj, dict):
-                return obj
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return None
-
-
-_DELTA_KEYS = {
-    "stance_change",
-    "strongest_agreement",
-    "strongest_disagreement",
-    "evidence_correction",
-    "include_in_final_review",
-    "exclude_from_final_review",
-}
-_FULL_REVIEW_KEYS = {
-    "overall_merit",
-    "technical_soundness",
-    "paper_summary",
-    "strengths",
-    "weaknesses",
-    "questions_for_authors",
-}
-
-
-def _is_delta_json(obj) -> bool:
-    return isinstance(obj, dict) and len(_DELTA_KEYS & set(obj)) >= 2
-
-
-def _is_full_review_json(obj) -> bool:
-    return (
-        isinstance(obj, dict)
-        and len(_FULL_REVIEW_KEYS & set(obj)) >= 3
-        and len(_DELTA_KEYS & set(obj)) < 2
-    )
-
-
-def _coerce_to_delta(obj: dict) -> dict:
-    """Salvage a deliberation delta from a full-review JSON."""
-    merit = obj.get("overall_merit", {})
-    score = merit.get("score") if isinstance(merit, dict) else merit
-    try:
-        score = int(score)
-    except (TypeError, ValueError):
-        score = 3
-    strengths = obj.get("strengths") or []
-    weaknesses = obj.get("weaknesses") or []
-    return {
-        "stance_change": {
-            "changed": False,
-            "previous_score": score,
-            "current_score": score,
-            "reason": "Recovered from full-review output.",
-        },
-        "strongest_agreement": {
-            "with_reviewer": "",
-            "issue": strengths[0] if strengths else "",
-            "evidence": "",
-            "decision_impact": "",
-        },
-        "strongest_disagreement": {
-            "with_reviewer": "",
-            "issue": weaknesses[0] if weaknesses else "",
-            "evidence": "",
-            "decision_impact": "",
-        },
-        "evidence_correction": {},
-        "include_in_final_review": {
-            "issue": weaknesses[0] if weaknesses else "",
-            "why": "",
-        },
-        "exclude_from_final_review": {},
-        "_recovered_from_full_review": True,
-    }
-
-# Type alias for the event callback that streams phase-level updates
 EventCallback = Callable[[str, dict], None] | None
+ProgressCallback = Callable[[PhaseResult], Awaitable[None]] | None
+BeforeTurn = Callable[[], Awaitable[None]] | None
 
 
-class SequentialPattern:
-    """
-    Agents run one after another. Each sees all prior outputs.
-    Useful for pipeline workflows (parse -> analyze -> synthesize).
-    """
-
-    async def execute(
-        self,
-        agents: list[BaseAgent],
-        context: SessionContext,
-        user_message: Message,
-        rules: DeliberationRules,
-        on_event: EventCallback = None,
-        stream: bool = False,
-    ) -> PhaseResult:
-        start = time.monotonic()
-        result = PhaseResult(phase_name="sequential", mode="sequential")
-
-        for agent in agents:
-            agent_start = time.monotonic()
-            if on_event:
-                on_event("agent_start", {"agent_id": agent.agent_id, "role": agent.role, "model": agent.model})
-
-            if stream and on_event:
-                response = await agent.process_stream(
-                    context, user_message,
-                    on_token=lambda chunk, aid=agent.agent_id, role=agent.role: on_event(
-                        "token", {"agent_id": aid, "role": role, "chunk": chunk}
-                    ),
+async def _run_agent(
+    agent: BaseAgent, context: SessionContext, message: Message,
+    rules: DeliberationRules, result: PhaseResult, policy: DeliberationPolicy,
+    on_event: EventCallback, stream: bool, round_number: int = 0,
+    before_turn: BeforeTurn = None,
+) -> tuple[Message, AgentOutput] | dict:
+    """Retry invalid or failed answers; never publish an unvalidated response."""
+    started = time.monotonic()
+    identity = {"agent_id": agent.agent_id, "role": agent.role, "model": agent.model}
+    if round_number:
+        identity["round"] = round_number
+    prompt = message.content
+    extra = policy.instructions(result.phase_name, result.mode)
+    if extra and result.mode != "round_robin":
+        prompt += "\n\n" + extra
+    error = ""
+    for attempt in range(1, rules.max_attempts + 1):
+        if before_turn:
+            await before_turn()
+        if on_event:
+            on_event("agent_start", {**identity, "attempt": attempt})
+            on_event("prompt_rendered", {**identity, "phase": result.phase_name, "text": prompt})
+        try:
+            async with asyncio.timeout(rules.timeout_seconds):
+                msg = Message(role="user", content=prompt)
+                if stream and on_event:
+                    response = await agent.process_stream(
+                        context, msg, include_history=False,
+                        on_token=lambda chunk: on_event("token", {**identity, "chunk": chunk}),
+                    )
+                else:
+                    response = await agent.process(context, msg, include_history=False)
+                structured = policy.validate_output(
+                    response.content, phase_name=result.phase_name, mode=result.mode,
+                    agent=agent, context=context,
                 )
-            else:
-                response = await agent.process(context, user_message)
-            context.add_message(response)
-            result.messages.append(response)
-
+            metadata = {**response.metadata, "phase": result.phase_name, "attempts": attempt}
+            if round_number:
+                metadata.update(round=round_number, round_id=f"round-{round_number}",
+                                speaker_id=agent.agent_id, speaker_role=agent.role)
+            response = response.model_copy(update={"metadata": metadata})
             output = AgentOutput(
-                agent_id=agent.agent_id,
-                agent_role=agent.role,
-                content=response.content,
-                structured=_try_extract_json(response.content),
-                metadata=response.metadata,
+                agent_id=agent.agent_id, agent_role=agent.role,
+                content=response.content, structured=structured, metadata=metadata,
             )
-            context.add_output(output)
-            result.outputs.append(output)
+            output.metadata["duration_seconds"] = round(time.monotonic() - started, 3)
+            return response, output
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = (f"No valid response within {rules.timeout_seconds:g}s"
+                     if isinstance(exc, TimeoutError) else sanitize_error_message(exc))
+            if attempt < rules.max_attempts:
+                if on_event:
+                    on_event("agent_retry", {**identity, "attempt": attempt + 1, "message": error})
+                # Keep the same source and peer context. Do not seed an invalid answer
+                # as evidence, or fabricate a structured object to conceal the failure.
+                prompt = message.content + ("\n\n" + extra if extra else "") + (
+                    f"\n\nYour previous response could not be accepted: {error}. "
+                    "Return a complete answer satisfying the output contract."
+                )
+    failure = {**identity, "error": error}
+    if on_event:
+        on_event("agent_error", failure)
+    return failure
 
-            if on_event:
-                usage = response.metadata.get("usage", {})
-                on_event("agent_done", {
-                    "agent_id": agent.agent_id,
-                    "role": agent.role,
-                    "model": agent.model,
-                    "duration_seconds": round(time.monotonic() - agent_start, 1),
-                    "tokens": usage.get("total_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
-                })
 
-            # Next agent's user message is the previous agent's output
-            user_message = Message(role="user", content=response.content)
-
-        result.duration_seconds = time.monotonic() - start
-        return result
+async def _commit(
+    response: Message, output: AgentOutput, context: SessionContext,
+    result: PhaseResult, on_event: EventCallback, on_progress: ProgressCallback,
+) -> None:
+    if output.metadata.get("round"):
+        output.metadata["deliberation_turn"] = len(result.outputs) + 1
+    context.add_message(response)
+    context.add_output(output)
+    result.messages.append(response)
+    result.outputs.append(output)
+    if on_progress:
+        await on_progress(result)
+    if on_event:
+        usage = output.metadata.get("usage", {})
+        on_event("agent_done", {
+            "agent_id": output.agent_id, "role": output.agent_role,
+            "model": output.metadata.get("model", ""),
+            "round": output.metadata.get("round", 0),
+            "content": output.content, "structured": output.structured,
+            "duration_seconds": output.metadata.get("duration_seconds", 0),
+            "tokens": usage.get("total_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+        })
 
 
 class ParallelPattern:
-    """
-    All agents run concurrently on the same input. They do not see
-    each other's outputs (blind). Used for independent review phases.
-    """
-
     async def execute(
-        self,
-        agents: list[BaseAgent],
-        context: SessionContext,
-        user_message: Message,
-        rules: DeliberationRules,
-        on_event: EventCallback = None,
-        stream: bool = False,
+        self, agents: list[BaseAgent], context: SessionContext,
+        user_message: Message, rules: DeliberationRules,
+        on_event: EventCallback = None, stream: bool = False, *,
+        policy: DeliberationPolicy | None = None, phase_name: str = "parallel",
+        on_progress: ProgressCallback = None, before_turn: BeforeTurn = None,
+        result: PhaseResult | None = None,
     ) -> PhaseResult:
-        start = time.monotonic()
-        result = PhaseResult(phase_name="parallel", mode="parallel")
+        started = time.monotonic()
+        result = result or PhaseResult(phase_name=phase_name, mode="parallel")
+        policy = policy or DeliberationPolicy()
+        done = {o.agent_id for o in result.outputs}
+        result.failed_agents = []
+        semaphore = asyncio.Semaphore(rules.max_concurrency)
+        # Each participant receives the same pre-phase state, including on retry.
+        snapshot = context.snapshot()
 
-        failed_agents: list[dict] = []
-        if on_event:
-            on_event("prompt_rendered", {
-                "phase": "independent_review",
-                "text": user_message.content,
-            })
+        async def run(agent):
+            async with semaphore:
+                return await _run_agent(agent, snapshot, user_message, rules, result,
+                                        policy, on_event, stream, before_turn=before_turn)
 
-        async def run_agent(agent: BaseAgent) -> tuple[Message, AgentOutput]:
-            agent_start = time.monotonic()
-            if on_event:
-                on_event("agent_start", {"agent_id": agent.agent_id, "role": agent.role, "model": agent.model})
-
-            if stream and on_event:
-                response = await agent.process_stream(
-                    context, user_message, include_history=False,
-                    on_token=lambda chunk, aid=agent.agent_id, role=agent.role: on_event(
-                        "token", {"agent_id": aid, "role": role, "chunk": chunk}
-                    ),
-                )
-            else:
-                response = await agent.process(
-                    context, user_message, include_history=False
-                )
-
-            output = AgentOutput(
-                agent_id=agent.agent_id,
-                agent_role=agent.role,
-                content=response.content,
-                structured=_try_extract_json(response.content),
-                metadata=response.metadata,
-            )
-
-            if on_event:
-                usage = response.metadata.get("usage", {})
-                on_event("agent_done", {
-                    "agent_id": agent.agent_id,
-                    "role": agent.role,
-                    "model": agent.model,
-                    "duration_seconds": round(time.monotonic() - agent_start, 1),
-                    "tokens": usage.get("total_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
-                })
-
-            return response, output
-
-        tasks = [run_agent(agent) for agent in agents]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Collect agents that need retry (exceptions or empty output)
-        retry_agents: list[BaseAgent] = []
-
-        for i, r in enumerate(results):
-            if isinstance(r, Exception):
-                agent = agents[i]
-                error = sanitize_error_message(r)
-                logger.warning("Agent %s (%s) failed in parallel phase: %s (will retry)", agent.agent_id, agent.role, error)
-                retry_agents.append(agent)
-                if on_event:
-                    on_event("agent_warning", {"agent_id": agent.agent_id, "role": agent.role, "message": f"Failed: {error}. Retrying..."})
-                continue
-            response, output = r
-            # Fix 1: Check for empty content after thinking-strip
-            if not output.content or not output.content.strip():
-                agent = agents[i]
-                logger.warning(
-                    "Agent %s (%s) returned empty output, scheduling retry",
-                    agent.agent_id, agent.role,
-                )
-                retry_agents.append(agent)
-                if on_event:
-                    on_event("agent_warning", {
-                        "agent_id": agent.agent_id, "role": agent.role,
-                        "message": "Empty output, retrying...",
-                    })
-                continue
-            context.add_message(response)
-            context.add_output(output)
-            result.messages.append(response)
-            result.outputs.append(output)
-
-        # Retry failed/empty agents once (sequentially to avoid contention)
-        for agent in retry_agents:
-            logger.info("Retrying agent %s (%s)", agent.agent_id, agent.role)
-            if on_event:
-                on_event("agent_retry", {"agent_id": agent.agent_id, "role": agent.role})
-            try:
-                response, output = await run_agent(agent)
-                if output.content and output.content.strip():
-                    context.add_message(response)
-                    context.add_output(output)
-                    result.messages.append(response)
-                    result.outputs.append(output)
-                    logger.info("Retry succeeded for agent %s", agent.agent_id)
+        tasks = [asyncio.create_task(run(agent)) for agent in agents if agent.agent_id not in done]
+        try:
+            for task in asyncio.as_completed(tasks):
+                item = await task
+                if isinstance(item, dict):
+                    result.failed_agents.append(item)
                 else:
-                    logger.error("Agent %s still empty after retry", agent.agent_id)
-                    failed_agents.append({
-                        "agent_id": agent.agent_id, "role": agent.role,
-                        "error": "Empty output after retry",
-                    })
-                    if on_event:
-                        on_event("agent_error", {
-                            "agent_id": agent.agent_id, "role": agent.role,
-                            "error": "Empty output after retry",
-                        })
-            except Exception as retry_exc:
-                error = sanitize_error_message(retry_exc)
-                logger.error("Retry failed for agent %s: %s", agent.agent_id, error)
-                failed_agents.append({
-                    "agent_id": agent.agent_id, "role": agent.role,
-                    "error": error,
-                })
-                if on_event:
-                    on_event("agent_error", {
-                        "agent_id": agent.agent_id, "role": agent.role,
-                        "error": f"Retry failed: {error}",
-                    })
+                    await _commit(*item, context, result, on_event, on_progress)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Completion order should not bias the next phase's participant order.
+            order = {agent.agent_id: i for i, agent in enumerate(agents)}
+            result.outputs.sort(key=lambda o: order[o.agent_id])
+            result.messages.sort(key=lambda m: order[m.agent_id])
+            result.duration_seconds += time.monotonic() - started
+        return result
 
-        result.failed_agents = failed_agents
-        result.duration_seconds = time.monotonic() - start
-        if failed_agents:
-            logger.warning(
-                "Parallel phase completed with %d/%d agents failed: %s",
-                len(failed_agents), len(agents),
-                [f["agent_id"] for f in failed_agents],
-            )
+
+class SequentialPattern:
+    async def execute(
+        self, agents: list[BaseAgent], context: SessionContext,
+        user_message: Message, rules: DeliberationRules,
+        on_event: EventCallback = None, stream: bool = False, *,
+        policy: DeliberationPolicy | None = None, phase_name: str = "sequential",
+        on_progress: ProgressCallback = None, before_turn: BeforeTurn = None,
+        result: PhaseResult | None = None,
+    ) -> PhaseResult:
+        started = time.monotonic()
+        result = result or PhaseResult(phase_name=phase_name, mode="sequential")
+        policy = policy or DeliberationPolicy()
+        done = {o.agent_id: o for o in result.outputs}
+        result.failed_agents = []
+        try:
+            for agent in agents:
+                if agent.agent_id in done:
+                    output = done[agent.agent_id]
+                else:
+                    item = await _run_agent(agent, context, user_message, rules, result,
+                                            policy, on_event, stream, before_turn=before_turn)
+                    if isinstance(item, dict):
+                        result.failed_agents.append(item)
+                        break  # Downstream agents cannot consume a missing pipeline result.
+                    response, output = item
+                    await _commit(response, output, context, result, on_event, on_progress)
+                if rules.visibility == "open":
+                    user_message = Message(role="user", content=output.content)
+        finally:
+            result.duration_seconds += time.monotonic() - started
         return result
 
 
 class RoundRobinPattern:
-    """
-    Agents take turns responding in deliberation rounds.
-
-    Each agent receives a self-contained prompt with the paper context,
-    all peer reviews (labeled by role), and prior deliberation turns.
-    History is NOT inherited from the session context to avoid
-    duplicate, unlabeled review content that biases toward agreement.
-    """
-
     async def execute(
-        self,
-        agents: list[BaseAgent],
-        context: SessionContext,
-        rules: DeliberationRules,
-        on_event: EventCallback = None,
-        stream: bool = False,
-        paper_context: str = "",
+        self, agents: list[BaseAgent], context: SessionContext, rules: DeliberationRules,
+        on_event: EventCallback = None, stream: bool = False, paper_context: str = "", *,
+        policy: DeliberationPolicy | None = None, phase_name: str = "round_robin",
+        on_progress: ProgressCallback = None, before_turn: BeforeTurn = None,
+        result: PhaseResult | None = None,
     ) -> PhaseResult:
-        start = time.monotonic()
-        result = PhaseResult(phase_name="round_robin", mode="round_robin")
-
-        # Separate Phase 1 independent reviews from deliberation outputs.
-        # Independent reviews are the first output per agent_id.
-        independent_reviews: dict[str, AgentOutput] = {}
-        for agent_id, outputs in context.agent_outputs.items():
-            if outputs:
-                independent_reviews[agent_id] = outputs[0]
-
-        # Track deliberation turns separately (accumulated across rounds).
-        deliberation_turns: list[AgentOutput] = []
-
-        def _phase_context(phase_name: str) -> str:
-            phase_contexts = context.metadata.get("phase_contexts", {})
-            if not isinstance(phase_contexts, dict):
-                return ""
-            value = phase_contexts.get(phase_name, "")
-            return value if isinstance(value, str) else ""
-
-        def _build_deliberation_prompt(
-            current_agent_id: str,
-            current_role: str,
-            round_num: int,
-        ) -> str:
-            """Build a self-contained deliberation prompt.
-
-            Contains: paper context (truncated), all independent reviews
-            labeled by role, prior deliberation turns, and instructions
-            to engage with specific peer arguments.
-            """
-            sections = []
-
-            # 1. Optional app-provided source context. The kernel does not parse
-            # app-specific prompt headings; applications decide what compact
-            # evidence context is useful in later phases.
-            source_context = _phase_context("deliberation")
-            if source_context:
-                sections.append(
-                    "## Source Context\n\n"
-                    "The full initial context was provided during independent review. "
-                    "Below is the app-provided evidence context for this deliberation phase.\n\n"
-                    + source_context
-                )
-
-            # 2. All independent reviews, clearly labeled
-            sections.append("## Independent Reviews from the Panel")
-            for agent_id, review in independent_reviews.items():
-                if agent_id == current_agent_id:
-                    label = f"YOUR INDEPENDENT REVIEW ({review.agent_role})"
-                else:
-                    label = f"PEER REVIEW: {review.agent_role}"
-                sections.append(
-                    f"--- [{label}] ---\n"
-                    f"{review.content}\n"
-                    f"--- [END {label.split(':')[0].strip()}] ---"
-                )
-
-            # 3. Prior deliberation turns (if round > 1)
-            if deliberation_turns:
-                sections.append("## Prior Deliberation Exchanges")
-                for turn in deliberation_turns:
-                    round_n = turn.metadata.get("round", "?")
-                    sections.append(
-                        f"--- [Round {round_n}: {turn.agent_role}] ---\n"
-                        f"{turn.content}\n"
-                        f"--- [END Round {round_n}] ---"
-                    )
-
-            # 4. Score diversity check
-            _tmp_phase = PhaseResult(
-                phase_name="_diversity_check", mode="parallel",
-                outputs=list(independent_reviews.values()),
-            )
-            extracted_scores = _extract_merit_scores(_tmp_phase)
-            unique_scores = set(extracted_scores)
-            if len(extracted_scores) >= 3 and len(unique_scores) == 1:
-                unanimous_score = int(unique_scores.pop())
-                sections.append(
-                    f"## Score Diversity Alert\n\n"
-                    f"**All {len(extracted_scores)} reviewers independently "
-                    f"assigned the same merit score ({unanimous_score}).** "
-                    f"Unanimous agreement before deliberation is statistically "
-                    f"unusual and may indicate anchoring bias rather than genuine "
-                    f"consensus. Before confirming your score, actively consider "
-                    f"whether the paper deserves a score one point higher or lower "
-                    f"than the current unanimous value. Identify the strongest "
-                    f"argument for each direction."
-                )
-
-            # 5. Deliberation instructions
-            peer_roles = [
-                r.agent_role for aid, r in independent_reviews.items()
-                if aid != current_agent_id
-            ]
-            peer_list = ", ".join(peer_roles) if peer_roles else "your co-reviewers"
-            deliberation_contract = (
-                "\n\nReturn only a concise deliberation delta JSON object. "
-                "Do not regenerate the full independent-review schema and do "
-                "not repeat your full review. Use exactly these top-level fields:\n"
-                "{\n"
-                "  \"stance_change\": {\"changed\": false, \"previous_score\": 3, \"current_score\": 3, \"reason\": \"\"},\n"
-                "  \"strongest_agreement\": {\"with_reviewer\": \"\", \"issue\": \"\", \"evidence\": \"\", \"decision_impact\": \"\"},\n"
-                "  \"strongest_disagreement\": {\"with_reviewer\": \"\", \"issue\": \"\", \"evidence\": \"\", \"decision_impact\": \"\"},\n"
-                "  \"evidence_correction\": {\"claim_to_correct\": \"\", \"correction\": \"\", \"source\": \"\"},\n"
-                "  \"include_in_final_review\": {\"issue\": \"\", \"why\": \"\"},\n"
-                "  \"exclude_from_final_review\": {\"issue\": \"\", \"why\": \"\"}\n"
-                "}\n"
-                "Use manuscript evidence. Use graph relationship evidence only "
-                "when the review context says graph relationships passed the "
-                "quality threshold. Keep the response short and evidence-facing. "
-                "Do not include hidden chain-of-thought."
-            )
-
-            if round_num == 0:
-                delib_instructions = (
-                    f"## Deliberation Task (Round {round_num + 1})\n\n"
-                    f"You are the **{current_role}**. The other panel members "
-                    f"are: {peer_list}.\n\n"
-                    f"This is a committee discussion, not a poll. Your job is "
-                    f"to help the panel reach a well-reasoned collective judgment "
-                    f"by contributing your unique perspective and engaging seriously "
-                    f"with your peers' reasoning.\n\n"
-                    f"### What to do\n\n"
-                    f"**1. Respond to specific peers by name.** Do not just restate "
-                    f"your own review. Address what other reviewers said. When the "
-                    f"Technical Reviewer flags a methodology gap, the Novelty Reviewer "
-                    f"should weigh in on whether that gap also affects the novelty "
-                    f"claim. When the Skeptic raises a concern, others should either "
-                    f"supply manuscript evidence that mitigates it or explain why it "
-                    f"matters more (or less) than the Skeptic claims. If there are "
-                    f"at least two peers, engage at least two distinct peer claims.\n\n"
-                    f"**2. Build arguments together.** The best committee discussions "
-                    f"produce insights no single reviewer had alone. Connect "
-                    f"observations across reviews: if two reviewers noticed related "
-                    f"problems from different angles, synthesize them into a stronger "
-                    f"joint observation. If a strength identified by one reviewer "
-                    f"partly mitigates a weakness flagged by another, say so explicitly.\n\n"
-                    f"**3. Contribute new observations.** Reading your peers' reviews "
-                    f"may prompt you to notice something you missed, or to re-examine "
-                    f"a section of the paper you initially skimmed. If a peer's "
-                    f"criticism sends you back to the manuscript and you find "
-                    f"supporting or contradicting evidence, report it.\n\n"
-                    f"**4. Disagree constructively when warranted.** If you believe "
-                    f"a peer is wrong, say so with evidence. Do not flatten your "
-                    f"assessment to match the group. A split panel with clearly "
-                    f"articulated reasons is more useful to the meta-reviewer than "
-                    f"artificial unanimity.\n\n"
-                    f"**5. Identify the key decision points.** What are the 2-3 "
-                    f"questions whose answers determine whether this paper should "
-                    f"be accepted? Frame them clearly for the meta-reviewer.\n\n"
-                    f"**6. Update your score if warranted.** If your peers' arguments "
-                    f"genuinely changed your assessment, update your merit score and "
-                    f"explain what convinced you. If not, hold your ground and "
-                    f"explain why. Name the strongest opposing argument even when "
-                    f"you ultimately reject it.\n\n"
-                    f"### What NOT to do\n\n"
-                    f"- Do not simply say \"I agree with the Technical Reviewer.\" "
-                    f"Explain what you agree with and why it matters from your "
-                    f"perspective.\n"
-                    f"- Do not restate your entire independent review. Focus on "
-                    f"what changed, what was reinforced, and what new insights "
-                    f"emerged from reading your peers.\n"
-                    f"- Do not default to the lowest score in the panel. Convergence "
-                    f"toward rejection is not rigor.\n\n"
-                    f"Return your deliberation response as the delta JSON object "
-                    f"specified below."
-                    f"{deliberation_contract}"
-                )
+        started = time.monotonic()
+        result = result or PhaseResult(phase_name=phase_name, mode="round_robin")
+        policy = policy or DeliberationPolicy()
+        saved = {(o.agent_id, o.metadata.get("round")): o for o in result.outputs}
+        # A missing earlier turn changes every later speaker's evidence. Reuse
+        # only the accepted prefix, hydrating it as the conversation advances.
+        prefix = []
+        for number in range(1, rules.max_rounds + 1):
+            offset = (number - 1) % len(agents)
+            for agent in agents[offset:] + agents[:offset]:
+                output = saved.get((agent.agent_id, number))
+                if output is None:
+                    break
+                prefix.append(output)
             else:
-                delib_instructions = (
-                    f"## Deliberation Task (Round {round_num + 1})\n\n"
-                    f"You are the **{current_role}**. This is round "
-                    f"{round_num + 1} of deliberation.\n\n"
-                    f"Review the prior deliberation exchanges above. At this "
-                    f"stage, focus on:\n\n"
-                    f"1. **Resolving open questions** from the previous round. "
-                    f"If a peer asked you to check something in the manuscript, "
-                    f"report what you found. Answer at least one concrete peer "
-                    f"challenge unless no peer challenged your position.\n\n"
-                    f"2. **Narrowing the key decision points.** The meta-reviewer "
-                    f"needs to know: what are the 1-2 issues the committee "
-                    f"considers most important, and where does the panel stand "
-                    f"on each? Preserve real disagreement instead of forcing "
-                    f"consensus.\n\n"
-                    f"3. **Finalizing your score.** State your final merit score "
-                    f"with a one-sentence rationale that references the "
-                    f"deliberation, not just your original review. If your score "
-                    f"changed, identify the peer argument or manuscript evidence "
-                    f"that changed it. If it did not, explain why the best opposing "
-                    f"argument was insufficient.\n\n"
-                    f"Keep this response focused and concise. The meta-reviewer "
-                    f"will read everything.\n\n"
-                    f"Return your response as the delta JSON object specified "
-                    f"below."
-                    f"{deliberation_contract}"
-                )
-
-            sections.append(delib_instructions)
-
-            return "\n\n".join(sections)
-
-        # Track previous round output for duplicate detection
-        prev_round_outputs: dict[str, str] = {}
-
-        for round_num in range(rules.max_rounds):
-            if on_event:
-                on_event("round_start", {"round": round_num + 1})
-
-            for agent in agents:
-                prompt = _build_deliberation_prompt(
-                    agent.agent_id, agent.role, round_num,
-                )
-                msg = Message(role="user", content=prompt)
-
+                continue
+            break
+        result.outputs = prefix
+        done = {(o.agent_id, o.metadata.get("round")): o for o in prefix}
+        result.messages = [m for m in result.messages
+                           if (m.agent_id, m.metadata.get("round")) in done]
+        result.failed_agents = []
+        try:
+            for round_number in range(1, rules.max_rounds + 1):
                 if on_event:
-                    on_event("prompt_rendered", {
-                        "phase": "deliberation",
-                        "text": prompt,
-                        "agent_id": agent.agent_id,
-                        "round": round_num + 1,
-                    })
-                    on_event("agent_start", {
-                        "agent_id": agent.agent_id,
-                        "role": agent.role,
-                        "model": agent.model,
-                        "round": round_num + 1,
-                    })
-
-                try:
-                    if stream and on_event:
-                        response = await agent.process_stream(
-                            context, msg, include_history=False,
-                            on_token=lambda chunk, aid=agent.agent_id, r=round_num + 1: on_event(
-                                "token", {"agent_id": aid, "role": agent.role, "round": r, "chunk": chunk}
-                            ),
-                        )
-                    else:
-                        response = await agent.process(
-                            context, msg, include_history=False,
-                        )
-                except Exception as exc:
-                    error = sanitize_error_message(exc)
-                    logger.warning(
-                        "Agent %s (%s) failed in round %d: %s (retrying once)",
-                        agent.agent_id, agent.role, round_num + 1, error,
-                    )
-                    try:
-                        if stream and on_event:
-                            response = await agent.process_stream(
-                                context, msg, include_history=False,
-                                on_token=lambda chunk, aid=agent.agent_id, r=round_num + 1: on_event(
-                                    "token", {"agent_id": aid, "role": agent.role, "round": r, "chunk": chunk}
-                                ),
-                            )
-                        else:
-                            response = await agent.process(
-                                context, msg, include_history=False,
-                            )
-                    except Exception as retry_exc:
-                        error = sanitize_error_message(retry_exc)
-                        logger.error(
-                            "Agent %s (%s) retry failed in round %d: %s",
-                            agent.agent_id, agent.role, round_num + 1, error,
-                        )
-                        if on_event:
-                            on_event("agent_error", {
-                                "agent_id": agent.agent_id,
-                                "role": agent.role,
-                                "round": round_num + 1,
-                                "error": error,
-                            })
-                        result.failed_agents.append({
-                            "agent_id": agent.agent_id,
-                            "role": agent.role,
-                            "round": round_num + 1,
-                            "error": error,
-                        })
+                    on_event("round_start", {"round": round_number})
+                # Rotate who speaks first so one participant does not always anchor a round.
+                offset = (round_number - 1) % len(agents)
+                for agent in agents[offset:] + agents[:offset]:
+                    if (agent.agent_id, round_number) in done:
+                        context.add_output(done[(agent.agent_id, round_number)])
+                        for message in result.messages:
+                            if message.agent_id == agent.agent_id and message.metadata.get("round") == round_number:
+                                context.add_message(message)
                         continue
-
-                context.add_message(response)
-                result.messages.append(response)
-
-                # Detect near-duplicate outputs across agents in same round
-                content_trimmed = response.content.strip()
-                for other_aid, other_text in prev_round_outputs.items():
-                    if other_aid != agent.agent_id and other_text:
-                        shorter = min(len(content_trimmed), len(other_text))
-                        if shorter > 100:
-                            common = sum(a == b for a, b in zip(content_trimmed, other_text))
-                            similarity = common / shorter
-                            if similarity > 0.90:
-                                logger.warning(
-                                    "Near-duplicate deliberation output: %s and %s "
-                                    "are %.0f%% similar in round %d",
-                                    agent.agent_id, other_aid, similarity * 100, round_num + 1,
-                                )
-                                if on_event:
-                                    on_event("duplicate_warning", {
-                                        "agents": [agent.agent_id, other_aid],
-                                        "similarity": round(similarity, 3),
-                                        "round": round_num + 1,
-                                    })
-                prev_round_outputs[agent.agent_id] = content_trimmed
-
-                round_id = f"round-{round_num + 1}"
-                turn_index = len(deliberation_turns) + 1
-                structured = _try_extract_json(response.content)
-                if _is_full_review_json(structured):
-                    original_structured = structured
-                    logger.warning(
-                        "Agent %s returned full review in deliberation; retrying for delta",
-                        agent.agent_id,
+                    prompt = policy.discussion_prompt(
+                        agent=agent, context=context, source=paper_context,
+                        phase_name=phase_name, round_number=round_number,
+                        blind=rules.visibility == "blind",
                     )
-                    if on_event:
-                        on_event("delta_violation", {
-                            "agent_id": agent.agent_id,
-                            "round": round_num + 1,
-                            "action": "retry",
-                        })
-                    repair_msg = Message(
-                        role="user",
-                        content=(
-                            prompt
-                            + "\n\nIMPORTANT: Your previous answer was a full review. "
-                            "Return ONLY the delta JSON object with the 6 specified keys. "
-                            "Do not include review schema fields."
-                        ),
+                    item = await _run_agent(
+                        agent, context, Message(role="user", content=prompt), rules,
+                        result, policy, on_event, stream, round_number, before_turn,
                     )
-                    try:
-                        response = await agent.process(
-                            context,
-                            repair_msg,
-                            include_history=False,
-                        )
-                        structured = _try_extract_json(response.content)
-                    except Exception:
-                        structured = original_structured
-                    if _is_full_review_json(structured):
-                        structured = _coerce_to_delta(structured)
-                        if on_event:
-                            on_event("delta_violation", {
-                                "agent_id": agent.agent_id,
-                                "round": round_num + 1,
-                                "action": "coerced",
-                            })
-                output = AgentOutput(
-                    agent_id=agent.agent_id,
-                    agent_role=agent.role,
-                    content=response.content,
-                    structured=structured,
-                    metadata={
-                        **response.metadata,
-                        "round": round_num + 1,
-                        "round_id": round_id,
-                        "speaker_id": agent.agent_id,
-                        "speaker_role": agent.role,
-                        "deliberation_turn": turn_index,
-                    },
-                )
-                context.add_output(output)
-                result.outputs.append(output)
-                deliberation_turns.append(output)
-
+                    if isinstance(item, dict):
+                        result.failed_agents.append(item)
+                    else:
+                        await _commit(*item, context, result, on_event, on_progress)
                 if on_event:
-                    on_event("agent_done", {
-                        "agent_id": agent.agent_id,
-                        "role": agent.role,
-                        "model": agent.model,
-                        "round": round_num + 1,
-                    })
-
-        result.duration_seconds = time.monotonic() - start
+                    on_event("round_complete", {"round": round_number})
+        finally:
+            result.duration_seconds += time.monotonic() - started
         return result
 
 
-def _extract_merit_scores(phase: PhaseResult) -> list[float]:
-    """Parse numerical overall_merit scores from phase outputs.
-
-    Searches each output for JSON with an overall_merit.score field.
-    Returns a list of extracted scores (empty if parsing fails).
-    """
-    import json as _json
-    import re as _re
-
-    scores: list[float] = []
-    for output in phase.outputs:
-        text = output.content or ""
-        # Try to find overall_merit in JSON output
-        try:
-            # Strip markdown fences
-            cleaned = _re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
-            cleaned = _re.sub(r"\n?\s*```\s*$", "", cleaned).strip()
-            parsed = _json.loads(cleaned)
-            if isinstance(parsed, dict):
-                merit = parsed.get("overall_merit", {})
-                if isinstance(merit, dict) and "score" in merit:
-                    scores.append(float(merit["score"]))
-                elif isinstance(merit, (int, float)):
-                    scores.append(float(merit))
-                continue
-        except (ValueError, _json.JSONDecodeError):
-            pass
-        # Fallback: search for the pattern in raw text
-        match = _re.search(r'"overall_merit"\s*:\s*\{[^}]*"score"\s*:\s*(\d+)', text)
-        if match:
-            scores.append(float(match.group(1)))
-    return scores
-
-
 class IndependentSynthesisPattern:
-    """
-    The primary pattern for the PC Paper Reviewer product.
-
-    Phase 1: All reviewer agents work in parallel (blind).
-    Phase 2: Round-robin deliberation where reviewers see each other.
-    Phase 3: A synthesizer agent produces the final output.
-    """
-
-    def __init__(self):
-        self._parallel = ParallelPattern()
-        self._round_robin = RoundRobinPattern()
-        self._sequential = SequentialPattern()
+    """Convenience composition; durable execution is handled by DeliberationEngine."""
 
     async def execute(
-        self,
-        reviewers: list[BaseAgent],
-        synthesizer: BaseAgent,
-        context: SessionContext,
-        user_message: Message,
-        rules: DeliberationRules,
-        on_event: EventCallback = None,
-        stream: bool = False,
+        self, reviewers: list[BaseAgent], synthesizer: BaseAgent,
+        context: SessionContext, user_message: Message, rules: DeliberationRules,
+        on_event: EventCallback = None, stream: bool = False,
     ) -> DeliberationResult:
-        start = time.monotonic()
-        phases: list[PhaseResult] = []
-        result_metadata: dict[str, object] = {
-            "configured_deliberation_rounds": rules.max_rounds,
-            "effective_deliberation_rounds": rules.max_rounds,
-            "deliberation_round_policy": "configured",
-            "deliberation_stop_reason": "not_started",
-        }
-
-        # Phase 1: Independent parallel review
+        started = time.monotonic()
+        phases = []
+        policy = DeliberationPolicy()
         if on_event:
             on_event("phase_start", {"phase": "independent_review"})
-        phase1 = await self._parallel.execute(
-            reviewers, context, user_message, rules, on_event, stream=stream
+        phase = await ParallelPattern().execute(
+            reviewers, context, user_message, rules, on_event, stream,
+            phase_name="independent_review",
         )
-        phase1.phase_name = "independent_review"
-        phases.append(phase1)
-
-        if not phase1.outputs:
-            logger.error("All reviewers failed in Phase 1. Cannot proceed to deliberation.")
+        phases.append(phase)
+        if not phase.outputs:
+            raise RuntimeError("All participants failed to produce an independent assessment")
+        successful = {o.agent_id for o in phase.outputs}
+        if rules.max_rounds:
             if on_event:
-                on_event("error", {"message": "All reviewers failed. No reviews to deliberate."})
-            return DeliberationResult(
-                session_id=context.session_id,
-                phases=phases,
-                final_output=None,
-                duration_seconds=time.monotonic() - start,
-                metadata={"aborted": True, "reason": "all_reviewers_failed"},
-            )
-
-        if len(phase1.outputs) < len(reviewers):
-            failed_count = len(reviewers) - len(phase1.outputs)
-            logger.warning(
-                "Phase 1 completed with %d/%d reviewers. Continuing with partial results.",
-                len(phase1.outputs), len(reviewers),
-            )
-            if on_event:
-                on_event("phase_warning", {
-                    "phase": "independent_review",
-                    "message": f"{failed_count} reviewer(s) failed. Continuing with {len(phase1.outputs)} reviews.",
-                })
-
-        # Phase 2: Deliberation (round-robin) with variance-triggered adjustment
-        # Only include reviewers that produced output in Phase 1.
-        if rules.max_rounds > 0:
-            failed_ids = {f["agent_id"] for f in phase1.failed_agents}
-            succeeded_ids = {o.agent_id for o in phase1.outputs}
-            deliberation_reviewers = [
-                r for r in reviewers
-                if r.agent_id not in failed_ids and r.agent_id in succeeded_ids
-            ]
-            if not deliberation_reviewers:
-                logger.error("No reviewers available for deliberation after Phase 1 failures.")
-                result_metadata["deliberation_stop_reason"] = "no_successful_reviewers"
-            else:
-                if len(deliberation_reviewers) < len(reviewers):
-                    excluded = [r.agent_id for r in reviewers if r.agent_id not in succeeded_ids]
-                    logger.warning(
-                        "Excluding %d agent(s) from deliberation (no Phase 1 output): %s",
-                        len(excluded), excluded,
-                    )
-                    if on_event:
-                        on_event("phase_warning", {
-                            "phase": "deliberation",
-                            "message": f"Excluded agents with no Phase 1 output: {excluded}",
-                        })
-
-                # Variance-triggered round adjustment: parse merit scores from
-                # Phase 1 outputs and adapt deliberation depth accordingly.
-                effective_rounds = (
-                    max(2, rules.max_rounds)
-                    if len(deliberation_reviewers) > 1
-                    else rules.max_rounds
-                )
-                if effective_rounds != rules.max_rounds:
-                    result_metadata["deliberation_round_policy"] = "raised_to_minimum_two_round_pc_panel"
-                merit_scores = _extract_merit_scores(phase1)
-                if len(merit_scores) >= 2:
-                    score_spread = max(merit_scores) - min(merit_scores)
-                    if score_spread <= 1.0:
-                        logger.info(
-                            "[Kernel] Consensus achieved (spread=%.1f, scores=%s). "
-                            "Preserving configured deliberation depth: %d rounds.",
-                            score_spread, merit_scores, effective_rounds,
-                        )
-                        if result_metadata["deliberation_round_policy"] == "configured":
-                            result_metadata["deliberation_round_policy"] = "configured_preserved_low_score_spread"
-                        if on_event:
-                            on_event("consensus_detected", {
-                                "spread": score_spread,
-                                "scores": merit_scores,
-                                "effective_rounds": effective_rounds,
-                                "reason": "score spread is low, but configured rounds are preserved for review quality",
-                            })
-                    elif score_spread >= 2.0:
-                        effective_rounds = min(max(effective_rounds, 3), 4)
-                        result_metadata["deliberation_round_policy"] = "deepened_high_score_spread"
-                        logger.info(
-                            "[Kernel] Contested reviews (spread=%.1f, scores=%s). "
-                            "Deep deliberation: %d rounds.",
-                            score_spread, merit_scores, effective_rounds,
-                        )
-                        if on_event:
-                            on_event("contested_detected", {
-                                "spread": score_spread,
-                                "scores": merit_scores,
-                                "effective_rounds": effective_rounds,
-                            })
-                    result_metadata["score_spread"] = score_spread
-                    result_metadata["independent_review_scores"] = merit_scores
-                result_metadata["effective_deliberation_rounds"] = effective_rounds
-
-                adjusted_rules = DeliberationRules(
-                    max_rounds=effective_rounds,
-                    timeout_seconds=rules.timeout_seconds,
-                    visibility=rules.visibility,
-                )
-
-                if on_event:
-                    on_event("phase_start", {"phase": "deliberation"})
-                phase2 = await self._round_robin.execute(
-                    deliberation_reviewers, context, adjusted_rules, on_event,
-                    stream=stream,
-                    paper_context=user_message.content if user_message else "",
-                )
-                phase2.phase_name = "deliberation"
-                phases.append(phase2)
-                result_metadata["deliberation_stop_reason"] = "completed_effective_rounds"
-        else:
-            result_metadata["deliberation_stop_reason"] = "disabled_by_config"
-
-        # Phase 3: Meta-review (synthesis)
+                on_event("phase_start", {"phase": "deliberation"})
+            phases.append(await RoundRobinPattern().execute(
+                [a for a in reviewers if a.agent_id in successful], context, rules,
+                on_event, stream, user_message.content, phase_name="deliberation",
+            ))
+        prompt = policy.synthesis_prompt(
+            user_message.content, [o for p in phases for o in p.outputs],
+            [f for p in phases for f in p.failed_agents],
+        )
         if on_event:
             on_event("phase_start", {"phase": "meta_review"})
-
-        # Build synthesis prompt from all prior outputs
-        all_outputs = []
-        for phase in phases:
-            for o in phase.outputs:
-                all_outputs.append(f"[{o.agent_role}]: {o.content}")
-
-        # Include the original task context so the synthesizer can fact-check
-        # participant outputs against the source material instead of merely
-        # summarizing prior messages.
-        original_context = user_message.content if user_message else ""
-        context_block = ""
-        if original_context:
-            context_block = (
-                "\n\n" + "=" * 60
-                + "\nORIGINAL SOURCE CONTEXT\n"
-                + "=" * 60 + "\n\n"
-                + original_context
-            )
-
-        synthesis_prompt = Message(
-            role="user",
-            content=(
-                "Below are all participant outputs and deliberation messages. "
-                "Synthesize them according to your system prompt and output contract.\n\n"
-                "Use the original source context below to verify evidence-sensitive "
-                "claims before repeating them. Preserve material disagreements and "
-                "corrections from the deliberation rather than flattening them into "
-                "unsupported consensus. If a participant's conclusion conflicts with "
-                "the source context or with their own stated evidence, account for "
-                "that inconsistency in the synthesis.\n\n"
-                + "\n\n---\n\n".join(all_outputs)
-                + context_block
-            ),
+        phase = await SequentialPattern().execute(
+            [synthesizer], context, Message(role="user", content=prompt), rules,
+            on_event, stream, phase_name="meta_review",
         )
-
-        if on_event:
-            on_event("prompt_rendered", {
-                "phase": "meta_review",
-                "text": synthesis_prompt.content,
-            })
-
-        phase3 = await self._sequential.execute(
-            [synthesizer], context, synthesis_prompt, rules, on_event, stream=stream
-        )
-        phase3.phase_name = "meta_review"
-        phases.append(phase3)
-
-        final_output = phase3.outputs[0] if phase3.outputs else None
-        session_id = context.session_id
-
+        phases.append(phase)
+        if not phase.outputs:
+            raise RuntimeError("Synthesis failed to produce a final answer")
         return DeliberationResult(
-            session_id=session_id,
-            phases=phases,
-            final_output=final_output,
-            duration_seconds=time.monotonic() - start,
-            metadata=result_metadata,
+            session_id=context.session_id, phases=phases, final_output=phase.outputs[-1],
+            duration_seconds=time.monotonic() - started,
         )

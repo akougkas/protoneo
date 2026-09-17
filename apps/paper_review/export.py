@@ -64,9 +64,12 @@ def _as_dict(value: Any) -> dict[str, Any]:
 def _score(value: Any, default: int = 3) -> int:
     if isinstance(value, dict):
         value = value.get("score", default)
+    if isinstance(value, bool):
+        return default
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        score = int(value)
+        return score if not isinstance(value, float) or value == score else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -80,7 +83,7 @@ def _rating_label(value: Any, default_score: int = 3) -> str:
     label = _label(value).upper()
     if label in {"NONE", "VERY LOW", "LOW", "MODERATE", "HIGH", "VERY HIGH"}:
         return label
-    return _RATING_BY_SCORE.get(max(1, min(5, _score(value, default_score))), "MODERATE")
+    return _RATING_BY_SCORE.get(_score(value, 0), "NOT ASSESSED")
 
 
 def _expertise_label(final_review: dict[str, Any]) -> str:
@@ -88,44 +91,8 @@ def _expertise_label(final_review: dict[str, Any]) -> str:
     label = _label(value).upper()
     if label in {"NONE", "VERY LOW", "LOW", "MODERATE", "HIGH", "VERY HIGH"}:
         return label
-    score = max(1, min(4, _score(value, 3)))
-    return {1: "NONE", 2: "LOW", 3: "HIGH", 4: "VERY HIGH"}.get(score, "HIGH")
-
-
-def _borderline_lean_accept(final_review: dict[str, Any]) -> bool:
-    readiness = _as_dict(final_review.get("submission_readiness"))
-    status = str(readiness.get("status", "")).lower()
-    haystack = " ".join(
-        str(part or "")
-        for part in (
-            _as_dict(final_review.get("recommended_action")).get("rationale"),
-            _as_dict(final_review.get("overall_merit")).get("rationale"),
-            final_review.get("comments_for_authors"),
-            final_review.get("comments_for_pc"),
-            status,
-        )
-    ).lower()
-    negative_markers = (
-        "lean reject",
-        "weak reject",
-        "below the bar",
-        "not yet ready",
-        "revise before submit",
-        "argue against",
-    )
-    positive_markers = (
-        "lean accept",
-        "weak accept",
-        "above the bar",
-        "ready",
-        "argue for acceptance",
-        "acceptance is warranted",
-    )
-    if any(marker in haystack for marker in negative_markers):
-        return False
-    if any(marker in haystack for marker in positive_markers):
-        return True
-    return len(final_review.get("strengths") or []) >= len(final_review.get("weaknesses") or [])
+    score = _score(value, 0)
+    return {1: "NONE", 2: "LOW", 3: "HIGH", 4: "VERY HIGH"}.get(score, "NOT ASSESSED")
 
 
 def _recommended_action_label(final_review: dict[str, Any]) -> str:
@@ -142,19 +109,16 @@ def _recommended_action_label(final_review: dict[str, Any]) -> str:
     if label in allowed:
         return label
 
-    score = max(1, min(5, _score(value or final_review.get("overall_merit"), 3)))
-    if score == 3:
-        return "WEAK ACCEPT" if _borderline_lean_accept(final_review) else "WEAK REJECT"
-    return _RECOMMENDATION_BY_SCORE.get(score, "WEAK REJECT")
+    # A venue score alone cannot determine an offline form's accept/reject
+    # boundary. Preserve an explicit decision instead of guessing from counts.
+    return "NOT ASSESSED"
 
 
 def _best_paper_label(final_review: dict[str, Any]) -> str:
     bp = _as_dict(final_review.get("best_paper_consideration"))
     if "nominate" in bp:
         return "Yes" if bool(bp.get("nominate")) else "No"
-    if _recommended_action_label(final_review) == "STRONG ACCEPT":
-        return "Yes"
-    return "No"
+    return "NOT ASSESSED"
 
 
 def _text_list(value: Any) -> str:
@@ -309,6 +273,8 @@ def fill_linklings_offline_review_template(
     for title, text in _offline_text_fields(final_review).items():
         _fill_text_response(lines, title, text)
     for title, selected in _offline_choice_fields(final_review).items():
+        if selected == "NOT ASSESSED":
+            raise ValueError(f"Offline review requires an explicit assessment for '{title}'. Complete that field before exporting.")
         _select_multiple_choice(lines, title, selected)
     trailing = "\n" if template_text.endswith("\n") else ""
     return "\n".join(lines) + trailing
@@ -613,7 +579,7 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
         score_parts = []
         if review.overall_merit and review.overall_merit.get("score"):
             label = review.overall_merit.get("label", "")
-            score_parts.append(f"Merit: {review.overall_merit['score']}/5 ({label})")
+            score_parts.append(f"Merit: {review.overall_merit['score']} ({label})")
         if review.expertise and review.expertise.get("score"):
             label = review.expertise.get("label", "")
             score_parts.append(f"Expertise: {review.expertise['score']}")
@@ -755,7 +721,7 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
             score = merit.get("score", "")
             label = merit.get("label", "")
             if score or label:
-                lines.append(f"**Overall Merit:** {score}/5 ({label})")
+                lines.append(f"**Overall Merit:** {score} ({label})")
                 lines.append("")
 
         if chair.get("reviewer_expertise"):

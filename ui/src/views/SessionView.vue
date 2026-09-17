@@ -42,7 +42,7 @@
           :graphData="paperGraphData"
           :loading="graphLoading"
           :currentPhase="graphPhase"
-          :isSimulating="isReviewing"
+          :isSimulating="isGraphBuilding"
           @refresh="refreshGraph"
           @toggle-maximize="toggleMaximize('graph')"
         />
@@ -51,6 +51,7 @@
       <!-- Right Panel: Review Workbench -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
         <SessionPanel
+          :key="sessionId"
           :session-id="sessionId"
           :conference="conference"
           @back="goHome"
@@ -58,6 +59,7 @@
           @graph-step-view="onGraphStepView"
           @request-graph-focus="viewMode = 'split'"
           @stage-changed="onStageChanged"
+          @status-changed="onStatusChanged"
         />
       </div>
     </main>
@@ -80,7 +82,7 @@ const sessionId = computed(() => route.params.sessionId)
 const conference = computed(() => route.query.conference || 'adaptive')
 
 // Layout
-const viewMode = ref('split')
+const viewMode = ref(window.innerWidth < 760 ? 'review' : 'split')
 
 // Session status tracking
 const sessionStatus = ref('running')
@@ -99,7 +101,8 @@ const isReviewing = computed(() =>
   sessionStatus.value === 'running'
 )
 
-const graphPhase = computed(() => isReviewing.value ? 3 : 2)
+const isGraphBuilding = computed(() => isReviewing.value && !sessionMeta.value.skip_graph && currentPhase.value === 'pre_review')
+const graphPhase = computed(() => isGraphBuilding.value ? 1 : 2)
 
 const phaseLabel = computed(() => {
   const labels = {
@@ -119,6 +122,7 @@ const statusClass = computed(() => {
 const statusText = computed(() => {
   if (sessionStatus.value === 'completed') return 'Complete'
   if (sessionStatus.value === 'failed') return 'Failed'
+  if (sessionStatus.value === 'stopped') return 'Stopped'
   if (
     sessionStatus.value === 'created'
     && sessionMeta.value?.pipeline_mode === 'imported_graph_review'
@@ -152,11 +156,17 @@ function goHome() {
   router.push({ name: 'Home' })
 }
 
+function onStatusChanged(value) {
+  sessionStatus.value = value
+  if (['completed', 'failed', 'stopped'].includes(value)) { stopPolling(); refreshGraph() }
+  else if (!statusPoll) statusPoll = setInterval(pollSession, 5000)
+}
+
 function onStageChanged({ stage, step }) {
   currentPhase.value = stage
   // Auto-switch view: show graph during pre-review, show reviews during review
   if (stage === 'pre_review') {
-    if (viewMode.value === 'review') viewMode.value = 'split'
+    if (window.innerWidth >= 760 && !sessionMeta.value.skip_graph && viewMode.value === 'review') viewMode.value = 'split'
   } else if (stage === 'review') {
     if (viewMode.value === 'graph') viewMode.value = 'split'
   }
@@ -181,14 +191,17 @@ async function pollSession() {
     const res = await getSession(sessionId.value)
     const status = res.data?.status
     if (status) sessionStatus.value = status
+    if (res.data.current_stage) currentPhase.value = res.data.current_stage
     // Extract paper title from session config
     const cfg = res.data?.config || res.data?.metadata
     if (cfg) {
       const meta = cfg.metadata || cfg
+      const firstLoad = !Object.keys(sessionMeta.value).length
       sessionMeta.value = meta || {}
+      if (firstLoad && meta.skip_graph) viewMode.value = 'review'
       if (!paperTitle.value && meta.paper_title) paperTitle.value = meta.paper_title
     }
-    if (status === 'completed' || status === 'failed') {
+    if (status === 'completed' || status === 'failed' || status === 'stopped') {
       stopPolling()
     }
   } catch {
@@ -231,7 +244,7 @@ async function onGraphStepView(stepName) {
     if (res.data && res.data.nodes?.length > 0) {
       paperGraphData.value = res.data
     }
-    if (viewMode.value === 'review') viewMode.value = 'split'
+    if (window.innerWidth >= 760 && !sessionMeta.value.skip_graph && viewMode.value === 'review') viewMode.value = 'split'
   } catch (e) {
     console.warn('Step graph not available:', e)
   } finally {
@@ -440,5 +453,12 @@ onUnmounted(() => {
   margin-left: var(--pn-space-2);
   padding-left: var(--pn-space-3);
   border-left: 1px solid var(--pn-border);
+}
+@media (max-width: 760px) {
+  .app-header { height: auto; min-height: 48px; flex-wrap: wrap; gap: 10px; padding: 12px; }
+  .header-left { min-width: 0; }
+  .header-center { position: static; transform: none; order: 3; width: 100%; }
+  .product-tag, .paper-title-header, .session-phase, .step-divider { display: none; }
+  .view-switcher { width: fit-content; margin: 0 auto; }
 }
 </style>

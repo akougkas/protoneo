@@ -8,16 +8,17 @@ import json
 import logging
 import os
 import re
+import tempfile
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger("protoneo.llm.settings")
 
-_SETTINGS_DIR = Path.home() / ".protoneo"
+_SETTINGS_DIR = Path(os.environ.get("PROTONEO_CONFIG_DIR", str(Path.home() / ".protoneo"))).expanduser()
 _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
 
 _LOCALHOST = "localhost"
@@ -65,12 +66,24 @@ _KNOWN_HOSTS = {
 class LocalEndpoint(BaseModel):
     """A configured LLM service endpoint."""
 
-    id: str
-    display_name: str
+    id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+    display_name: str = Field(min_length=1)
     url: str
-    type: str = "openai"  # "openai" or "ollama"
+    type: Literal["openai", "ollama"] = "openai"
     enabled: bool = True
-    location: str = _LOCALHOST  # "localhost" or "lan"
+    location: Literal["localhost", "lan"] = _LOCALHOST
+
+    @field_validator("url")
+    @classmethod
+    def valid_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.query or parsed.fragment:
+            raise ValueError("Endpoint URL must be an HTTP(S) address without a query or fragment")
+        if parsed.username or parsed.password:
+            raise ValueError("Endpoint URL must not contain credentials")
+        _ = parsed.port  # Validate malformed port numbers as well.
+        return value
 
 
 class VlmEndpoint(BaseModel):
@@ -85,10 +98,18 @@ class VlmEndpoint(BaseModel):
         "and any result needed to verify the manuscript. "
         "Output plain text only. Do not include reasoning, scratchpad, markdown, or speculation."
     )
-    temperature: float = 0.1
-    top_p: float = 0.9
-    timeout: float = 120.0
-    concurrency: int = 1
+    temperature: float = Field(default=0.1, ge=0, le=2)
+    top_p: float = Field(default=0.9, gt=0, le=1)
+    timeout: float = Field(default=120.0, gt=0, le=3600)
+    concurrency: int = Field(default=1, ge=1, le=16)
+
+    @model_validator(mode="after")
+    def validate_enabled_endpoint(self):
+        if self.enabled:
+            if not self.model.strip():
+                raise ValueError("Choose a vision model before enabling figure descriptions")
+            self.url = LocalEndpoint.valid_url(self.url)
+        return self
 
 
 def _default_localhost_endpoints() -> list[LocalEndpoint]:
@@ -113,24 +134,7 @@ def _default_localhost_endpoints() -> list[LocalEndpoint]:
 
 
 def _default_lan_endpoints() -> list[LocalEndpoint]:
-    return [
-        LocalEndpoint(
-            id="lan-mini",
-            display_name="Mini",
-            url="http://192.168.86.141:8080/v1",
-            type="openai",
-            location=_LAN,
-            enabled=True,
-        ),
-        LocalEndpoint(
-            id="lan-dynamo",
-            display_name="Dynamo",
-            url="http://192.168.86.143:1234/v1",
-            type="openai",
-            location=_LAN,
-            enabled=True,
-        ),
-    ]
+    return []
 
 
 class ModelPreset(BaseModel):
@@ -146,6 +150,11 @@ class ModelPreset(BaseModel):
     name: str
     description: str = ""
     assignments: dict[str, Any] = Field(default_factory=dict)
+
+
+class PDFParsingOptions(BaseModel):
+    do_ocr: bool = False
+    do_formula_enrichment: bool = False
 
 
 class ProtoNeoSettings(BaseModel):
@@ -165,6 +174,7 @@ class ProtoNeoSettings(BaseModel):
     presets: list[ModelPreset] = Field(default_factory=list)
     active_preset: str = Field(default="", description="Name of the currently active preset")
     vlm_endpoint: VlmEndpoint = Field(default_factory=VlmEndpoint)
+    pdf_options: PDFParsingOptions = Field(default_factory=PDFParsingOptions)
     benchmark_results: list[dict[str, Any]] = Field(default_factory=list)
     discovered_models: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
@@ -465,7 +475,15 @@ def load_settings() -> ProtoNeoSettings:
 def save_settings(settings: ProtoNeoSettings) -> None:
     """Persist settings to disk."""
     _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    _SETTINGS_FILE.write_text(settings.model_dump_json(indent=2))
+    fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=_SETTINGS_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(settings.model_dump_json(indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, _SETTINGS_FILE)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     logger.info("Settings saved to %s", _SETTINGS_FILE)
 
 
@@ -477,13 +495,15 @@ def _merge_endpoint_patch(
     """Merge endpoint patches by id so partial UI saves cannot erase providers."""
     current_by_id = {endpoint.id: endpoint.model_dump() for endpoint in current}
     if not isinstance(patch_value, list):
-        return list(current_by_id.values())
+        raise ValueError("Endpoint settings must be an array")
 
     order = [endpoint.id for endpoint in current]
     for raw_endpoint in patch_value:
+        if isinstance(raw_endpoint, dict) and raw_endpoint.get("id") in current_by_id:
+            raw_endpoint = {**current_by_id[raw_endpoint["id"]], **raw_endpoint}
         normalized = _normalize_endpoint_payload(raw_endpoint, default_location)
         if normalized is None:
-            continue
+            raise ValueError("Each endpoint needs a non-empty HTTP(S) URL")
         endpoint_id = normalized["id"]
         current_by_id[endpoint_id] = {**current_by_id.get(endpoint_id, {}), **normalized}
         if endpoint_id not in order:
@@ -519,8 +539,13 @@ def update_settings(patch: dict[str, Any]) -> ProtoNeoSettings:
         if isinstance(patch.get(dict_key), dict):
             merged[dict_key] = {**merged.get(dict_key, {}), **patch.pop(dict_key)}
 
+    for object_key in ("vlm_endpoint", "pdf_options"):
+        if isinstance(patch.get(object_key), dict):
+            merged[object_key] = {**merged[object_key], **patch.pop(object_key)}
+
     merged.update(patch)
-    updated = ProtoNeoSettings.model_validate(_migrate_settings_data(merged))
+    validated = ProtoNeoSettings.model_validate(merged)
+    updated = ProtoNeoSettings.model_validate(_migrate_settings_data(validated.model_dump()))
     save_settings(updated)
     return updated
 

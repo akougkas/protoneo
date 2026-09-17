@@ -17,7 +17,10 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .client import LLMClient
 
 from .errors import sanitize_error_message
 

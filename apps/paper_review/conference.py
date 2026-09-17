@@ -7,12 +7,19 @@ import os
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ReviewScale(BaseModel):
     scale: list[int] = Field(default_factory=lambda: [1, 5])
     labels: dict[int, str] = Field(default_factory=dict)
+
+    @field_validator("scale")
+    @classmethod
+    def validate_scale(cls, value):
+        if len(value) != 2 or value[0] >= value[1]:
+            raise ValueError("Review scale must contain an increasing [minimum, maximum] pair")
+        return value
 
 
 class ReviewFormConfig(BaseModel):
@@ -47,6 +54,13 @@ class ConferenceProfile(BaseModel):
     preflight_checks: list[str] = Field(default_factory=list)
     graph_pruning_threshold: float = 0.3
 
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, value):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+            raise ValueError("Conference slug must use letters, numbers, hyphens or underscores")
+        return value
+
     def scope_text(self) -> str:
         lines = [self.scope_summary]
         if self.scope_topics:
@@ -70,10 +84,12 @@ def _user_profiles_dir() -> Path:
     configured = os.getenv("PROTONEO_PAPER_REVIEW_PROFILE_DIR", "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".protoneo" / "paper_review" / "profiles"
+    return Path(os.getenv("PROTONEO_CONFIG_DIR", str(Path.home() / ".protoneo"))).expanduser() / "paper_review" / "profiles"
 
 
 def _profile_paths(slug: str) -> list[Path]:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", slug):
+        raise FileNotFoundError(f"Invalid conference slug: {slug}")
     filename = f"{slug}.profile.yaml"
     return [
         _user_profiles_dir() / filename,

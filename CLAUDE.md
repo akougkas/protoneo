@@ -13,7 +13,7 @@ ProtoNeo v0.1.0. Multi-agent deliberation kernel. First app: Paper Review (acade
 
 ```bash
 uv sync                                    # Install deps
-uv run pytest tests/ -q                    # Run all tests (245)
+uv run pytest tests/ -q                    # Run the existing test suite
 uv run python run.py                       # Start kernel on :5002
 cd ui && npm install && npx vite build     # Build frontend
 ```
@@ -30,4 +30,4 @@ cd ui && npm install && npx vite build     # Build frontend
 - `parse_file()` in `run_in_executor` needs a lambda for keyword args (positional spread cannot pass `vlm_config`).
 - FastAPI `Form(...)` (with Ellipsis) makes a form field required. `Form("default")` sets a default.
 - Docling's `PictureDescriptionApiOptions` handles VLM inline. No separate enrichment step exists.
-- Tests mock the LLM client and run without network. 245 total across kernel, OAuth, and paper review.
+- Tests mock the LLM client and run without network. Passing them does not validate live-provider behavior or real-manuscript review quality.

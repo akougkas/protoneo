@@ -26,7 +26,9 @@ from protoneo.deliberation.session import SessionStatus, StageCheckpoint
 from protoneo.deliberation.types import DeliberationResult
 from protoneo.knowledge.graph import KnowledgeGraph
 from protoneo.llm.errors import sanitize_error_message
-from .conference import ConferenceProfile
+from .conference import ConferenceProfile, load_profile
+from .deliberation import PaperReviewPolicy
+from protoneo.llm.structured import extract_json_object
 from .prompts import apply_output_guardrails, prompt_pack_no_chain_of_thought
 from .context_audit import build_context_audit_artifact
 from .review import (
@@ -52,7 +54,7 @@ _session_graphs = get_session_graphs()
 _session_ontologies = get_session_ontologies()
 
 _GRAPH_ARTIFACT_PATTERNS = (
-    re.compile(r"\b\d+\s*/\s*\d+\b[^\n.]*\b(?:claim|claims|method|methods|baseline|baselines|evidence|edges?)\b", re.I),
+    re.compile(r"\b\d+\s*/\s*\d+\b[^\n.]*\b(?:graph nodes?|graph edges?|extracted claims?|extracted methods?)\b", re.I),
     re.compile(r"\b(?:Evidence/Result|COMPARED_AGAINST|linked evidence|evidence links?|baseline comparison edges?|unsupported by graph|graph evidence|graph artifacts?|graph counts?|edge counts?)\b", re.I),
 )
 
@@ -222,7 +224,8 @@ async def _run_review_stage(
 
         if evt_type == "agent_done" and ctl.current_step == "deliberation":
             aid = data.get("agent_id", "")
-            content = _agent_buffers.pop(aid, "")
+            content = data.get("content") or _agent_buffers.pop(aid, "")
+            _agent_buffers.pop(aid, None)
             bus.emit("deliberation_turn", {
                 "agent_id": aid,
                 "role": data.get("role", ""),
@@ -240,12 +243,19 @@ async def _run_review_stage(
         session = await _session_manager.get(sid)
         metadata = (session.config.get("metadata", {}) if session else {}) or {}
         fallback_title = str(metadata.get("paper_title") or metadata.get("filename") or "")
-        web_context, web_metadata = await build_review_web_context(
-            paper_graph,
-            fallback_title=fallback_title,
-        )
+        saved_web = session.app_data.get("web_search") if session and session.result else None
+        if isinstance(saved_web, dict) and "markdown" in saved_web:
+            web_metadata = dict(saved_web)
+            web_context = web_metadata["markdown"]
+        else:
+            web_context, web_metadata = await build_review_web_context(
+                paper_graph,
+                fallback_title=fallback_title,
+            )
         if web_context:
             enriched_message = f"{enriched_message}\n\n{web_context}"
+            phase_contexts = _session_manager.get_context(sid).metadata.setdefault("phase_contexts", {})
+            phase_contexts["deliberation"] = phase_contexts.get("deliberation", "") + "\n\n" + web_context
         web_metadata["markdown"] = web_context
         if session:
             if not hasattr(session, "app_data") or session.app_data is None:
@@ -277,6 +287,10 @@ async def _run_review_stage(
         user_message=enriched_message,
         on_event=on_event,
         stream=stream_tokens,
+        policy=PaperReviewPolicy(load_profile(_session_conference_slug(session))),
+        before_turn=ctl.wait_if_paused,
+        resume=True,
+        finalize_session=False,
     )
 
     # Emit step_completed for the final review step (meta_review)
@@ -351,6 +365,9 @@ def _parse_final_review(raw: str) -> dict[str, Any]:
     Falls back to treating the raw output as comments_for_authors.
     """
     guarded_raw = apply_output_guardrails(raw, no_chain_of_thought=True)
+    parsed = extract_json_object(guarded_raw)
+    if parsed is not None:
+        return sanitize_final_review(parsed)
 
     def _fallback() -> dict[str, Any]:
         return sanitize_final_review({}, fallback_comments=guarded_raw)
@@ -398,8 +415,7 @@ async def _finalize_unified_synthesis(
                 output = phase.outputs[0]
                 break
     if not output:
-        bus.emit("final_review_done", {"review": {}})
-        return
+        raise RuntimeError("No valid synthesis was produced; final review cannot be completed")
 
     final_review = _parse_final_review(output.content)
     initial_scores, final_scores = score_distributions_from_result(result)
@@ -475,6 +491,7 @@ async def _run_graph_pipeline(
             session.document_text = doc.text
             session.document_markdown = doc.markdown or ""
             session.config["agents"] = {k: v.model_dump() for k, v in agent_configs.items()}
+            session.config["model_map"] = model_map
             if delib_config:
                 session.config["deliberation"] = delib_config.model_dump()
             session.config.setdefault("metadata", {})["conference"] = profile.slug
@@ -504,8 +521,8 @@ async def _run_graph_pipeline(
             ctl.enter_stage("pre_review")
             ctl.stage_done("pre_review")
             bus.emit("stage_started", {
-                "stage": "pre_review", "step": "parse",
-                "message": "Skipping graph pipeline (A/B comparison mode)...",
+                "stage": "pre_review",
+                "message": "Manuscript prepared for review without graph enrichment.",
             })
             bus.emit("stage_complete", {"stage": "pre_review"})
 
@@ -566,24 +583,12 @@ async def _run_graph_pipeline(
             "message": "Verifying model availability...",
         })
 
-        def _resolve_graph_model(step_key: str) -> str:
-            resolved = resolve_paper_review_model(
-                step_key,
-                model_map,
-                fallback_keys=("ontology", "graph"),
-                require_local=True,
-                phase_policy="fast_structured",
-            )
-            if not resolved:
-                logger.warning("No local model for graph step '%s'", step_key)
-            return resolved
-
-        resolved_models = {
-            "ontology": _resolve_graph_model("ontology"),
-            "extraction": _resolve_graph_model("extraction"),
-            "coref": _resolve_graph_model("coref"),
-            "verification": _resolve_graph_model("verification"),
-        }
+        from .readiness import resolve_graph_models
+        resolved_models = resolve_graph_models(model_map)
+        session = await _session_manager.get(sid)
+        if session:
+            session.config.setdefault("model_map", {}).update(resolved_models)
+            await _session_manager.update(session)
 
         logger.info(
             "Model map keys: %s | Resolved: %s",
@@ -737,7 +742,7 @@ async def _run_graph_pipeline(
 
     except asyncio.CancelledError:
         logger.info("Pipeline cancelled for session %s", sid)
-        bus.emit("pipeline_cancelled", {"message": "Review cancelled"})
+        raise
     except Exception as e:
         error = sanitize_error_message(e)
         logger.error("Pipeline failed for session %s: %s", sid, error, exc_info=True)
@@ -746,7 +751,7 @@ async def _run_graph_pipeline(
             session.status = SessionStatus.FAILED
             session.error = error
             await _session_manager.update(session)
-        bus.emit("error", {"detail": error})
+        raise
     finally:
         _pipeline_controls.pop(sid, None)
         # Clean up per-session caches to avoid unbounded memory growth

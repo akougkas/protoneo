@@ -148,12 +148,8 @@ class BaseAgent:
         if include_history and context.messages:
             for m in context.messages:
                 role = m.role if m.role in ("user", "assistant") else "assistant"
-                # Qwen jinja templates require the first non-system message to be
-                # a user message. If history starts with assistant, fold it into
-                # the upcoming user message instead of inserting it directly.
                 if len(msgs) == 1 and role == "assistant":
-                    # Will be prepended to user message below
-                    continue
+                    msgs.append({"role": "user", "content": "Prior participant assessments:"})
                 if msgs and msgs[-1]["role"] == role:
                     msgs[-1]["content"] += "\n\n" + m.content
                 else:
@@ -298,6 +294,8 @@ class BaseAgent:
             model=self._model,
             messages=msgs,
             session_id=session_id,
+            max_tokens=self._max_tokens,
+            **self._inference_kwargs(),
         )
 
         return AgentOutput(

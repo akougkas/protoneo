@@ -6,6 +6,7 @@ engine into a complete review workflow.
 """
 
 import json
+import math
 import logging
 import re
 from typing import Any
@@ -396,6 +397,7 @@ def resolve_paper_review_model(
     fallback_keys: tuple[str, ...] = (),
     require_local: bool = False,
     phase_policy: str | None = None,
+    routing_context: tuple | None = None,
 ) -> str:
     """Resolve one paper-review model assignment.
 
@@ -405,8 +407,11 @@ def resolve_paper_review_model(
     3. role/provider preference fallback over active_models
     4. policy-compatible fallback, warning if only reasoning models remain
     """
-    settings, preset_assignments = _load_settings_context()
-    registry = CapabilityRegistry.from_settings(settings)
+    if routing_context is None:
+        settings, preset_assignments = _load_settings_context()
+        registry = CapabilityRegistry.from_settings(settings)
+    else:
+        settings, preset_assignments, registry = routing_context
     policy = policy_for_label(phase_policy) or policy_for_phase(key)
 
     lookup_keys = (key, *fallback_keys)
@@ -416,19 +421,10 @@ def resolve_paper_review_model(
         for lookup_key in lookup_keys
         if explicit.get(lookup_key)
     ]
-    selected, warnings = _select_candidate_for_policy(
-        explicit_candidates,
-        registry=registry,
-        policy=policy,
-        settings=settings,
-        require_local=require_local,
-        allow_soft_policy_override=True,
-        source="explicit",
-    )
-    if selected:
-        for warning in warnings:
-            logger.info("Model routing note for %s: %s", key, warning)
-        return selected
+    # An explicit assignment is a choice, not a candidate to silently replace
+    # with a faster model assigned to another step. Readiness validates it.
+    if explicit_candidates:
+        return explicit_candidates[0]
 
     preset_candidates = [
         _assignment_model_id(preset_assignments.get(lookup_key, ""))
@@ -525,11 +521,13 @@ def _resolve_default_models(roles: list[str] | None = None) -> dict[str, str]:
     preset is authoritative when it assigns a role; active_models only provide
     safe role/provider fallbacks.
     """
-    target_roles = roles or list(_ROLE_PROVIDER_PREFS.keys())
+    target_roles = list(_ROLE_PROVIDER_PREFS.keys()) if roles is None else roles
+    settings, preset = _load_settings_context()
+    routing_context = (settings, preset, CapabilityRegistry.from_settings(settings))
     result: dict[str, str] = {}
     for role in target_roles:
         fallback_keys = ("meta_reviewer",) if role == "meta" else ()
-        model = resolve_paper_review_model(role, fallback_keys=fallback_keys)
+        model = resolve_paper_review_model(role, fallback_keys=fallback_keys, routing_context=routing_context)
         if model:
             result[role] = model
     return result
@@ -619,12 +617,25 @@ def build_agent_configs(
     """
     reviewer_roles = _reviewer_roles_from_profile(profile)
 
-    if include_artifact and "artifact" in profile.optional_agents:
+    # Omitted roles use the venue defaults; an explicit null disables a role.
+    # This also makes the optional reviewer switches actually affect execution.
+    explicit = model_map or {}
+    reviewer_roles = [role for role in reviewer_roles if role not in explicit or explicit[role] is not None]
+    reviewer_roles.extend(role for role in profile.optional_agents
+                          if explicit.get(role) and role not in reviewer_roles)
+    if not reviewer_roles:
+        raise ValueError("Enable at least one independent reviewer")
+    if any(key in explicit and explicit[key] is None for key in ("meta", "meta_reviewer")):
+        raise ValueError("The meta-reviewer is required to synthesize the panel's findings")
+
+    if include_artifact and "artifact" in profile.optional_agents and "artifact" not in reviewer_roles:
         reviewer_roles.append("artifact")
 
     all_roles = reviewer_roles + ["meta"]
-    defaults = _resolve_default_models(roles=all_roles)
     explicit_models = _normalize_model_map(model_map)
+    defaults = _resolve_default_models(roles=[role for role in all_roles
+                                             if role not in explicit_models
+                                             and not (role == "meta" and "meta_reviewer" in explicit_models)])
     explicit_efforts = {
         **_reasoning_effort_map(model_map),
         **(reasoning_effort_map or {}),
@@ -734,7 +745,7 @@ def build_deliberation_config(
     """
     if reviewer_ids is None:
         reviewer_ids = ["technical", "novelty", "clarity", "skeptic"]
-    effective_rounds = 0 if max_rounds <= 0 else max(2, max_rounds)
+    effective_rounds = max_rounds
     return DeliberationConfig(
         pattern="independent_synthesis",
         phases=[
@@ -742,6 +753,7 @@ def build_deliberation_config(
                 name="independent_review",
                 mode="parallel",
                 agents=reviewer_ids,
+                min_successful_agents=min(2, len(reviewer_ids)),
             ),
             PhaseConfig(
                 name="deliberation",
@@ -840,7 +852,7 @@ def parse_review_output(
     )
 
 
-def _validate_score_distribution(scores: dict, max_score: int = 5) -> dict:
+def _validate_score_distribution(scores: dict, max_score: int = 10_000) -> dict:
     """Validate and clean score_distribution from meta-review.
 
     Preserves either reviewer-id -> score maps or score-bucket -> count maps.
@@ -852,24 +864,31 @@ def _validate_score_distribution(scores: dict, max_score: int = 5) -> dict:
         label = str(key).strip()
         if not label:
             continue
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            continue
+        if not math.isfinite(val) or int(val) != val:
+            continue
         if isinstance(val, (int, float)):
             if label.isdigit():
                 score_bucket = int(label)
-                if 1 <= score_bucket <= max_score and int(val) >= 0:
+                if 0 <= score_bucket <= max_score and int(val) >= 0:
                     cleaned[label] = int(val)
             else:
-                cleaned[label] = max(1, min(int(val), max_score))
+                if 0 <= val <= max_score:
+                    cleaned[label] = int(val)
     return cleaned
 
 
-def _valid_review_score(value: Any, max_score: int = 5) -> int | None:
+def _valid_review_score(value: Any, max_score: int = 10_000) -> int | None:
     if isinstance(value, dict):
         value = value.get("score")
+    if isinstance(value, bool):
+        return None
     try:
         score = int(value)
     except (TypeError, ValueError):
         return None
-    return score if 1 <= score <= max_score else None
+    return score if 0 <= score <= max_score and str(value) in (str(score), str(float(score))) else None
 
 
 def _output_payload(output: Any) -> dict[str, Any]:

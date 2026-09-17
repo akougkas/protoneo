@@ -39,7 +39,7 @@
               <line x1="12" y1="8" x2="12.01" y2="8"></line>
             </svg>
           </div>
-          <span class="hint-text">A small amount of content is still processing, recommend manual refresh later</span>
+          <span class="hint-text">Graph preparation complete</span>
           <button class="hint-close-btn" @click="dismissFinishedHint" title="Close Hint">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>

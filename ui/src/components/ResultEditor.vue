@@ -14,6 +14,7 @@
       </div>
     </div>
 
+    <p v-if="editorError" class="editor-error" role="alert">{{ editorError }}</p>
     <div v-if="!editing" class="read-mode">
       <div class="decision-strip">
         <div class="decision-card">
@@ -26,15 +27,15 @@
           <strong>{{ scoreValue(fields.reviewer_expertise) }}</strong>
           <small>{{ scoreLabel(fields.reviewer_expertise) }}</small>
         </div>
-        <div v-if="rawReview.final_recommendation" class="decision-card">
+        <div v-if="displayReview.final_recommendation" class="decision-card">
           <span>Recommendation</span>
-          <strong>{{ scoreValue(rawReview.final_recommendation) }}</strong>
-          <small>{{ scoreLabel(rawReview.final_recommendation) }}</small>
+          <strong>{{ scoreValue(displayReview.final_recommendation) }}</strong>
+          <small>{{ scoreLabel(displayReview.final_recommendation) }}</small>
         </div>
-        <div v-if="rawReview.level_of_confidence || rawReview.confidence" class="decision-card">
+        <div v-if="displayReview.level_of_confidence || displayReview.confidence" class="decision-card">
           <span>Confidence</span>
-          <strong>{{ scoreValue(rawReview.level_of_confidence || rawReview.confidence) }}</strong>
-          <small>{{ scoreLabel(rawReview.level_of_confidence || rawReview.confidence) }}</small>
+          <strong>{{ scoreValue(Object.keys(displayReview.level_of_confidence || {}).length ? displayReview.level_of_confidence : displayReview.confidence) }}</strong>
+          <small>{{ scoreLabel(Object.keys(displayReview.level_of_confidence || {}).length ? displayReview.level_of_confidence : displayReview.confidence) }}</small>
         </div>
       </div>
 
@@ -52,12 +53,12 @@
             </div>
             <button class="field-ask" @click="askField(f.key, f.label)">Ask about this</button>
           </div>
-          <ul v-if="Array.isArray(rawReview[f.key])" class="read-list">
-            <li v-for="(item, i) in rawReview[f.key]" :key="f.key + '-' + i">
+          <ul v-if="Array.isArray(displayReview[f.key])" class="read-list">
+            <li v-for="(item, i) in displayReview[f.key]" :key="f.key + '-' + i">
               {{ formatReviewItem(item) }}
             </li>
           </ul>
-          <div v-else class="read-prose" v-html="md(formatEditorText(rawReview[f.key] ?? fields[f.key]))"></div>
+          <div v-else class="read-prose" v-html="md(formatEditorText(displayReview[f.key] ?? fields[f.key]))"></div>
         </article>
       </div>
 
@@ -76,21 +77,16 @@
       <div class="score-row">
         <div class="score-field">
           <label>Overall Merit</label>
-          <select v-model.number="fields.overall_merit.score" @change="onScoreChange">
-            <option :value="5">5 Strong accept</option>
-            <option :value="4">4 Accept</option>
-            <option :value="3">3 Borderline</option>
-            <option :value="2">2 Weak reject</option>
-            <option :value="1">1 Reject</option>
+          <select aria-label="Overall Merit" v-model.number="fields.overall_merit.score" :disabled="!meritOptions.length" @change="onScoreChange">
+            <option v-if="fields.overall_merit.score == null" :value="undefined" disabled>Not assessed</option>
+            <option v-for="option in meritOptions" :key="option.score" :value="option.score">{{ option.score }} {{ option.label }}</option>
           </select>
         </div>
         <div class="score-field">
           <label>Reviewer Expertise</label>
-          <select v-model.number="fields.reviewer_expertise.score" @change="markDirty">
-            <option :value="4">4 Expert</option>
-            <option :value="3">3 Knowledgeable</option>
-            <option :value="2">2 Some familiarity</option>
-            <option :value="1">1 No familiarity</option>
+          <select aria-label="Reviewer Expertise" v-model.number="fields.reviewer_expertise.score" :disabled="!expertiseOptions.length" @change="onExpertiseChange">
+            <option v-if="fields.reviewer_expertise.score == null" :value="undefined" disabled>Not assessed</option>
+            <option v-for="option in expertiseOptions" :key="option.score" :value="option.score">{{ option.score }} {{ option.label }}</option>
           </select>
         </div>
         <div v-if="lightpassLoading" class="lightpass-indicator">
@@ -109,6 +105,21 @@
           </div>
         </div>
       </div>
+
+      <details class="form-assessments">
+        <summary>Conference form assessments</summary>
+        <p>Unassessed fields stay blank until you choose a rating. Offline exports require these choices.</p>
+        <div class="assessment-grid">
+          <label v-for="[key, label] in formScoreFields" :key="key">{{ label }}
+            <select :aria-label="label" v-model="rawReview[key].label" @change="onFormRatingChange(key)">
+              <option :value="undefined">Not assessed</option>
+              <option v-for="rating in ratingLabels" :key="rating">{{ rating }}</option>
+            </select>
+          </label>
+          <label>Recommended action<select aria-label="Recommended action" v-model="rawReview.recommended_action.label" @change="onFormRatingChange('recommended_action')"><option :value="undefined">Not assessed</option><option v-for="action in actionLabels" :key="action">{{ action }}</option></select></label>
+          <label>Best paper nomination<select aria-label="Best paper nomination" v-model="rawReview.best_paper_consideration.nominate" @change="onNominationChange"><option :value="undefined">Not assessed</option><option :value="false">No</option><option :value="true">Yes</option></select></label>
+        </div>
+      </details>
 
       <div v-for="f in editableFieldDefs" :key="f.key" class="review-field-block">
         <div class="field-header">
@@ -165,8 +176,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch } from 'vue'
-import { refineField as apiRefineField, scoreLightpass, updateFinalReview } from '../api/kernel.js'
+import { ref, reactive, computed, watch } from 'vue'
+import { getConference, refineField as apiRefineField, scoreLightpass, updateFinalReview } from '../api/kernel.js'
 import { renderMarkdown } from '../utils/markdown.js'
 
 const md = renderMarkdown
@@ -175,6 +186,7 @@ const props = defineProps({
   sessionId: { type: String, required: true },
   initialReview: { type: Object, default: () => ({}) },
   chairModel: { type: String, default: '' },
+  conference: { type: String, default: 'adaptive' },
 })
 
 const emit = defineEmits(['review-updated', 'ask-chair', 'dirty-changed'])
@@ -225,13 +237,34 @@ const editableFieldDefs = [
   { key: 'comments_for_pc', label: 'Comments for PC', rows: 5, private: true },
 ]
 
-const meritLabels = { 5: 'Strong accept', 4: 'Accept', 3: 'Borderline', 2: 'Weak reject', 1: 'Reject' }
-const expertiseLabels = { 4: 'Expert', 3: 'Knowledgeable', 2: 'Some familiarity', 1: 'No familiarity' }
+const meritOptions = ref([])
+const expertiseOptions = ref([])
+const editorError = ref('')
+const formScoreFields = [
+  ['relevance', 'Relevance'], ['technical_soundness', 'Technical soundness'],
+  ['technical_importance', 'Technical importance'], ['originality', 'Originality'],
+  ['quality_of_presentation', 'Presentation'], ['level_of_confidence', 'Confidence'],
+  ['level_of_expertise', 'Expertise'],
+]
+const ratingLabels = ['VERY LOW', 'LOW', 'MODERATE', 'HIGH', 'VERY HIGH']
+const actionLabels = ['STRONG REJECT', 'REJECT', 'WEAK REJECT', 'WEAK ACCEPT', 'ACCEPT', 'STRONG ACCEPT']
+function scaleOptions(scale) {
+  if (!scale?.scale) return []
+  const [min, max] = scale.scale
+  return Array.from({ length: Math.min(100, max - min + 1) }, (_, i) => ({ score: min + i, label: scale.labels?.[min + i] || '' }))
+}
+watch(() => props.conference, async slug => {
+  try {
+    const { data } = await getConference(slug)
+    meritOptions.value = scaleOptions(data.review_form?.overall_merit)
+    expertiseOptions.value = scaleOptions(data.review_form?.reviewer_expertise)
+  } catch { editorError.value = 'Could not load the conference scoring scale. Reload before changing scores.' }
+}, { immediate: true })
 
 const rawReview = ref({})
 const fields = reactive({
-  overall_merit: { score: 3, label: 'Borderline' },
-  reviewer_expertise: { score: 3, label: 'Knowledgeable' },
+  overall_merit: {},
+  reviewer_expertise: {},
   paper_summary: '',
   strengths: '',
   weaknesses: '',
@@ -269,7 +302,7 @@ function scoreValue(value) {
 
 function scoreLabel(value) {
   if (!value || typeof value !== 'object') return ''
-  return value.label || value.recommendation || value.status || value.reason || value.rationale || ''
+  return value.label || value.recommendation || value.status || value.reason || value.rationale || 'Not assessed'
 }
 
 function formatReviewItem(value) {
@@ -319,8 +352,11 @@ function hasFieldContent(key) {
 function loadReview(data, { dirty = false } = {}) {
   if (!data || typeof data !== 'object') return
   rawReview.value = deepCopy(data)
-  if (data.overall_merit) fields.overall_merit = { ...fields.overall_merit, ...data.overall_merit }
-  if (data.reviewer_expertise) fields.reviewer_expertise = { ...fields.reviewer_expertise, ...data.reviewer_expertise }
+  fields.overall_merit = deepCopy(data.overall_merit)
+  fields.reviewer_expertise = deepCopy(data.reviewer_expertise)
+  for (const key of [...formScoreFields.map(([key]) => key), 'recommended_action', 'best_paper_consideration']) {
+    if (!rawReview.value[key] || typeof rawReview.value[key] !== 'object') rawReview.value[key] = {}
+  }
   for (const key of Object.keys(fieldLabels)) {
     if (data[key] !== undefined && key in fields) fields[key] = formatEditorText(data[key])
   }
@@ -330,7 +366,7 @@ function loadReview(data, { dirty = false } = {}) {
 
 loadReview(props.initialReview)
 
-watch(() => props.initialReview, (v) => loadReview(v), { deep: true })
+watch(() => props.initialReview, (v) => { if (!isDirty.value && !refineStreaming.value) loadReview(v) }, { deep: true })
 
 function markDirty() {
   isDirty.value = true
@@ -350,28 +386,51 @@ function getAllFields() {
     ...deepCopy(rawReview.value),
     overall_merit: { ...fields.overall_merit },
     reviewer_expertise: { ...fields.reviewer_expertise },
-    ...getTextFields(),
+    ...Object.fromEntries(editableFieldDefs.map(({ key }) => [key,
+      fields[key] === formatEditorText(rawReview.value[key]) ? (rawReview.value[key] ?? '') : fields[key],
+    ])),
   }
+}
+
+const displayReview = computed(getAllFields)
+let scoreRequest = 0
+let refineOriginal = ''
+function onFormRatingChange(key) {
+  delete rawReview.value[key].score
+  markDirty()
+}
+function onNominationChange() {
+  const value = rawReview.value.best_paper_consideration.nominate
+  rawReview.value.best_paper_consideration.label = value === true ? 'Yes' : value === false ? 'No' : ''
+  markDirty()
+}
+function onExpertiseChange() {
+  fields.reviewer_expertise.label = expertiseOptions.value.find(option => option.score === fields.reviewer_expertise.score)?.label || ''
+  markDirty()
 }
 
 async function onScoreChange() {
   const score = fields.overall_merit.score
-  fields.overall_merit.label = meritLabels[score] || ''
+  fields.overall_merit.label = meritOptions.value.find(option => option.score === score)?.label || ''
+  rawReview.value.final_recommendation = { ...fields.overall_merit }
+  rawReview.value.recommended_action = {}
+  rawReview.value.best_paper_consideration = {}
   markDirty()
 
+  const request = ++scoreRequest
   lightpassLoading.value = true
   lightpassSuggestions.value = {}
   try {
     const res = await scoreLightpass(
       props.sessionId, score, fields.overall_merit.label, getTextFields()
     )
-    if (res.data?.suggestions && Object.keys(res.data.suggestions).length > 0) {
+    if (request === scoreRequest && res.data?.suggestions && Object.keys(res.data.suggestions).length > 0) {
       lightpassSuggestions.value = res.data.suggestions
     }
   } catch (e) {
-    console.error('Lightpass failed:', e)
+    if (request === scoreRequest) editorError.value = e.response?.data?.detail || 'Could not generate alignment suggestions. Your score change is preserved.'
   } finally {
-    lightpassLoading.value = false
+    if (request === scoreRequest) lightpassLoading.value = false
   }
 }
 
@@ -401,6 +460,7 @@ function toggleRefine(key) {
 }
 
 function cancelRefine() {
+  if (refineStreaming.value && refiningField.value) fields[refiningField.value] = refineOriginal
   refiningField.value = null
   refineInstruction.value = ''
   refineStreaming.value = false
@@ -408,13 +468,16 @@ function cancelRefine() {
 
 async function sendRefine(key) {
   if (!refineInstruction.value.trim() || refineStreaming.value) return
+  refineOriginal = fields[key]
+  editorError.value = ''
   refineStreaming.value = true
   fields[key] = ''
 
   try {
     await apiRefineField(props.sessionId, key, refineInstruction.value, getTextFields())
   } catch (e) {
-    fields[key] = `Error: ${e.message || 'Refine failed'}`
+    fields[key] = refineOriginal
+    editorError.value = e.response?.data?.detail || e.message || 'Refinement failed; your original text is preserved.'
     refineStreaming.value = false
   }
 }
@@ -437,7 +500,8 @@ function handleRefineDone(field, content) {
 
 function handleRefineError(field, detail) {
   if (field === refiningField.value) {
-    fields[field] = `Error: ${detail}`
+    fields[field] = refineOriginal
+    editorError.value = detail
     refineStreaming.value = false
   }
 }
@@ -479,15 +543,17 @@ async function saveReview() {
   saving.value = true
   try {
     const payload = getAllFields()
-    await updateFinalReview(props.sessionId, payload)
-    rawReview.value = deepCopy(payload)
-    isDirty.value = false
-    emit('dirty-changed', false)
+    const snapshot = JSON.stringify(payload)
+    const response = await updateFinalReview(props.sessionId, payload)
+    if (JSON.stringify(getAllFields()) !== snapshot) { lastSaved.value = 'earlier version; newer edits are unsaved'; return false }
+    const saved = response.data.final_review || payload
+    loadReview(saved)
+    editorError.value = ''
     lastSaved.value = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-    emit('review-updated', payload)
+    emit('review-updated', saved)
     return true
   } catch (e) {
-    console.error('Save failed:', e)
+    editorError.value = e.response?.data?.detail || 'Could not save the review. Your edits are still here.'
     return false
   } finally {
     saving.value = false
@@ -532,6 +598,14 @@ defineExpose({
 </script>
 
 <style scoped>
+.editor-error { color: var(--pn-err); font-size: 13px; line-height: 1.5; }
+.form-assessments { margin: 18px 0; padding: 16px; border: 1px solid var(--pn-border); }
+.form-assessments summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.form-assessments p { font-size: 12px; color: var(--pn-text-muted); line-height: 1.5; }
+.assessment-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.assessment-grid label { display: grid; gap: 6px; font-size: 11px; }
+.assessment-grid select { width: 100%; padding: 8px; }
+
 .final-review {
   border: 1px solid var(--pn-border);
   border-top: 2px solid var(--pn-text);

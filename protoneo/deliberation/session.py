@@ -7,6 +7,9 @@ are stored as JSON on disk (SQLite is a future upgrade path).
 """
 
 import logging
+import copy
+import os
+import tempfile
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -18,6 +21,26 @@ from pydantic import BaseModel, Field, field_validator
 from ..agents.types import AgentOutput, Document, Message
 
 logger = logging.getLogger("protoneo.deliberation.session")
+
+
+def _record_path(directory: Path, record_id: str) -> Path:
+    if not record_id or Path(record_id).name != record_id or "\\" in record_id:
+        raise ValueError("Invalid record ID")
+    return directory / f"{record_id}.json"
+
+
+def _atomic_save(path: Path, content: str) -> None:
+    """A crash must leave either the old or the new checkpoint readable."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 class SessionStatus(str, Enum):
@@ -89,6 +112,18 @@ class SessionContext:
 
     def add_document(self, document: Document) -> None:
         self._documents.append(document)
+
+    def clear_deliberation(self) -> None:
+        self._messages.clear()
+        self._agent_outputs.clear()
+
+    def snapshot(self) -> "SessionContext":
+        view = SessionContext(self.session_id)
+        view._messages = [m.model_copy(deep=True) for m in self._messages]
+        view._agent_outputs = copy.deepcopy(self._agent_outputs)
+        view._documents = list(self._documents)
+        view._metadata = copy.deepcopy(self._metadata)
+        return view
 
 
 class StageCheckpoint(BaseModel):
@@ -163,7 +198,7 @@ class BatchManager:
         self._storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _batch_path(self, batch_id: str) -> Path:
-        return self._storage_dir / f"{batch_id}.json"
+        return _record_path(self._storage_dir, batch_id)
 
     async def create(self, conference: str = "", session_ids: list[str] | None = None) -> Batch:
         batch = Batch(conference=conference, session_ids=session_ids or [])
@@ -192,7 +227,7 @@ class BatchManager:
         return batches
 
     def _save(self, batch: Batch) -> None:
-        self._batch_path(batch.batch_id).write_text(
+        _atomic_save(self._batch_path(batch.batch_id),
             batch.model_dump_json(indent=2)
         )
 
@@ -211,7 +246,7 @@ class SessionManager:
         self._contexts: dict[str, SessionContext] = {}
 
     def _session_path(self, session_id: str) -> Path:
-        return self._storage_dir / f"{session_id}.json"
+        return _record_path(self._storage_dir, session_id)
 
     async def create(
         self,
@@ -246,7 +281,7 @@ class SessionManager:
                 sessions.append(Session.model_validate_json(p.read_text()))
             except Exception:
                 continue
-            if len(sessions) >= limit:
+            if limit > 0 and len(sessions) >= limit:
                 break
         return sessions
 
@@ -256,6 +291,6 @@ class SessionManager:
         return self._contexts[session_id]
 
     def _save(self, session: Session) -> None:
-        self._session_path(session.session_id).write_text(
+        _atomic_save(self._session_path(session.session_id),
             session.model_dump_json(indent=2)
         )

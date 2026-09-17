@@ -100,6 +100,11 @@ def _get_router():
     return router
 
 
+async def _on_startup():
+    from .api import _recover_stale_sessions
+    await _recover_stale_sessions()
+
+
 manifest = AppManifest(
     name="paper_review",
     display_name="Paper Review",
@@ -107,6 +112,7 @@ manifest = AppManifest(
     description="AI peer review panel for academic papers",
     router=_get_router(),
     on_register=_on_register,
+    on_startup=_on_startup,
     domain_config=domain_config,
     profile_dir=Path(__file__).resolve().parent / "profiles",
     prompt_dir=Path(__file__).resolve().parent / "prompts",

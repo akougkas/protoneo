@@ -9,7 +9,17 @@
       <router-link to="/" class="back-link">&larr; Back</router-link>
     </header>
 
-    <!-- No quality banner here - that belongs in Home, not Settings -->
+    <div v-if="settingsError" class="settings-notice error" role="alert">{{ settingsError }}</div>
+    <div v-else-if="saveState" class="settings-notice" role="status">{{ saveState }}</div>
+    <form class="endpoint-add" @submit.prevent="addEndpoint">
+      <div><h2 class="section-title">Connect a model server</h2><p class="section-desc">Add a local or LAN service, then discover its available models.</p></div>
+      <div class="endpoint-add-fields">
+        <label>Name<input v-model="newEndpoint.display_name" required placeholder="Research server" /></label>
+        <label>Server URL<input v-model="newEndpoint.url" required type="url" placeholder="http://server:1234/v1" /></label>
+        <label>Protocol<select v-model="newEndpoint.type"><option value="openai">OpenAI-compatible</option><option value="ollama">Ollama</option></select></label>
+        <button type="submit" class="action-btn-sm" :disabled="addingEndpoint">{{ addingEndpoint ? 'Connecting…' : 'Add server' }}</button>
+      </div>
+    </form>
 
     <!-- ═══════════════ AI PROVIDERS ═══════════════ -->
     <section class="section">
@@ -237,7 +247,7 @@
         <div class="tier-label-row">
           <span class="tier-dot subscription"></span>
           <h3 class="tier-name">Subscriptions</h3>
-          <span class="tier-hint">OAuth login to ChatGPT, Gemini</span>
+          <span class="tier-hint">Connect supported subscription providers</span>
         </div>
         <div class="provider-grid">
           <div v-for="p in subscriptionProviders" :key="p.provider" :class="['provider-card', { connected: p.logged_in || p.has_credentials, disabled: !isProviderEnabled(p.provider) }]">
@@ -467,6 +477,15 @@
       </div>
     </section>
 
+    <section class="section">
+      <h2 class="section-title">PDF extraction</h2>
+      <p class="section-desc">Enable the extra processing your manuscripts need. Both options increase parsing time.</p>
+      <div class="parsing-options">
+        <label class="toggle-label"><input type="checkbox" v-model="settings.pdf_options.do_ocr" @change="saveSettings" /> Read scanned pages with OCR</label>
+        <label class="toggle-label"><input type="checkbox" v-model="settings.pdf_options.do_formula_enrichment" @change="saveSettings" /> Decode mathematical formulas</label>
+      </div>
+    </section>
+
     <!-- ═══════════════ VLM FIGURE DESCRIPTION ═══════════════ -->
     <section class="section">
       <div class="section-header-row">
@@ -489,7 +508,7 @@
           <input
             class="vlm-input"
             type="text"
-            placeholder="http://192.168.86.141:8081/v1/chat/completions"
+            placeholder="http://localhost:8081/v1/chat/completions"
             v-model="settings.vlm_endpoint.url"
             @change="saveSettings"
           />
@@ -499,7 +518,7 @@
           <input
             class="vlm-input"
             type="text"
-            placeholder="qwen3-vl-30b"
+            placeholder="Model ID served by your vision endpoint"
             v-model="settings.vlm_endpoint.model"
             @change="saveSettings"
           />
@@ -547,6 +566,32 @@ import {
   beginProviderLogin, getLoginStatus, completeProviderLogin, providerLogout,
 } from '../api/kernel.js'
 
+const settingsError = ref('')
+const saveState = ref('')
+const addingEndpoint = ref(false)
+const newEndpoint = reactive({ display_name: '', url: '', type: 'openai' })
+let saveQueue = Promise.resolve()
+let pendingSaves = 0
+
+async function addEndpoint() {
+  let url
+  try { url = new URL(newEndpoint.url.trim()) } catch { settingsError.value = 'Enter a valid HTTP or HTTPS server URL.'; return }
+  if (!['http:', 'https:'].includes(url.protocol)) { settingsError.value = 'Server URL must start with http:// or https://.'; return }
+  addingEndpoint.value = true
+  const location = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ? 'localhost' : 'lan'
+  const endpoint = { ...newEndpoint, url: newEndpoint.url.trim(), id: `${location}-${Date.now().toString(36)}`, location, enabled: true }
+  const bucket = location === 'localhost' ? settings.localhost_endpoints : settings.lan_endpoints
+  bucket.push(endpoint)
+  try {
+    if (await saveSettings()) {
+      newEndpoint.display_name = ''; newEndpoint.url = ''
+      await refreshDiscovery()
+    } else {
+      bucket.splice(bucket.indexOf(endpoint), 1)
+    }
+  } finally { addingEndpoint.value = false }
+}
+
 const providers = ref([])
 const discovery = ref({})
 const registeredModels = ref([])
@@ -558,6 +603,7 @@ const settings = reactive({
   active_models: {},
   active_model_options: {},
   vlm_endpoint: { enabled: false, url: '', model: '', prompt: '', temperature: 0.1, top_p: 0.9, timeout: 120, concurrency: 1 },
+  pdf_options: { do_ocr: false, do_formula_enrichment: false },
   benchmark_results: [],
   discovered_models: {},
 })
@@ -1159,7 +1205,7 @@ async function loadAll() {
     discovery.value = discoveryFromSettings(loaded)
     benchmarkResults.value = bRes.data.results || []
     registeredModels.value = mRes.data.models || []
-  } catch (e) { console.error('Load failed:', e) }
+  } catch (e) { settingsError.value = e.response?.data?.detail || 'Could not load settings. Reload before making changes.' }
 }
 
 async function refreshDiscovery() {
@@ -1175,26 +1221,40 @@ async function refreshDiscovery() {
     const mRes = await getModels()
     registeredModels.value = mRes.data.models || []
   }
-  catch (e) { console.error('Discovery failed:', e) }
+  catch (e) { settingsError.value = e.response?.data?.detail || 'Model discovery failed. Check the server address and try again.' }
   finally { discovering.value = false }
 }
 
-async function saveSettings() {
-  try {
-    await updateSettings({
-      localhost_endpoints: settings.localhost_endpoints,
-      lan_endpoints: settings.lan_endpoints,
-      provider_enabled: settings.provider_enabled,
-      active_models: settings.active_models,
-      active_model_options: settings.active_model_options,
-      openrouter_free_only: settings.openrouter_free_only,
-      vlm_endpoint: settings.vlm_endpoint,
-    })
-  }
-  catch (e) { console.error('Save failed:', e) }
+function saveSettings() {
+  const patch = JSON.parse(JSON.stringify({
+    localhost_endpoints: settings.localhost_endpoints,
+    lan_endpoints: settings.lan_endpoints,
+    provider_enabled: settings.provider_enabled,
+    active_models: settings.active_models,
+    active_model_options: settings.active_model_options,
+    openrouter_free_only: settings.openrouter_free_only,
+    vlm_endpoint: settings.vlm_endpoint,
+    pdf_options: settings.pdf_options,
+  }))
+  pendingSaves++
+  saveState.value = 'Saving changes…'
+  saveQueue = saveQueue.then(async () => {
+    try {
+      await updateSettings(patch)
+      settingsError.value = ''
+      return true
+    } catch (error) {
+      settingsError.value = error.response?.data?.detail || error.message || 'Could not save settings. Your changes have not been persisted.'
+      return false
+    } finally {
+      pendingSaves--
+      if (!pendingSaves) saveState.value = settingsError.value ? '' : 'Changes saved'
+    }
+  })
+  return saveQueue
 }
 
-async function saveAndRefresh() { await saveSettings(); await refreshDiscovery() }
+async function saveAndRefresh() { if (await saveSettings()) await refreshDiscovery() }
 
 async function testVlm() {
   if (!settings.vlm_endpoint.url) return
@@ -1278,6 +1338,15 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 </script>
 
 <style scoped>
+.parsing-options { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 16px; }
+.settings-notice { padding: 12px 16px; border: 1px solid var(--pn-border); margin-bottom: 18px; color: var(--pn-text-muted); font-size: 13px; }
+.settings-notice.error { border-left: 3px solid #c67450; color: var(--pn-text); }
+.endpoint-add { padding: 22px; margin-bottom: 32px; border: 1px solid var(--pn-border); }
+.endpoint-add-fields { display: grid; grid-template-columns: 1fr 2fr 1fr auto; align-items: end; gap: 12px; margin-top: 18px; }
+.endpoint-add-fields label { display: grid; gap: 7px; font-size: 12px; }
+.endpoint-add-fields input, .endpoint-add-fields select { width: 100%; min-width: 0; box-sizing: border-box; padding: 9px 10px; color: var(--pn-text); background: var(--pn-surface); border: 1px solid var(--pn-border); border-radius: 4px; font-size: 12px; }
+@media (max-width: 760px) { .endpoint-add-fields { grid-template-columns: 1fr; } }
+
 .settings-page {
   max-width: 1240px;
   margin: 0 auto;
@@ -1346,7 +1415,7 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
 }
 .tier-hint { font-size: 10px; color: var(--pn-text-ghost); }
 
-.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--pn-space-3); }
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: var(--pn-space-3); }
 .provider-card {
   border: 1px solid var(--pn-border);
   padding: var(--pn-space-4) var(--pn-space-4);
@@ -1725,6 +1794,9 @@ onUnmounted(() => { stopPolling(); if (benchPollTimer) clearInterval(benchPollTi
     flex-direction: column;
     align-items: flex-start;
   }
+
+  .readiness-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .readiness-stat { flex-wrap: wrap; }
 
   .score-band {
     grid-template-columns: repeat(3, minmax(52px, 1fr));

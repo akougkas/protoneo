@@ -40,7 +40,7 @@
     </div>
 
     <div v-if="importedGraphReady" class="imported-graph-ready">
-      <h3 class="gate-header">Imported Graph Ready</h3>
+      <h3 class="gate-header">Graph Ready for Review</h3>
       <p class="gate-summary">
         Saved graph loaded: {{ importedGraphStats.nodes }} entities, {{ importedGraphStats.edges }} relationships.
       </p>
@@ -144,7 +144,7 @@
           <div class="step-detail-row" v-if="pipelineSteps[step.key]?.edgesAdded">
             Edges: +{{ pipelineSteps[step.key].edgesAdded }}
           </div>
-          <div class="step-card-actions" v-if="pipelineSteps[step.key]?.status === 'complete'">
+          <div class="step-card-actions" v-if="pipelineSteps[step.key]?.status === 'complete' && graphStepKeys.includes(step.key)">
             <button class="step-action-btn" @click.stop="emit('graph-step-view', step.key)">View Graph</button>
             <button class="step-action-btn" @click.stop="rerunStep(step.key)">Re-run</button>
           </div>
@@ -230,6 +230,7 @@
       :session-id="sessionId"
       :initial-review="finalReview"
       :chair-model="chairModel"
+      :conference="sessionMeta.conference || conference"
       @ask-chair="openPcChair"
       @review-updated="onFinalReviewUpdated"
       @dirty-changed="finalReviewDirty = $event"
@@ -267,8 +268,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { getSession, getReviewPacket, connectStream, getPipelineStatus, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph, launchReview } from '../api/kernel.js'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { getSession, getReviewPacket, connectStream, getPipelineStatus, pipelineAdvance, pipelinePause, pipelineResume, pipelineCancel, exportGraph, launchReview, retrySession, getGraphSummary, pipelineStepRun } from '../api/kernel.js'
 import AgentCard from './AgentCard.vue'
 import ReviewPacket from './ReviewPacket.vue'
 import FinalReview from './ResultEditor.vue'
@@ -279,7 +280,7 @@ const props = defineProps({
   conference: { type: String, default: 'adaptive' },
 })
 
-const emit = defineEmits(['back', 'graph-update', 'graph-step-view', 'request-graph-focus', 'stage-changed'])
+const emit = defineEmits(['back', 'graph-update', 'graph-step-view', 'request-graph-focus', 'stage-changed', 'status-changed'])
 
 const stages = [
   {
@@ -307,8 +308,10 @@ const stages = [
     steps: [],
   },
 ]
+const graphStepKeys = ['nlp_prepass', 'ontology', 'extract', 'coref', 'verify', 'summarize']
 
 const status = ref('running')
+watch(status, value => emit('status-changed', value))
 const currentStage = ref('')
 const currentStep = ref('')
 const agents = ref([])
@@ -388,6 +391,7 @@ const statusColor = computed(() => {
 })
 
 const statusText = computed(() => {
+  if (importedGraphReady.value) return 'Graph ready for review'
   if (status.value === 'completed') return 'Review complete'
   if (status.value === 'failed') return 'Review failed'
   if (importedGraphReady.value) return 'Imported graph ready'
@@ -403,9 +407,10 @@ const statusText = computed(() => {
 })
 
 const importedGraphReady = computed(() =>
-  status.value === 'created'
-  && sessionMeta.value?.pipeline_mode === 'imported_graph_review'
-  && sessionMeta.value?.graph_source === 'imported'
+  ['created', 'completed'].includes(status.value)
+  && ['imported_graph_review', 'graph_only'].includes(sessionMeta.value?.pipeline_mode)
+  && !finalReview.value
+  && !!knowledgeGraphStats.value
 )
 
 const importedGraphStats = computed(() => ({
@@ -574,7 +579,7 @@ async function resumePipelineAction() {
 async function cancelPipelineAction() {
   try {
     await pipelineCancel(props.sessionId)
-    status.value = 'failed'
+    status.value = 'stopped'
     pipelinePaused.value = false
     showGate.value = false
     addEvent('Review cancelled by PC chair')
@@ -601,13 +606,13 @@ async function launchImportedReview() {
 
 async function retryPipeline() {
   try {
-    const { retrySession } = await import('../api/kernel.js')
     await retrySession(props.sessionId)
     status.value = 'running'
     error.value = ''
     addEvent('Retrying pipeline from last checkpoint...')
     // Reconnect the WebSocket stream
-    const ws = connectStream(props.sessionId)
+    if (ws) ws.close()
+    ws = connectStream(props.sessionId)
     ws.onmessage = (msg) => {
       try {
         const evt = JSON.parse(msg.data)
@@ -620,8 +625,23 @@ async function retryPipeline() {
 }
 
 function handleStreamEvent(evt) {
+  if (evt.type === 'session_reset') {
+    status.value = 'running'
+    error.value = ''
+    finalReview.value = null
+    packet.value = null
+    deliberationChat.value = []
+    agents.value = []
+    Object.assign(tokenSummary, { total: 0, completion: 0, agents: 0 })
+    for (const key of Object.keys(_rawStreams)) delete _rawStreams[key]
+    for (const key of Object.keys(displayStreams)) delete displayStreams[key]
+    startPolling()
+    return
+  }
   // ── Stage/step transitions ──────────────────────────
   if (evt.type === 'stage_started') {
+    status.value = 'running'
+    if (evt.stage === 'review') showGate.value = false
     currentStage.value = evt.stage
     currentStep.value = evt.step || ''
     pipelineMessage.value = evt.message || ''
@@ -642,7 +662,7 @@ function handleStreamEvent(evt) {
     emit('stage-changed', { stage: currentStage.value, step: evt.step })
   } else if (evt.type === 'stage_complete') {
     if (evt.stage === 'pre_review') {
-      showGate.value = true
+      showGate.value = evt.gate_required !== false
       pipelineMessage.value = ''
       // Fetch graph stats and reviewer summary for the gate
       fetchGateData()
@@ -711,7 +731,7 @@ function handleStreamEvent(evt) {
     emit('graph-update', { nodes: evt.nodes, edges: evt.edges })
     gateStats.value = { nodes: evt.node_count || 0, edges: evt.edge_count || 0 }
     addEvent(`Structural graph: ${evt.node_count} nodes`)
-  } else if (evt.type === 'step_complete' || evt.type === 'step_state') {
+  } else if (evt.type === 'step_complete' || evt.type === 'step_completed' || evt.type === 'step_state') {
     if (evt.step && pipelineSteps[evt.step]) {
       pipelineSteps[evt.step].status = evt.status || 'complete'
       pipelineSteps[evt.step].model = evt.model || pipelineSteps[evt.step].model
@@ -723,6 +743,8 @@ function handleStreamEvent(evt) {
 
   // ── Agent events ────────────────────────────────────
   else if (evt.type === 'agent_start') {
+    delete _rawStreams[evt.agent_id]
+    delete displayStreams[evt.agent_id]
     updateAgent(evt.agent_id, evt.role || evt.agent_id, 'running', { model: evt.model })
     addEvent(`${evt.role || evt.agent_id} started`)
   } else if (evt.type === 'agent_done') {
@@ -808,7 +830,7 @@ function handleStreamEvent(evt) {
     gateOntology.value = null
     addEvent(evt.message || 'Pipeline advanced')
   } else if (evt.type === 'pipeline_cancelled') {
-    status.value = 'failed'
+    status.value = 'stopped'
     pipelinePaused.value = false
     showGate.value = false
     pipelineMessage.value = ''
@@ -853,7 +875,6 @@ async function fetchPacket() {
 
 async function fetchGateData() {
   try {
-    const { getGraphSummary } = await import('../api/kernel.js')
     const res = await getGraphSummary(props.sessionId)
     gateGraphStats.value = res.data.stats
     gateReviewerSummary.value = res.data.summary
@@ -931,7 +952,6 @@ function isStaleStep(key) {
 
 async function rerunStep(stepName) {
   try {
-    const { pipelineStepRun } = await import('../api/kernel.js')
     const res = await pipelineStepRun(props.sessionId, stepName)
     const data = res.data
     addEvent(`Re-running step: ${stepName}`)
@@ -953,10 +973,29 @@ async function pollSession() {
     ])
     if (sessionRes.status !== 'fulfilled') return
     const s = sessionRes.value.data
-    const live = pipelineRes.status === 'fulfilled' ? pipelineRes.value.data : null
+    const pipelineData = pipelineRes.status === 'fulfilled' ? pipelineRes.value.data : null
+    const live = pipelineData ? { active: pipelineData.active, ...(pipelineData.pipeline_control || {}) } : null
     sessionMeta.value = s.config?.metadata || {}
     knowledgeGraphStats.value = s.knowledge_graph_stats || null
-    Object.assign(pipelineSteps, s.pipeline_steps || {})
+    for (const [key, step] of Object.entries(s.pipeline_steps || {})) {
+      pipelineSteps[key] = {
+        ...step,
+        model: step.model_used || step.model || '',
+        startedAt: step.started_at ? step.started_at * 1000 : step.startedAt,
+        duration: step.completed_at && step.started_at ? step.completed_at - step.started_at : step.duration,
+        nodesAdded: step.nodes_added || 0,
+        edgesAdded: step.edges_added || 0,
+      }
+    }
+    const finishedPhases = s.result?.metadata?.completed_phases || []
+    for (const phase of s.result?.phases || []) {
+      const key = phase.phase_name === 'independent_review' ? 'independent_reviews' : phase.phase_name
+      pipelineSteps[key] = {
+        ...pipelineSteps[key],
+        status: finishedPhases.includes(phase.phase_name) ? 'complete' : s.status === 'failed' ? 'failed' : 'running',
+        duration: phase.duration_seconds,
+      }
+    }
     if (live?.active) {
       if (live.current_stage) currentStage.value = live.current_stage
       if (live.current_step) {
@@ -974,7 +1013,7 @@ async function pollSession() {
         }
       }
       pipelinePaused.value = !!live.paused
-      showGate.value = false
+      showGate.value = !!live.paused && live.current_stage === 'pre_review' && !live.current_step
     } else if (s.current_stage) {
       currentStage.value = s.current_stage
     }
@@ -986,10 +1025,12 @@ async function pollSession() {
       addEvent('Review session completed')
       fetchPacket()
       clearInterval(pollTimer)
+      pollTimer = null
     } else if (nextStatus === 'failed' && previousStatus !== 'failed') {
       status.value = 'failed'
       error.value = s.error || 'Unknown error'
       clearInterval(pollTimer)
+      pollTimer = null
     } else {
       status.value = nextStatus
     }

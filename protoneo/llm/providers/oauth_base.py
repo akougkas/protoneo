@@ -23,7 +23,7 @@ import httpx
 logger = logging.getLogger("protoneo.llm.oauth")
 
 # Token storage location
-_TOKEN_DIR = Path.home() / ".protoneo" / "tokens"
+_TOKEN_DIR = Path(os.getenv("PROTONEO_CONFIG_DIR", str(Path.home() / ".protoneo"))).expanduser() / "tokens"
 
 
 @dataclass

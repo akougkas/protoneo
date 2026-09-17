@@ -10,7 +10,10 @@ An optional API key increases rate limits.
 import asyncio
 import logging
 import os
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .types import ToolResult
 
 import httpx
 
