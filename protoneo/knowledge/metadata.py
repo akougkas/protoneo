@@ -118,7 +118,8 @@ def _extract_title(text: str) -> str:
     candidates: list[str] = []
 
     for line in lines:
-        stripped = line.strip()
+        # Docling text keeps Markdown heading markers.
+        stripped = re.sub(r"^#+\s*", "", line.strip())
         if not stripped:
             if candidates:
                 break  # blank line after title block ends it
@@ -638,7 +639,7 @@ def extract_metadata_from_markdown(markdown: str, flat_text: str = "") -> Docume
     if title_match and not re.match(r"(abstract|\d+(\.\d+)*\.?\s|[ivx]+\.\s)", title_match.group(1).strip(), re.I):
         title = title_match.group(1).strip()
     elif flat_text:
-        title = re.sub(r"^#+\s*", "", _extract_title(flat_text))
+        title = _extract_title(flat_text)
 
     # Abstract from markdown
     abstract = ""
