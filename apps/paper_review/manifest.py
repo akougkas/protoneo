@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from protoneo import __version__
 from protoneo.config.schema import AppManifest
 from protoneo.knowledge.types import DomainConfig, SeedEntity, SeedEdge
 
@@ -108,7 +109,7 @@ async def _on_startup():
 manifest = AppManifest(
     name="paper_review",
     display_name="Paper Review",
-    version="0.1.0",
+    version=__version__,
     description="AI peer review panel for academic papers",
     router=_get_router(),
     on_register=_on_register,

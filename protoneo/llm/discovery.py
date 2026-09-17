@@ -138,10 +138,16 @@ def _normalize_lmstudio_metadata(raw_model: dict[str, Any]) -> tuple[str, dict[s
     display_name = raw_model.get("display_name") or raw_model.get("name")
     if display_name:
         metadata["display_name"] = display_name
-    context_length = _extract_context_length(raw_model)
+    # A loaded model is limited to its loaded context, not the file maximum.
+    context_length = (
+        _coerce_positive_int(raw_model.get("loaded_context_length"))
+        if raw_model.get("state") == "loaded" else None
+    ) or _extract_context_length(raw_model)
     if context_length:
         metadata["context_length"] = context_length
         metadata["context_source"] = "lmstudio"
+    if raw_model.get("type") == "vlm":
+        metadata["vision"] = True
     state = raw_model.get("state")
     if isinstance(state, str):
         metadata["loaded"] = state == "loaded"
@@ -151,10 +157,10 @@ def _normalize_lmstudio_metadata(raw_model: dict[str, Any]) -> tuple[str, dict[s
     capabilities = raw_model.get("capabilities")
     if isinstance(capabilities, dict):
         metadata["tools"] = bool(capabilities.get("trained_for_tool_use"))
-        metadata["vision"] = bool(capabilities.get("vision"))
+        metadata["vision"] = metadata.get("vision") or bool(capabilities.get("vision"))
     elif isinstance(capabilities, list):
         metadata["tools"] = "tool_use" in capabilities or "tools" in capabilities
-        metadata["vision"] = "vision" in capabilities
+        metadata["vision"] = metadata.get("vision") or "vision" in capabilities
     quantization = raw_model.get("quantization")
     if isinstance(quantization, dict):
         metadata["quantization"] = quantization.get("name") or ""

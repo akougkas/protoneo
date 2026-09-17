@@ -279,6 +279,8 @@ class GraphPipeline:
                 snap = session.graph_after_step["ontology"]
                 pg_snap = KnowledgeGraph.restore_from_snapshot(snap)
                 ontology = pg_snap.ontology
+            if ontology:
+                ontology_cache[session_id] = ontology
             logger.info("Skipping ontology (checkpoint exists)")
 
         # ── Step 4: Extraction ─────────────────────────────

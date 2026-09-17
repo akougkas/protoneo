@@ -22,6 +22,28 @@ def sanitize_error_message(error: object) -> str:
     return message
 
 
+def served_model_mismatch(provider: str, requested: str, served: object) -> str:
+    """Describe a server that answered with a model other than the one requested.
+
+    LM Studio and similar servers may answer an unknown model name with
+    whichever model is loaded, which would misattribute the output.
+    """
+    if not isinstance(served, str) or not served.strip() or not requested:
+        return ""
+
+    def names(value: str) -> set[str]:
+        value = value.strip().lower()
+        return {value, value.rsplit("/", 1)[-1], re.sub(r":\d+$", "", value)}
+
+    wanted, got = names(requested), names(served)
+    if wanted & got or any(a.startswith(b) or b.startswith(a) for a in wanted for b in got):
+        return ""
+    return (
+        f"{provider} served model '{served}' instead of the requested '{requested}'. "
+        "Load the requested model on that endpoint or choose a model it lists."
+    )
+
+
 def classify_model_error(error: object) -> tuple[str, str]:
     """Return ``(status, message)`` for known provider failure modes."""
     text = sanitize_error_message(error)

@@ -21,7 +21,7 @@ class GenericMarkdownExporter:
     async def export(self, session: Any, app_data: dict | None = None) -> bytes:
         parts: list[str] = []
         parts.append(f"# Deliberation Results: {session.session_id}\n")
-        parts.append(f"**Status:** {session.status}\n")
+        parts.append(f"**Status:** {getattr(session.status, 'value', session.status)}\n")
         parts.append(f"**Created:** {session.created_at}\n")
 
         result = session.result

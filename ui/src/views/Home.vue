@@ -4,7 +4,7 @@
       <div class="header-left">
         <div class="brand-block">
           <h1 class="logo">PROTONEO</h1>
-          <span class="version-tag">v0.1.0</span>
+          <span class="version-tag">v{{ appVersion }}</span>
         </div>
         <div class="brand-divider"></div>
         <span class="product-tag">{{ appDisplayName }}</span>
@@ -627,6 +627,8 @@ Examples:
 import { ref, reactive, computed, inject, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { getReviewReadiness, getConferences, createConferenceFromTemplate, getConference, getModels, startReview, runPreflight, getPreflightStatus, listSessions, getSettings, getActiveModelAssignments, startBatch, startBatchReview, importGraphForReview, listBatches, getPresets, activatePreset, getParsers, exportGraph } from '../api/kernel.js'
+
+const appVersion = __APP_VERSION__
 
 const router = useRouter()
 const activeApp = inject('activeApp', ref(null))

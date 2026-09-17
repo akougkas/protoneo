@@ -171,6 +171,8 @@ class CapabilityRegistry:
         litellm_model = self._litellm_model(provider, raw_model_id, endpoint)
         capabilities = self._capabilities_for(provider, raw_model_id, entry, benchmark)
         quirks = self._quirks_for(provider, raw_model_id, capabilities)
+        if entry.get("metadata_source") == "lmstudio":
+            quirks.add(ModelQuirk.REASONING_EFFORT_NONE)
         tier = self._tier_for(provider, entry, endpoint)
         benchmark_throughput = ((benchmark or {}).get("throughput") or {}).get("tokens_per_second", 0)
         runtime_location = getattr(endpoint, "location", "") or ("remote" if tier != ModelTier.LOCAL else "")

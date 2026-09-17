@@ -24,6 +24,8 @@ class ModelQuirk(str, Enum):
     THINKING_TAGS = "thinking_tags"
     REASONING_CONTENT_FIELD = "reasoning_content_field"
     HIDDEN_REASONING_FIELD = "hidden_reasoning_field"
+    # LM Studio ignores chat_template_kwargs but honors reasoning_effort="none".
+    REASONING_EFFORT_NONE = "reasoning_effort_none"
 
 
 class StructuredOutputReliability(str, Enum):

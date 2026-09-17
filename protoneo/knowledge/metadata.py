@@ -630,12 +630,15 @@ def extract_metadata_from_markdown(markdown: str, flat_text: str = "") -> Docume
     sections = [m.group(1).strip() for m in section_re.finditer(markdown)]
 
     # Title: first # header or fall back to flat text heuristic
+    # Docling emits the title as the first level-2 heading.
     title = ""
-    title_match = re.search(r"^#\s+(.+)$", markdown, re.MULTILINE)
-    if title_match:
+    title_match = re.search(r"^#\s+(.+)$", markdown, re.MULTILINE) or (
+        re.match(r"\s*##\s+(.+)$", markdown, re.MULTILINE)
+    )
+    if title_match and not re.match(r"(abstract|\d+(\.\d+)*\.?\s|[ivx]+\.\s)", title_match.group(1).strip(), re.I):
         title = title_match.group(1).strip()
     elif flat_text:
-        title = _extract_title(flat_text)
+        title = re.sub(r"^#+\s*", "", _extract_title(flat_text))
 
     # Abstract from markdown
     abstract = ""

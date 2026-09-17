@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .. import __version__
 from ..config.schema import AppManifest, AppRegistration, ProtoNeoConfig
 from ..export import create_export_registry
 from ..knowledge import create_document_processor
@@ -28,7 +29,7 @@ def create_app(
     apps: list[AppManifest] | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application."""
-    app = FastAPI(title="ProtoNeo", version="0.1.0")
+    app = FastAPI(title="ProtoNeo", version=__version__)
 
     app.add_middleware(
         CORSMiddleware,

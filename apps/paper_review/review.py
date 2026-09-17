@@ -1084,6 +1084,7 @@ def result_to_packet(
         "prompt_pack_version": prompt_pack_version,
         "conference_slug": profile.slug,
         "graph_pruning_threshold": profile.graph_pruning_threshold,
+        "overall_merit_scale": list(profile.review_form.overall_merit.scale),
         "agents": {},
     }
     for aid, cfg in _agent_configs.items():
@@ -1101,6 +1102,12 @@ def result_to_packet(
         }
     if result.metadata:
         provenance["deliberation"] = result.metadata
+    failed = [
+        {"phase": phase.phase_name, **{k: failure.get(k, "") for k in ("agent_id", "role", "model", "error")}}
+        for phase in result.phases for failure in phase.failed_agents
+    ]
+    if failed:
+        provenance["failed_agents"] = failed
 
     return ReviewPacket(
         session_id=result.session_id,

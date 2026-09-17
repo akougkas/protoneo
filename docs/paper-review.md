@@ -13,7 +13,7 @@ The Paper Review application is a pre-submission self-assessment tool for academ
 
 ## Venue Templates
 
-ProtoNeo v0.1.0 does not ship private venue prompt packs. It ships a generic review harness with an adaptive prompt pack. Users can create local venue profiles by uploading:
+ProtoNeo does not ship private venue prompt packs. It ships a generic review harness with an adaptive prompt pack. Users can create local venue profiles by uploading:
 
 - a CFP or author-instructions file in text or Markdown;
 - a review form or offline review template;

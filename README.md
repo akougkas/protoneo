@@ -4,17 +4,17 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.0-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-blue" />
   <img alt="Python" src="https://img.shields.io/badge/python-3.12-3776ab" />
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-green" />
-  <img alt="Status" src="https://img.shields.io/badge/status-release%20candidate-orange" />
+  <img alt="Status" src="https://img.shields.io/badge/status-beta-yellow" />
 </p>
 
 ProtoNeo coordinates specialized agents through structured, source-grounded deliberation. Its kernel manages model routing, ordered phases, bounded concurrency, validated outputs, persistent sessions, and recovery. Applications supply their own roles, prompts, knowledge domain, and output contracts.
 
 The first application turns an academic manuscript into a review packet: independent assessments, optional discussion rounds, and a meta-review with venue-specific scores, evidence, strengths, weaknesses, and revision suggestions. A Vue dashboard exposes the manuscript, knowledge graph, live discussion, editable final review, and exports.
 
-**Release status:** this checkout is a release candidate. The existing 32 tests, focused runtime and browser checks, a real Docling PDF parse, frontend build, and Python packaging checks have passed on Linux. Live-provider behavior and real-manuscript review quality remain the final release gate. Model-generated feedback needs human judgment before it informs a submission or conference decision.
+**Release status:** beta. Version 0.2.0 was validated on Linux with live local and LAN models (LM Studio and llama.cpp servers), real Docling parsing, complete manuscript-only and graph-backed reviews, and a clean install of the built wheel. Cloud providers were not validated for this release; see [Validation](#validation-and-packaging). Model-generated feedback can contain confident errors and needs human judgment before it informs a submission or conference decision.
 
 ## What is included
 
@@ -33,7 +33,7 @@ The first application turns an academic manuscript into a review packet: indepen
 | Tool | Supported version / purpose |
 | --- | --- |
 | Python | **3.12.x** (`>=3.12,<3.13`) |
-| Node.js | **20.19+ within Node 20, or 22.12+**; Node 22 LTS is a suitable choice |
+| Node.js | **20.19+ within Node 20, or 22.12+**; release builds used Node 22 LTS |
 | [uv](https://docs.astral.sh/uv/getting-started/installation/) | Python environment and package management |
 | Model service | A configured local/LAN endpoint or supported cloud provider |
 
@@ -73,7 +73,9 @@ Open **http://localhost:3000** for development. Vite proxies `/api` to backend p
 
 For cloud providers, configure the supported connection in Settings or set the relevant `OPENAI_API_KEY` or `OPENROUTER_API_KEY` in your shell or a local `.env`. See [.env.example](.env.example) for additional configuration. Shell environment values take precedence over `.env`.
 
-The setup indicator checks assignments, enabled providers, and configured credentials. **“Setup ready” does not ping a provider or run a model.** It cannot establish that a server is reachable or that a selected model can produce valid review output. Explicit model choices are preserved; unknown custom model names are sent to the configured endpoint without fuzzy substitution.
+The setup indicator checks assignments, enabled providers, and configured credentials. **“Setup ready” does not ping a provider or run a model.** It cannot establish that a server is reachable, that a key is still valid, or that a selected model can produce valid review output. Explicit model choices are preserved; unknown custom model names are sent to the configured endpoint without fuzzy substitution. Some local servers, including LM Studio, answer an unknown model name with whichever model is loaded. ProtoNeo rejects such responses from local and LAN endpoints with an error naming the served model, so reviews are never attributed to a model that did not produce them.
+
+Graph extraction and figure description run with reasoning disabled. LM Studio ignores the usual chat-template switch, so ProtoNeo sends `reasoning_effort: "none"` to endpoints discovered as LM Studio. For other servers, prefer non-reasoning models for graph steps; a reasoning model can spend thousands of tokens per extraction call.
 
 ### Run your first review
 
@@ -90,7 +92,7 @@ The displayed review-turn count includes initial reviewer outputs, discussion tu
 
 Docling extracts layout, manuscript text, and tables. In **Settings → PDF extraction**, enable OCR for scanned manuscripts and formula decoding when needed. Both are disabled by default and increase parsing work. An empty text extraction fails with an actionable error instead of starting a review without source material.
 
-For figure descriptions, configure an OpenAI-compatible vision service under **Settings → VLM Figure Description**. Enter its full chat-completions URL, such as `http://localhost:8081/v1/chat/completions`, and the exact model ID served by that endpoint. Set the URL and model before enabling descriptions, then use **Test Connection**. The service must support image inputs.
+For figure descriptions, configure an OpenAI-compatible vision service under **Settings → VLM Figure Description**. Enter its full chat-completions URL, such as `http://localhost:8081/v1/chat/completions`, and the exact model ID served by that endpoint. Set the URL and model before enabling descriptions, then use **Test Connection**. The test asks the model to describe a small generated chart and reports its answer, so it confirms image input and the served model rather than just reachability.
 
 **Fast PDF parsing only skips VLM figure descriptions.** It retains layout and text extraction and respects your OCR and formula settings. Preflight also skips VLM descriptions; a reachable vision service alone does not make a parsed manuscript vision-grounded.
 

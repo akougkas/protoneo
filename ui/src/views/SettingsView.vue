@@ -561,7 +561,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
-  getProviders, getSettings, updateSettings, discoverModels, getModels,
+  getProviders, getSettings, updateSettings, discoverModels, getModels, testVlmEndpoint,
   startBenchmark, getBenchmarkResults,
   beginProviderLogin, getLoginStatus, completeProviderLogin, providerLogout,
 } from '../api/kernel.js'
@@ -1261,15 +1261,12 @@ async function testVlm() {
   testingVlm.value = true
   vlmTestResult.value = null
   try {
-    const base = settings.vlm_endpoint.url.replace(/\/chat\/completions$/, '')
-    const res = await fetch(base + '/models')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    const models = data.data || data.models || []
-    const names = models.map(m => m.id || m.name).join(', ')
-    vlmTestResult.value = { ok: true, message: `Connected. Models: ${names}` }
+    const { data } = await testVlmEndpoint({ url: settings.vlm_endpoint.url, model: settings.vlm_endpoint.model })
+    vlmTestResult.value = data.ok
+      ? { ok: true, message: `${data.model} described a test chart in ${data.seconds}s: ${data.description}` }
+      : { ok: false, message: `Vision test failed: ${data.error || 'empty description'}` }
   } catch (e) {
-    vlmTestResult.value = { ok: false, message: `Connection failed: ${e.message}` }
+    vlmTestResult.value = { ok: false, message: `Vision test failed: ${e.response?.data?.detail || e.message}` }
   } finally {
     testingVlm.value = false
   }

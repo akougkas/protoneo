@@ -71,7 +71,7 @@ import { ref, computed, inject, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import SessionPanel from '../components/SessionPanel.vue'
-import { getSession, getSessionGraph, extractGraph, getGraphAtStep } from '../api/kernel.js'
+import { getSession, getSessionGraph, getGraphAtStep } from '../api/kernel.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -249,15 +249,6 @@ async function onGraphStepView(stepName) {
     console.warn('Step graph not available:', e)
   } finally {
     graphLoading.value = false
-  }
-}
-
-async function tryExtractGraph() {
-  try {
-    await extractGraph(sessionId.value)
-    await refreshGraph()
-  } catch {
-    // Extraction failed (no LLM available, etc.), use metadata graph
   }
 }
 

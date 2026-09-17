@@ -142,22 +142,6 @@ export function editOntology(sessionId, { editedEntityTypes = null, editedEdgeTy
   })
 }
 
-export function generateOntology(sessionId, model = 'mini/qwen35-distilled') {
-  const form = new FormData()
-  form.append('model', model)
-  return kernel.post(`/api/sessions/${sessionId}/generate-ontology`, form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
-}
-
-export function extractGraph(sessionId, model = 'mini/qwen35-distilled') {
-  const form = new FormData()
-  form.append('model', model)
-  return kernel.post(`/api/sessions/${sessionId}/extract-graph`, form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
-}
-
 // Settings persistence
 export function getSettings() {
   return kernel.get('/api/settings')
@@ -165,6 +149,10 @@ export function getSettings() {
 
 export function updateSettings(patch) {
   return kernel.put('/api/settings', patch)
+}
+
+export function testVlmEndpoint(endpoint) {
+  return kernel.post('/api/settings/vlm/test', endpoint)
 }
 
 export function getActiveModelAssignments() {

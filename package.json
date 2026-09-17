@@ -1,6 +1,6 @@
 {
   "name": "protoneo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ProtoNeo multi-agent deliberation kernel",
   "scripts": {
     "setup": "npm install && cd ui && npm install",

@@ -77,9 +77,12 @@ class DeliberationEngine:
         policy = policy or DeliberationPolicy()
         stream = on_event is not None if stream is None else stream
         context = self.session_manager.get_context(session_id)
+        # Re-validate before hashing so an in-memory default (600) and its
+        # persisted form (600.0) fingerprint identically on resume.
         fingerprint = hashlib.sha256(json.dumps({
-            "agents": {k: v.model_dump() for k, v in agent_configs.items()},
-            "config": deliberation_config.model_dump(), "source": user_message,
+            "agents": {k: AgentConfig.model_validate(v.model_dump()).model_dump() for k, v in agent_configs.items()},
+            "config": DeliberationConfig.model_validate(deliberation_config.model_dump()).model_dump(),
+            "source": user_message,
             "phase_contexts": context.metadata.get("phase_contexts", {}),
             "policy": f"{type(policy).__module__}.{type(policy).__qualname__}",
             "policy_config": policy.cache_key(),

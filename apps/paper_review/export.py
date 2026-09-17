@@ -272,9 +272,15 @@ def fill_linklings_offline_review_template(
     lines = template_text.splitlines()
     for title, text in _offline_text_fields(final_review).items():
         _fill_text_response(lines, title, text)
-    for title, selected in _offline_choice_fields(final_review).items():
-        if selected == "NOT ASSESSED":
-            raise ValueError(f"Offline review requires an explicit assessment for '{title}'. Complete that field before exporting.")
+    choices = _offline_choice_fields(final_review)
+    missing = [title for title, selected in choices.items() if selected == "NOT ASSESSED"]
+    if missing:
+        raise ValueError(
+            "Offline review requires explicit assessments for: "
+            + ", ".join(f"'{title}'" for title in missing)
+            + ". Complete these fields in the final review before exporting."
+        )
+    for title, selected in choices.items():
         _select_multiple_choice(lines, title, selected)
     trailing = "\n" if template_text.endswith("\n") else ""
     return "\n".join(lines) + trailing
@@ -494,6 +500,13 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
         lines.append(f"**Cost:** ${packet.total_cost:.4f}")
     lines.append("")
 
+    failed = packet.provenance_metadata.get("failed_agents") or []
+    if failed:
+        lines.append("> **Incomplete panel:** "
+                     + "; ".join(f"{f.get('role') or f.get('agent_id')} ({f.get('phase')}) failed: {f.get('error')}"
+                                 for f in failed))
+        lines.append("")
+
     # Meta-review summary (top)
     meta = packet.meta_review
     if meta.panel_summary or meta.author_facing_summary:
@@ -504,11 +517,15 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
         lines.append(meta.panel_summary or meta.author_facing_summary)
         lines.append("")
 
-    if meta.final_recommendation:
-        score = meta.final_recommendation.get("score", "")
-        label = meta.final_recommendation.get("label", "")
+    scale = packet.provenance_metadata.get("overall_merit_scale") or []
+    out_of = f"/{scale[1]}" if len(scale) == 2 else ""
+    # Edited final reviews supersede the meta-reviewer's original decision.
+    recommendation = _as_dict(packet.pc_chair_review.get("final_recommendation")) or meta.final_recommendation
+    if recommendation:
+        score = recommendation.get("score", "")
+        label = recommendation.get("label", "")
         if score or label:
-            lines.append(f"**Final Recommendation:** {score}/5 ({label})")
+            lines.append(f"**Final Recommendation:** {score}{out_of} ({label})")
             lines.append("")
 
     if meta.consensus:
@@ -529,14 +546,14 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
         lines.append("| Reviewer | Score |")
         lines.append("|----------|-------|")
         for reviewer, score in initial_scores.items():
-            lines.append(f"| {reviewer} | {score}/5 |")
+            lines.append(f"| {reviewer} | {score}{out_of} |")
         lines.append("")
         lines.append("**Final Score Distribution After Deliberation:**")
         lines.append("")
         lines.append("| Reviewer | Score |")
         lines.append("|----------|-------|")
         for reviewer, score in final_scores.items():
-            lines.append(f"| {reviewer} | {score}/5 |")
+            lines.append(f"| {reviewer} | {score}{out_of} |")
         lines.append("")
     elif meta.score_distribution:
         lines.append("**Score Distribution:**")
@@ -544,19 +561,20 @@ def packet_to_markdown(packet: ReviewPacket) -> str:
         lines.append("| Reviewer | Score |")
         lines.append("|----------|-------|")
         for reviewer, score in meta.score_distribution.items():
-            lines.append(f"| {reviewer} | {score}/5 |")
+            lines.append(f"| {reviewer} | {score}{out_of} |")
         lines.append("")
 
     # Knowledge Graph
-    if packet.graph_node_count or packet.graph_summary:
-        lines.append(f"**Knowledge Graph:** {packet.graph_node_count} nodes, {packet.graph_edge_count} edges")
+    if packet.graph_summary:
+        graph_line = f"**Knowledge Graph:** {packet.graph_node_count} nodes, {packet.graph_edge_count} edges"
         if packet.graph_utilization:
             ratio = packet.graph_utilization.get(
                 "utilization_ratio",
                 packet.graph_utilization.get("overall_ratio"),
             )
             if ratio is not None:
-                lines.append(f" | Utilization: {float(ratio):.0%}")
+                graph_line += f" | Utilization: {float(ratio):.0%}"
+        lines.append(graph_line)
         lines.append("")
 
     # Individual reviews

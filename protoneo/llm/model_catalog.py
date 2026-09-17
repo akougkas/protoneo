@@ -131,6 +131,8 @@ def normalize_model_entry(
     supports_effort = supports_reasoning_effort(provider_id, raw_id, info)
     entry_efforts = _entry_reasoning_efforts(entry)
     availability, availability_reason = _entry_availability(entry)
+    if "embed" in raw_id.lower():
+        availability, availability_reason = "unsupported", "Embedding model; it cannot generate review text."
     endpoint = endpoint_map(settings).get(provider_id)
     tier = info.tier.value
     is_local = info.tier == ModelTier.LOCAL or endpoint is not None

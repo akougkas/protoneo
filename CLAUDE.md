@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-ProtoNeo v0.1.0. Multi-agent deliberation kernel. First app: Paper Review (academic paper review).
+ProtoNeo v0.2.0. Multi-agent deliberation kernel. First app: Paper Review (academic paper review).
 
 ## Architecture
 

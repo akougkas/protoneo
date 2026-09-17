@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from ..llm.errors import served_model_mismatch
+
 logger = logging.getLogger("protoneo.knowledge.visual_evidence")
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
@@ -114,7 +116,11 @@ def describe_image(
         }
         response = httpx.post(url, json=payload, timeout=vlm_config.get("timeout", 120.0))
         response.raise_for_status()
-        raw = response.json()["choices"][0]["message"]["content"]
+        body = response.json()
+        mismatch = served_model_mismatch("Vision endpoint", model, body.get("model"))
+        if mismatch:
+            raise ValueError(mismatch)
+        raw = body["choices"][0]["message"]["content"]
         description = sanitize_description(raw if isinstance(raw, str) else str(raw))
         record["description"] = description
         record["description_source"] = "vlm" if description else "empty"

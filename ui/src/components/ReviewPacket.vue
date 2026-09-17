@@ -15,6 +15,13 @@
       </div>
     </div>
 
+    <div v-if="failedAgents.length" class="panel-warning">
+      <strong>Incomplete panel:</strong>
+      <span v-for="f in failedAgents" :key="f.phase + f.agent_id">
+        {{ f.role || f.agent_id }} ({{ f.phase }}) failed: {{ f.error }}.
+      </span>
+    </div>
+
     <!-- Score Overview -->
     <div v-if="scores.length > 0" class="score-overview">
       <h3>Score Overview</h3>
@@ -344,6 +351,8 @@ const props = defineProps({
   packet: { type: Object, required: true },
 })
 
+const failedAgents = computed(() => props.packet?.provenance_metadata?.failed_agents || [])
+
 const emit = defineEmits(['ask-chair'])
 
 const expandedReviews = ref({})
@@ -610,6 +619,15 @@ async function exportOfflineReview() {
 </script>
 
 <style scoped>
+.panel-warning {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid #d97706;
+  border-radius: 6px;
+  background: rgba(217, 119, 6, 0.08);
+  font-size: 13px;
+}
+
 .review-packet {
   margin-top: 32px;
   border-top: 2px solid #000;

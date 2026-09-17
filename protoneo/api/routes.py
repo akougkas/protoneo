@@ -284,6 +284,44 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
             _llm_client.registry = CapabilityRegistry.from_settings(updated)
         return updated.model_dump()
 
+    @app.post("/api/settings/vlm/test")
+    async def test_vlm_endpoint(body: dict[str, Any] | None = None):
+        """Describe a small synthetic chart to prove the vision endpoint works."""
+        import tempfile
+        import time
+
+        from PIL import Image, ImageDraw
+
+        from ..knowledge.visual_evidence import describe_image
+        from ..llm.errors import sanitize_error_message
+        from ..llm.settings import load_settings
+
+        config = load_settings().vlm_endpoint.model_dump()
+        config.update({key: value for key, value in (body or {}).items()
+                       if key in {"url", "model", "prompt"} and isinstance(value, str) and value.strip()})
+        if not config["url"] or not config["model"]:
+            raise HTTPException(status_code=422, detail="Enter the vision endpoint URL and model first")
+        config["timeout"] = min(float(config.get("timeout") or 120.0), 120.0)
+
+        image = Image.new("RGB", (320, 200), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((60, 120, 120, 180), fill="#4472c4")
+        draw.rectangle((180, 60, 240, 180), fill="#ed7d31")
+        draw.text((75, 100), "20", fill="black")
+        draw.text((195, 40), "40", fill="black")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = f"{tmp}/vlm-test.png"
+            image.save(path)
+            started = time.monotonic()
+            record = await asyncio.to_thread(describe_image, path, config, "figure")
+        return {
+            "ok": record["description_source"] == "vlm",
+            "model": config["model"],
+            "description": record["description"],
+            "error": sanitize_error_message(record["error"]),
+            "seconds": round(time.monotonic() - started, 1),
+        }
+
     @app.get("/api/settings/active-models")
     async def get_active_model_assignments():
         """Return ready-to-use active model routing for the panel pipeline."""
@@ -1164,6 +1202,11 @@ def register_kernel_routes(app: FastAPI, config: ProtoNeoConfig | None = None) -
     async def get_session_ontology(session_id: str):
         """Get the generated ontology for a session."""
         ontology = _session_ontologies.get(session_id)
+        if not ontology:
+            # The in-memory cache is empty after a restart; use the persisted graph.
+            session = await _session_manager.get(session_id)
+            if session and session.knowledge_graph:
+                ontology = KnowledgeGraph.model_validate(session.knowledge_graph).ontology
         if not ontology:
             raise HTTPException(status_code=404, detail="No ontology generated for this session")
         return {

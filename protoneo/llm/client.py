@@ -30,10 +30,10 @@ from litellm.exceptions import (
 )
 
 from .policies import policy_for_label
-from .errors import sanitize_error_message
+from .errors import sanitize_error_message, served_model_mismatch
 from .registry import CapabilityRegistry
 from .structured import extract_json_value, strip_thinking_output
-from .types import LLMResponse, ModelCapability, ModelInfo, TokenUsage
+from .types import LLMResponse, ModelCapability, ModelInfo, ModelQuirk, TokenUsage
 
 logger = logging.getLogger("protoneo.llm.client")
 if TYPE_CHECKING:
@@ -70,6 +70,24 @@ def _is_openai_oauth(provider: str, api_key: str) -> bool:
     """OpenAI OAuth tokens are JWTs (eyJ...) from ChatGPT subscription login."""
     return provider == "openai" and api_key.startswith("eyJ")
 
+
+
+def _served_model_mismatch(info: ModelInfo, served: Any) -> str:
+    """Enforce exact routing for configured local and LAN endpoints."""
+    if not info.api_base:
+        return ""
+    requested = (info.litellm_model or info.model_id).split("/", 1)[-1]
+    return served_model_mismatch(info.provider, requested, served)
+
+
+def _endpoint_error(info: ModelInfo, exc: Exception) -> ConnectionError | None:
+    """Name the unreachable configured endpoint instead of a bare connection error."""
+    if not info.api_base or "connection error" not in str(exc).lower():
+        return None
+    return ConnectionError(
+        f"Cannot reach {info.provider} at {info.api_base} for model "
+        f"'{info.model_id}'. Check that the server is running and reachable."
+    )
 
 
 def _extract_openai_account_id(jwt_token: str) -> str:
@@ -404,6 +422,8 @@ class LLMClient:
         chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
         if policy.enable_thinking is False:
             chat_template_kwargs["enable_thinking"] = False
+            if ModelQuirk.REASONING_EFFORT_NONE in info.quirks:
+                extra_body["reasoning_effort"] = "none"
         elif (
             policy.enable_thinking is True
             and ModelCapability.EXTENDED_THINKING in info.capabilities
@@ -513,32 +533,42 @@ class LLMClient:
         call_kwargs = await self._build_kwargs_async(model, messages, **call_overrides)
 
         last_error: Exception | None = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                response: ModelResponse = await acompletion(**call_kwargs)
-                break
-            except _RETRYABLE_EXCEPTIONS as exc:
-                last_error = exc
-                if attempt == max_retries:
-                    raise
-                delay = _BASE_DELAY * (2 ** (attempt - 1))
-                logger.warning(
-                    "LLM call attempt %d/%d failed (model=%s): %s. Retrying in %.1fs",
-                    attempt, max_retries, model, exc, delay,
-                )
-                await asyncio.sleep(delay)
-            except APIError as exc:
-                status = getattr(exc, "status_code", None)
-                if status and status >= 500 and attempt < max_retries:
+        try:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response: ModelResponse = await acompletion(**call_kwargs)
+                    break
+                except _RETRYABLE_EXCEPTIONS as exc:
                     last_error = exc
+                    if attempt == max_retries:
+                        raise
                     delay = _BASE_DELAY * (2 ** (attempt - 1))
                     logger.warning(
-                        "LLM call attempt %d/%d got %d (model=%s): %s. Retrying in %.1fs",
-                        attempt, max_retries, status, model, exc, delay,
+                        "LLM call attempt %d/%d failed (model=%s): %s. Retrying in %.1fs",
+                        attempt, max_retries, model, exc, delay,
                     )
                     await asyncio.sleep(delay)
-                else:
-                    raise
+                except APIError as exc:
+                    status = getattr(exc, "status_code", None)
+                    if status and status >= 500 and attempt < max_retries:
+                        last_error = exc
+                        delay = _BASE_DELAY * (2 ** (attempt - 1))
+                        logger.warning(
+                            "LLM call attempt %d/%d got %d (model=%s): %s. Retrying in %.1fs",
+                            attempt, max_retries, status, model, exc, delay,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+        except Exception as exc:
+            error = _endpoint_error(info, exc)
+            if error is None:
+                raise
+            raise error from exc
+
+        mismatch = _served_model_mismatch(info, getattr(response, "model", None))
+        if mismatch:
+            raise ValueError(mismatch)
 
         msg = response.choices[0].message
         content = msg.content or ""
@@ -578,7 +608,11 @@ class LLMClient:
             if not isinstance(candidate, str) or not candidate.strip():
                 continue
             value = extract_json_value(candidate, allow_thinking_json=True)
-            if value is not None:
+            # Reasoning text is full of bracketed citations such as "[3]";
+            # only a JSON object or a list of objects is a plausible payload.
+            if isinstance(value, dict) or (
+                isinstance(value, list) and value and all(isinstance(item, dict) for item in value)
+            ):
                 return json.dumps(value, ensure_ascii=False)
         return ""
 
@@ -638,7 +672,30 @@ class LLMClient:
             call_overrides["max_tokens"] = max_tokens
         call_kwargs = await self._build_kwargs_async(model, messages, **call_overrides)
 
-        response = await acompletion(**call_kwargs)
+        try:
+            response = await acompletion(**call_kwargs)
+        except Exception as exc:
+            error = _endpoint_error(info, exc)
+            if error is None:
+                raise
+            raise error from exc
+        served_mismatch: list[str] = []
+        raw_stream = getattr(response, "completion_stream", None) if info.api_base else None
+        if raw_stream is not None and hasattr(raw_stream, "__aiter__"):
+            # LiteLLM rewrites chunk.model to the requested name, so inspect
+            # the provider's own chunks to detect a substituted model.
+            async def _checked_stream(raw=raw_stream):
+                checked = False
+                async for raw_chunk in raw:
+                    if not checked and getattr(raw_chunk, "model", None):
+                        checked = True
+                        mismatch = _served_model_mismatch(info, raw_chunk.model)
+                        if mismatch:
+                            served_mismatch.append(mismatch)
+                            return
+                    yield raw_chunk
+
+            response.completion_stream = _checked_stream()
         usage = TokenUsage()
         try:
             async for chunk in response:
@@ -651,6 +708,8 @@ class LLMClient:
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if delta and delta.content:
                     yield delta.content
+            if served_mismatch:
+                raise ValueError(served_mismatch[0])
         finally:
             if session_id:
                 self._session_costs[session_id] += usage.cost

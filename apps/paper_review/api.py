@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
+from protoneo import __version__
 from protoneo.api.routes import (
     PipelineControl,
     SessionEventBus,
@@ -49,7 +50,7 @@ from .conference import (
     save_profile_mapping,
 )
 _APP_NAME = "paper_review"
-_APP_VERSION = "0.1.0"
+_APP_VERSION = __version__
 from .context_audit import build_context_audit_artifact, summarize_context_audit
 from .export import packet_to_markdown, packet_to_pdf, write_review_artifacts
 from .graph_usage import compute_review_graph_utilization, compute_review_graph_value_metrics
@@ -1874,6 +1875,11 @@ _PROTECTED_REVIEW_DECISION_FIELDS = {
     "reviewer_expertise",
     "level_of_expertise",
     "best_paper_consideration",
+    "relevance",
+    "technical_soundness",
+    "technical_importance",
+    "originality",
+    "quality_of_presentation",
 }
 
 _PROTECTED_REVIEW_DECISION_SUBFIELDS = {
@@ -1928,6 +1934,11 @@ def _decision_change_explicitly_requested(message: str) -> bool:
     )
     targets = (
         "score",
+        "rating",
+        "soundness",
+        "originality",
+        "relevance",
+        "importance",
         "merit",
         "recommendation",
         "recommended action",
@@ -2356,7 +2367,10 @@ async def write_session_review_artifacts(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    manifest, output_dir = await _write_review_artifacts_for_session(session)
+    try:
+        manifest, output_dir = await _write_review_artifacts_for_session(session)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     await _session_manager.update(session)
     return {
         "status": "written",
@@ -2385,7 +2399,10 @@ async def download_linklings_review(session_id: str):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    manifest, output_dir = await _write_review_artifacts_for_session(session)
+    try:
+        manifest, output_dir = await _write_review_artifacts_for_session(session)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     await _session_manager.update(session)
 
     paper_id = str(metadata.get("packet_paper_id") or packet_dir.name)
@@ -2537,7 +2554,7 @@ async def review_with_graph(
 class PacketReviewBody(BaseModel):
     packet_root: str = "submission_packets"
     paper_ids: list[str] = Field(default_factory=list)
-    conference: str = "adaptive"
+    conference: str
     model_map: dict[str, Any] = Field(default_factory=dict)
     preset: str = ""
     max_rounds: int = 2
@@ -2586,7 +2603,7 @@ def _packet_output_dir(packet_dir: Path, run_id: str = "") -> Path:
 
 def _packet_title_from_template(template_path: Path) -> str:
     text = template_path.read_text(errors="ignore")
-    match = re.search(r"<<\s*submission reviewed:\s*\([^)]+\)\s*(.*?)\s*>>", text)
+    match = re.search(r"<<\s*submission reviewed:\s*\([^)]+\)\s*(.*?)\s*>>", text, re.IGNORECASE)
     return match.group(1).strip() if match else template_path.stem
 
 
@@ -2657,7 +2674,7 @@ def _locate_saved_graph_for_packet(packet_dir: Path, title: str) -> Path | None:
         if candidate.is_file():
             return candidate
 
-    graph_dir = Path("data/sessions/graphs")
+    graph_dir = Path(get_config().storage.session_dir) / "graphs"
     if not graph_dir.exists():
         return None
 
@@ -2984,6 +3001,10 @@ async def start_packet_review(body: PacketReviewBody):
             context_mode=body.context_mode,
             output_subdir=body.output_subdir,
         )
+        for item in result["results"]:
+            if item.get("status") not in {"completed", "skipped_completed"}:
+                logger.warning("Packet review %s: %s %s", item.get("paper_id"), item.get("status"),
+                               item.get("message") or item.get("error") or "")
         batch_bus.emit("batch_complete", {
             "batch_id": batch_id,
             **result,
